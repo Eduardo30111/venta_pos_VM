@@ -1,0 +1,20 @@
+{
+    "nombre_negocio": "SaloPos",
+    "razon_social": "Fritos Salo",
+    "subtitulo_negocio": "Centro de Copiado & Papelería",
+    "tipo_documento_fiscal": "NIT",
+    "nit": "2203912",
+    "regimen_fiscal": "",
+    "direccion": "calle 2b",
+    "ciudad": "Puerto Colombia",
+    "telefono": "3147774034",
+    "email": "sanchezsierraeduardo@gmail.com",
+    "eslogan": "Servicios de Impresión, Copiado y Papelería",
+    "encabezado_recibo": "",
+    "tipo_comprobante": "FACTURA DE VENTA POS",
+    "prefijo_comprobante": "",
+    "color_barra": "#0284C7",
+    "color_login": "#1E40AF",
+    "logo_path": "",
+    "logo_thermal_path": ""
+}

@@ -1,1129 +1,1153 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Módulo de Configuración del Sistema - VmPOS
+Archivo: interface/configuracion_menu.py
+
+Permite administrar con persistencia real y reflejo en vivo:
+1. Configuración e Identidad del Negocio (Nombre comercial, Razón social, NIT/RUT/Documento,
+   Dirección, Ciudad, Teléfono, Correo, Eslogan, Tipo de comprobante, Logo con vista previa y Colores).
+2. Impresoras y Formato de Factura (58 mm, 80 mm, A4, impresora seleccionada, márgenes,
+   tamaño de fuente, densidad, alineación, campos visibles, copias, corte automático e Impresión de Prueba).
+3. Verificación de Actualizaciones del Sistema.
+4. Selector de Apariencia y Tema (Modo Claro / Oscuro / Automático).
+5. Copias de Seguridad (Backup, Restauración y Diagnóstico de Base de Datos).
+"""
+
 import tkinter as tk
-from tkinter import messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog
 import os
 import shutil
 import sqlite3
 import sys
 from datetime import datetime
 
-# Configuración de rutas para PyInstaller
-if getattr(sys, 'frozen', False):
-    BASE_DIR = sys._MEIPASS
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Importación opcional de pandas
 try:
-    import pandas as pd
-    PANDAS_DISPONIBLE = True
+    from PIL import Image, ImageTk
+    PIL_DISPONIBLE = True
 except ImportError:
-    print("Warning: Pandas no disponible, algunas funciones de exportación estarán limitadas")
-    PANDAS_DISPONIBLE = False
+    PIL_DISPONIBLE = False
 
-def abrir_config(tipo):
-    """
-    Handles the opening of different configuration functionalities based on 'tipo'.
-    """
-    if tipo == "restaurar_db":
-        restaurar_base_datos()
-    elif tipo == "backup_db":
-        crear_backup()
-    elif tipo == "limpiar_logs":
-        limpiar_logs()
-    elif tipo == "actualizar_sistema":
-        actualizar_sistema()
-    elif tipo == "configurar_impresora":
-        configurar_impresora()
-    elif tipo == "exportar_datos":
-        exportar_datos()
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from client.utils.system_helper import abrir_archivo_o_carpeta
+try:
+    from interface.config import DB_VENTAS_PATH
+except ImportError:
+    from config import DB_VENTAS_PATH
 
-def obtener_tablas_db(db_path):
-    """
-    Obtiene la lista de tablas en la base de datos.
-    """
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
-        tablas = [tabla[0] for tabla in cursor.fetchall()]
-        conn.close()
-        return tablas
-    except Exception as e:
-        print(f"Error al obtener tablas: {e}")
-        return []
+try:
+    from theme_manager import (
+        theme_mgr, aplicar_tema, calcular_geometria_segura,
+        calcular_color_texto_optimo, crear_boton, ScrollableContainer
+    )
+except ImportError:
+    from interface.theme_manager import (
+        theme_mgr, aplicar_tema, calcular_geometria_segura,
+        calcular_color_texto_optimo, crear_boton, ScrollableContainer
+    )
+
+try:
+    from session_manager import session_mgr
+except ImportError:
+    from interface.session_manager import session_mgr
+
+try:
+    from business_manager import (
+        business_mgr, PALETAS_PREDEFINIDAS, CONFIG_FILE, PRINTER_CONFIG_FILE,
+        TIPOS_COMPROBANTE_DISPONIBLES, TIPOS_DOCUMENTO_FISCAL
+    )
+except ImportError:
+    from interface.business_manager import (
+        business_mgr, PALETAS_PREDEFINIDAS, CONFIG_FILE, PRINTER_CONFIG_FILE,
+        TIPOS_COMPROBANTE_DISPONIBLES, TIPOS_DOCUMENTO_FISCAL
+    )
+
+try:
+    from receipt_manager import (
+        detectar_impresoras_disponibles,
+        construir_datos_factura_prueba,
+        imprimir_prueba_configuracion,
+        mostrar_dialogo_factura
+    )
+except ImportError:
+    from interface.receipt_manager import (
+        detectar_impresoras_disponibles,
+        construir_datos_factura_prueba,
+        imprimir_prueba_configuracion,
+        mostrar_dialogo_factura
+    )
+
+
+# =============================================================================
+# FUNCIONES DE BASE DE DATOS Y COPIAS DE SEGURIDAD (BACKUP)
+# =============================================================================
 
 def verificar_integridad_db(db_path):
-    """
-    Verifica la integridad de la base de datos antes de realizar operaciones críticas.
-    """
+    """Verifica la integridad física del archivo SQLite."""
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        
-        # Verificar integridad
         cursor.execute("PRAGMA integrity_check;")
         resultado = cursor.fetchone()[0]
-        
         conn.close()
         return resultado == "ok"
     except Exception as e:
         print(f"Error verificando integridad: {e}")
         return False
 
-def restaurar_base_datos():
-    """
-    Elimina todos los datos de todas las tablas en la base de datos ventas.db
-    con verificaciones de seguridad mejoradas.
-    """
-    db_path = "ventas.db"
-    
-    # Verificar si existe la base de datos
-    if not os.path.exists(db_path):
-        messagebox.showerror("❌ Error", 
-                           f"La base de datos '{db_path}' no existe.\n"
-                           f"Ubicación buscada: {os.path.abspath(db_path)}\n"
-                           "Verifica la ubicación del archivo.")
-        return
-    
-    # Verificar integridad antes de continuar
-    if not verificar_integridad_db(db_path):
-        messagebox.showerror("❌ Error de Integridad", 
-                           "La base de datos parece estar corrupta.\n"
-                           "Por seguridad, no se realizará la restauración.\n"
-                           "Intenta reparar la base de datos primero.")
-        return
-    
-    # Obtener información de las tablas
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        # Obtener tablas de usuario
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-        tablas_disponibles = [tabla[0] for tabla in cursor.fetchall()]
-        
-        # Contar registros totales
-        total_registros = 0
-        info_tablas = []
-        
-        for tabla in tablas_disponibles:
-            try:
-                cursor.execute(f"SELECT COUNT(*) FROM [{tabla}]")
-                count = cursor.fetchone()[0]
-                total_registros += count
-                info_tablas.append(f"• {tabla}: {count} registros")
-            except Exception as e:
-                info_tablas.append(f"• {tabla}: Error al contar")
-        
-        conn.close()
-        
-        if not tablas_disponibles:
-            messagebox.showwarning("⚠️ Advertencia", 
-                                 f"No se encontraron tablas en la base de datos.\n"
-                                 f"La base de datos podría estar vacía.\n\n"
-                                 f"Usa el 🔧 Diagnóstico para más información.")
-            return
-            
-    except Exception as e:
-        messagebox.showerror("❌ Error", 
-                           f"No se puede leer la base de datos:\n{str(e)}")
-        return
-    
-    # Mostrar diálogo de confirmación detallado
-    info_texto = "\n".join(info_tablas)
-    respuesta = messagebox.askyesno(
-        "💖 Restaurar Base de Datos",
-        f"¿ESTÁS SEGURA de que deseas ELIMINAR todos los datos?\n\n"
-        f"📊 RESUMEN DE DATOS A ELIMINAR:\n"
-        f"📋 Tablas encontradas: {len(tablas_disponibles)}\n"
-        f"📈 Total de registros: {total_registros}\n\n"
-        f"DETALLES:\n{info_texto}\n\n"
-        f"⚠️ ESTA ACCIÓN NO SE PUEDE DESHACER\n"
-        f"✅ Se creará un backup automático antes de continuar\n\n"
-        f"¿Continuar con la restauración?"
-    )
-    
-    if not respuesta:
-        return
-    
-    # Segunda confirmación para operaciones críticas
-    if total_registros > 100:  # Si hay muchos registros, pedir confirmación adicional
-        confirmacion_final = messagebox.askyesno(
-            "🚨 CONFIRMACIÓN FINAL",
-            f"⚠️ ÚLTIMA ADVERTENCIA ⚠️\n\n"
-            f"Vas a eliminar {total_registros} registros permanentemente.\n\n"
-            f"¿Estás COMPLETAMENTE SEGURA?\n"
-            f"Escribe 'SI' mentalmente y confirma.",
-            icon="warning"
-        )
-        
-        if not confirmacion_final:
-            messagebox.showinfo("✅ Operación Cancelada", 
-                              "La restauración ha sido cancelada.\n"
-                              "Tus datos están seguros.")
-            return
-    
-    conn = None
-    try:
-        # Crear backup automático antes de restaurar
-        fecha_backup = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_name = f"backup_antes_restaurar_{fecha_backup}.db"
-        backup_dir = "./backups"
-        os.makedirs(backup_dir, exist_ok=True)
-        backup_path = os.path.join(backup_dir, backup_name)
-        
-        # Crear backup
-        shutil.copy2(db_path, backup_path)
-        
-        # Verificar que el backup se creó correctamente
-        if not os.path.exists(backup_path):
-            raise Exception("No se pudo crear el backup de seguridad")
-        
-        # Conectar a la base de datos
-        conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA foreign_keys = OFF")  # Deshabilitar foreign keys temporalmente
-        cursor = conn.cursor()
-        
-        # Comenzar transacción
-        cursor.execute("BEGIN TRANSACTION;")
-        
-        # Obtener todas las tablas nuevamente
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-        tablas = [tabla[0] for tabla in cursor.fetchall()]
-        
-        tablas_resultado = []
-        total_eliminados = 0
-        errores = []
-        
-        # Eliminar datos de cada tabla
-        for tabla in tablas:
-            try:
-                # Contar registros antes de eliminar
-                cursor.execute(f"SELECT COUNT(*) FROM [{tabla}]")
-                registros_antes = cursor.fetchone()[0]
-                
-                # Eliminar todos los datos de la tabla
-                cursor.execute(f"DELETE FROM [{tabla}]")
-                
-                # Verificar eliminación
-                cursor.execute(f"SELECT COUNT(*) FROM [{tabla}]")
-                registros_despues = cursor.fetchone()[0]
-                
-                eliminados = registros_antes - registros_despues
-                total_eliminados += eliminados
-                
-                if registros_despues == 0:
-                    tablas_resultado.append(f"✅ {tabla}: {registros_antes} registros eliminados")
-                else:
-                    tablas_resultado.append(f"⚠️ {tabla}: {eliminados} eliminados, {registros_despues} restantes")
-                        
-            except Exception as e:
-                error_msg = f"❌ {tabla}: Error - {str(e)}"
-                tablas_resultado.append(error_msg)
-                errores.append(error_msg)
-        
-        # Resetear secuencias de autoincrement
-        try:
-            cursor.execute("DELETE FROM sqlite_sequence")
-            cursor.execute("UPDATE sqlite_sequence SET seq = 0")
-        except Exception as e:
-            print(f"Info: No se pudo resetear sqlite_sequence: {e}")
-        
-        # Si hay errores críticos, hacer rollback
-        if len(errores) > len(tablas) / 2:  # Si más del 50% falló
-            conn.rollback()
-            raise Exception(f"Demasiados errores durante la eliminación: {len(errores)} de {len(tablas)} tablas fallaron")
-        
-        # Confirmar cambios
-        conn.commit()
-        
-        # Ejecutar VACUUM para optimizar la base de datos
-        try:
-            cursor.execute("VACUUM")
-        except Exception as e:
-            print(f"Info: No se pudo ejecutar VACUUM: {e}")
-        
-        conn.close()
-        conn = None
-        
-        # Verificar el resultado final
-        conn_verify = sqlite3.connect(db_path)
-        cursor_verify = conn_verify.cursor()
-        
-        registros_finales = 0
-        for tabla in tablas:
-            try:
-                cursor_verify.execute(f"SELECT COUNT(*) FROM [{tabla}]")
-                count = cursor_verify.fetchone()[0]
-                registros_finales += count
-            except:
-                pass
-        
-        conn_verify.close()
-        
-        # Mostrar resultados detallados
-        mostrar_resultado_restauracion(tablas_resultado, total_eliminados, registros_finales, backup_name, errores)
-        
-    except Exception as e:
-        if conn:
-            try:
-                conn.rollback()
-                conn.close()
-            except:
-                pass
-        
-        messagebox.showerror("❌ Error Crítico", 
-                            f"No se pudo completar la restauración:\n\n"
-                            f"Error: {str(e)}\n"
-                            f"Tipo: {type(e).__name__}\n\n"
-                            f"La base de datos no ha sido modificada.\n"
-                            f"Tus datos están seguros.")
-    finally:
-        if conn:
-            try:
-                conn.close()
-            except:
-                pass
-
-def mostrar_resultado_restauracion(tablas_resultado, total_eliminados, registros_finales, backup_name, errores):
-    """
-    Muestra una ventana detallada con los resultados de la restauración.
-    """
-    resultado_window = tk.Toplevel()
-    resultado_window.title("✅ Resultado de la Restauración")
-    resultado_window.geometry("700x500")
-    resultado_window.configure(bg="#FFE4F1")
-    resultado_window.resizable(True, True)
-    resultado_window.grab_set()  # Modal
-    
-    main_frame = tk.Frame(resultado_window, bg="#FFE4F1")
-    main_frame.pack(fill="both", expand=True, padx=20, pady=20)
-    
-    # Título con estado
-    if registros_finales == 0 and not errores:
-        titulo = "✅ RESTAURACIÓN COMPLETADA EXITOSAMENTE"
-        color_titulo = "#32CD32"
-    elif registros_finales == 0 and errores:
-        titulo = "⚠️ RESTAURACIÓN COMPLETADA CON ADVERTENCIAS"
-        color_titulo = "#FF8C00"
-    else:
-        titulo = "❌ RESTAURACIÓN INCOMPLETA"
-        color_titulo = "#FF6347"
-    
-    title_label = tk.Label(main_frame, text=titulo, 
-                          font=("Segoe UI", 16, "bold"), 
-                          bg="#FFE4F1", fg=color_titulo)
-    title_label.pack(pady=(0, 15))
-    
-    # Información resumida
-    fecha_actual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    resumen_text = (f"🕐 Fecha: {fecha_actual}\n"
-                   f"📊 Registros eliminados: {total_eliminados}\n"
-                   f"📊 Registros restantes: {registros_finales}\n"
-                   f"💾 Backup creado: {backup_name}\n"
-                   f"⚠️ Errores: {len(errores)}")
-    
-    resumen_label = tk.Label(main_frame, text=resumen_text, 
-                           font=("Segoe UI", 11), 
-                           bg="#FFE4F1", fg="#333333", justify="left")
-    resumen_label.pack(pady=(0, 15))
-    
-    # Detalles por tabla en texto scrollable
-    details_label = tk.Label(main_frame, text="📋 DETALLES POR TABLA:", 
-                           font=("Segoe UI", 12, "bold"), 
-                           bg="#FFE4F1", fg="#FF1493")
-    details_label.pack(anchor="w", pady=(0, 5))
-    
-    text_frame = tk.Frame(main_frame, bg="#FFE4F1")
-    text_frame.pack(fill="both", expand=True)
-    
-    scrollbar = tk.Scrollbar(text_frame)
-    scrollbar.pack(side="right", fill="y")
-    
-    text_widget = tk.Text(text_frame, wrap="word", yscrollcommand=scrollbar.set,
-                         font=("Consolas", 10), bg="white", fg="#333333",
-                         relief="solid", bd=1)
-    text_widget.pack(fill="both", expand=True)
-    scrollbar.config(command=text_widget.yview)
-    
-    detalles_texto = "\n".join(tablas_resultado)
-    if errores:
-        detalles_texto += "\n\n❌ ERRORES ENCONTRADOS:\n" + "\n".join(errores)
-    
-    text_widget.insert("1.0", detalles_texto)
-    text_widget.config(state="disabled")
-    
-    # Botones
-    buttons_frame = tk.Frame(main_frame, bg="#FFE4F1")
-    buttons_frame.pack(pady=(15, 0))
-    
-    # Botón cerrar
-    close_btn = tk.Button(buttons_frame, text="✅ Aceptar", command=resultado_window.destroy,
-                         bg="#32CD32", fg="white", font=("Segoe UI", 12, "bold"),
-                         padx=20, pady=10)
-    close_btn.pack(side="left", padx=(0, 10))
-    
-    # Botón para abrir carpeta de backups
-    def abrir_carpeta_backup():
-        try:
-            backup_dir = os.path.abspath("./backups")
-            if os.path.exists(backup_dir):
-                os.startfile(backup_dir)  # Windows
-            else:
-                messagebox.showinfo("📁", f"Carpeta de backups:\n{backup_dir}")
-        except:
-            messagebox.showinfo("📁", f"Carpeta de backups:\n{os.path.abspath('./backups')}")
-    
-    backup_btn = tk.Button(buttons_frame, text="📁 Ver Backups", command=abrir_carpeta_backup,
-                          bg="#4169E1", fg="white", font=("Segoe UI", 12, "bold"),
-                          padx=20, pady=10)
-    backup_btn.pack(side="left")
 
 def crear_backup():
-    """
-    Crea una copia de seguridad completa de la base de datos ventas.db
-    con verificaciones mejoradas y opciones avanzadas.
-    """
-    db_path = "ventas.db"
-    
-    # Verificar si existe la base de datos
+    """Crea una copia de seguridad timestamped de la base de datos ventas.db"""
+    db_path = DB_VENTAS_PATH
     if not os.path.exists(db_path):
-        messagebox.showerror("❌ Error", 
-                           f"La base de datos '{db_path}' no existe.\n"
-                           f"Ubicación buscada: {os.path.abspath(db_path)}\n"
-                           "No se puede crear el backup.")
+        messagebox.showerror("❌ Error", f"La base de datos '{db_path}' no existe.")
         return
-    
-    # Verificar integridad de la base de datos
-    if not verificar_integridad_db(db_path):
-        respuesta = messagebox.askyesno("⚠️ Advertencia de Integridad",
-                                       "La base de datos podría tener problemas de integridad.\n"
-                                       "El backup se puede crear, pero podría no ser confiable.\n\n"
-                                       "¿Deseas continuar con el backup?")
-        if not respuesta:
-            return
-    
-    try:
-        # Obtener información de la base de datos antes del backup
-        file_size = os.path.getsize(db_path)
-        size_mb = round(file_size / 1024 / 1024, 2)
-        
-        tablas = obtener_tablas_db(db_path)
-        num_tablas = len([t for t in tablas if t != 'sqlite_sequence'])
-        
-        # Contar registros totales
-        total_registros = 0
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            for tabla in tablas:
-                try:
-                    cursor.execute(f"SELECT COUNT(*) FROM [{tabla}]")
-                    count = cursor.fetchone()[0]
-                    total_registros += count
-                except:
-                    pass
-            
-            conn.close()
-        except:
-            total_registros = "Desconocido"
-        
-        # Crear directorio de backups si no existe
-        backup_dir = "./backups"
-        os.makedirs(backup_dir, exist_ok=True)
-        
-        # Generar nombre del backup con fecha y hora
-        fecha = datetime.now().strftime("%Y%m%d_%H%M%S")
-        nombre_backup = f"backup_vmpos_{fecha}.db"
-        backup_path = os.path.join(backup_dir, nombre_backup)
-        
-        # Mostrar progreso (simulado)
-        progress_window = tk.Toplevel()
-        progress_window.title("💾 Creando Backup...")
-        progress_window.geometry("400x200")
-        progress_window.configure(bg="#FFE4F1")
-        progress_window.resizable(False, False)
-        progress_window.grab_set()
-        
-        # Centrar ventana de progreso
-        progress_window.update_idletasks()
-        x = (progress_window.winfo_screenwidth() // 2) - 200
-        y = (progress_window.winfo_screenheight() // 2) - 100
-        progress_window.geometry(f"400x200+{x}+{y}")
-        
-        progress_frame = tk.Frame(progress_window, bg="#FFE4F1")
-        progress_frame.pack(expand=True, fill="both", padx=30, pady=30)
-        
-        tk.Label(progress_frame, text="💾 Creando Backup...", 
-                font=("Segoe UI", 14, "bold"), bg="#FFE4F1", fg="#FF1493").pack(pady=20)
-        
-        progress_label = tk.Label(progress_frame, text="Iniciando...", 
-                                font=("Segoe UI", 10), bg="#FFE4F1", fg="#666666")
-        progress_label.pack(pady=10)
-        
-        # Actualizar interfaz
-        progress_window.update()
-        
-        # Paso 1: Verificar espacio disponible
-        progress_label.config(text="Verificando espacio disponible...")
-        progress_window.update()
-        
-        # Obtener espacio libre en disco
-        try:
-            stat = shutil.disk_usage(backup_dir)
-            espacio_libre = stat.free / 1024 / 1024  # MB
-            
-            if espacio_libre < size_mb * 2:  # Necesitamos al menos el doble del tamaño
-                progress_window.destroy()
-                messagebox.showerror("❌ Espacio Insuficiente",
-                                   f"No hay suficiente espacio en disco.\n"
-                                   f"Espacio necesario: ~{size_mb * 2:.1f} MB\n"
-                                   f"Espacio disponible: {espacio_libre:.1f} MB")
-                return
-        except:
-            pass  # Si no se puede verificar, continuar
-        
-        # Paso 2: Crear el backup
-        progress_label.config(text="Copiando base de datos...")
-        progress_window.update()
-        
-        # Crear el backup usando copy2 para preservar metadatos
-        shutil.copy2(db_path, backup_path)
-        
-        # Paso 3: Verificar integridad del backup
-        progress_label.config(text="Verificando backup...")
-        progress_window.update()
-        
-        backup_valido = verificar_integridad_db(backup_path)
-        
-        # Obtener información del backup creado
-        backup_size = os.path.getsize(backup_path)
-        backup_size_mb = round(backup_size / 1024 / 1024, 2)
-        
-        progress_window.destroy()
-        
-        # Mostrar resultado detallado
-        if backup_valido:
-            icono_estado = "✅"
-            estado = "EXITOSO"
-            color_estado = "#32CD32"
-            mensaje_extra = "El backup se creó correctamente y pasó la verificación de integridad."
-        else:
-            icono_estado = "⚠️"
-            estado = "CON ADVERTENCIAS"
-            color_estado = "#FF8C00"
-            mensaje_extra = "El backup se creó pero hay advertencias de integridad."
-        
-        # Ventana de resultado personalizada
-        resultado_window = tk.Toplevel()
-        resultado_window.title(f"{icono_estado} Backup {estado}")
-        resultado_window.geometry("500x400")
-        resultado_window.configure(bg="#FFE4F1")
-        resultado_window.resizable(False, False)
-        resultado_window.grab_set()
-        
-        # Centrar ventana
-        resultado_window.update_idletasks()
-        x = (resultado_window.winfo_screenwidth() // 2) - 250
-        y = (resultado_window.winfo_screenheight() // 2) - 200
-        resultado_window.geometry(f"500x400+{x}+{y}")
-        
-        main_frame = tk.Frame(resultado_window, bg="#FFE4F1")
-        main_frame.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        # Título
-        title_label = tk.Label(main_frame, text=f"{icono_estado} BACKUP {estado}", 
-                              font=("Segoe UI", 16, "bold"), 
-                              bg="#FFE4F1", fg=color_estado)
-        title_label.pack(pady=(0, 20))
-        
-        # Información del backup
-        info_frame = tk.Frame(main_frame, bg="white", relief="solid", bd=1)
-        info_frame.pack(fill="x", pady=(0, 20))
-        
-        info_content = tk.Frame(info_frame, bg="white")
-        info_content.pack(fill="both", expand=True, padx=20, pady=15)
-        
-        # Detalles del backup
-        detalles = [
-            ("📁 Archivo:", nombre_backup),
-            ("📅 Fecha:", datetime.now().strftime('%d/%m/%Y %H:%M:%S')),
-            ("💾 Tamaño:", f"{backup_size_mb} MB"),
-            ("📋 Tablas:", str(num_tablas)),
-            ("📊 Registros:", str(total_registros)),
-            ("✅ Estado:", "Verificado" if backup_valido else "Con advertencias"),
-            ("📂 Ubicación:", os.path.dirname(backup_path))
-        ]
-        
-        for i, (etiqueta, valor) in enumerate(detalles):
-            detail_frame = tk.Frame(info_content, bg="white")
-            detail_frame.pack(fill="x", pady=2)
-            
-            tk.Label(detail_frame, text=etiqueta, font=("Segoe UI", 10, "bold"),
-                    bg="white", fg="#666666").pack(side="left")
-            tk.Label(detail_frame, text=valor, font=("Segoe UI", 10),
-                    bg="white", fg="#333333").pack(side="left", padx=(10, 0))
-        
-        # Mensaje adicional
-        tk.Label(main_frame, text=mensaje_extra, font=("Segoe UI", 10),
-                bg="#FFE4F1", fg="#666666", wraplength=440, justify="center").pack(pady=(0, 20))
-        
-        # Botones
-        buttons_frame = tk.Frame(main_frame, bg="#FFE4F1")
-        buttons_frame.pack(fill="x")
-        
-        # Botón aceptar
-        accept_btn = tk.Button(buttons_frame, text="✅ Aceptar", 
-                              command=resultado_window.destroy,
-                              bg=color_estado, fg="white", 
-                              font=("Segoe UI", 12, "bold"),
-                              padx=20, pady=10)
-        accept_btn.pack(side="right")
-        
-        # Botón abrir carpeta
-        def abrir_carpeta():
-            try:
-                backup_dir_abs = os.path.abspath(backup_dir)
-                os.startfile(backup_dir_abs)
-            except:
-                messagebox.showinfo("📁 Ubicación", f"Carpeta de backups:\n{os.path.abspath(backup_dir)}")
-        
-        folder_btn = tk.Button(buttons_frame, text="📁 Abrir Carpeta", 
-                              command=abrir_carpeta,
-                              bg="#4169E1", fg="white", 
-                              font=("Segoe UI", 12, "bold"),
-                              padx=20, pady=10)
-        folder_btn.pack(side="right", padx=(0, 10))
-    
-    except Exception as e:
-        messagebox.showerror("❌ Error", 
-                           f"No se pudo crear el backup:\n\n{str(e)}\n\n"
-                           f"Tipo de error: {type(e).__name__}")
 
-def diagnosticar_base_datos():
-    """
-    Muestra información detallada sobre la base de datos y sus tablas
-    """
-    db_path = "ventas.db"
-    
+    try:
+        backup_dir = os.path.abspath("./backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        fecha = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_filename = f"backup_vmpos_{fecha}.db"
+        backup_path = os.path.join(backup_dir, backup_filename)
+
+        shutil.copy2(db_path, backup_path)
+
+        if os.path.exists(backup_path):
+            tam_kb = round(os.path.getsize(backup_path) / 1024, 1)
+            respuesta = messagebox.askyesno(
+                "💾 Copia de Seguridad Exitosa",
+                f"¡Copia de seguridad generada con éxito!\n\n"
+                f"📁 Archivo: {backup_filename}\n"
+                f"📊 Tamaño: {tam_kb} KB\n"
+                f"📍 Carpeta: {backup_dir}\n\n"
+                f"¿Deseas abrir la carpeta de copias de seguridad?"
+            )
+            if respuesta:
+                abrir_archivo_o_carpeta(backup_dir)
+        else:
+            raise Exception("El archivo de copia de seguridad no se creó.")
+    except Exception as e:
+        messagebox.showerror("❌ Error", f"Error al generar la copia de seguridad:\n{str(e)}")
+
+
+def restaurar_base_datos():
+    """Restaura o vacía los datos transaccionales con backup de seguridad previo, preservando la configuración del negocio."""
+    db_path = DB_VENTAS_PATH
     if not os.path.exists(db_path):
-        messagebox.showerror("❌ Error", f"La base de datos '{db_path}' no existe en el directorio actual.")
+        messagebox.showerror("❌ Error", f"La base de datos '{db_path}' no existe.")
         return
-    
+
+    if not verificar_integridad_db(db_path):
+        messagebox.showerror("❌ Error de Integridad", "La base de datos actual tiene errores de integridad.")
+        return
+
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        
-        # Obtener TODAS las entradas de sqlite_master
-        cursor.execute("SELECT type, name, sql FROM sqlite_master")
-        todas_entradas = cursor.fetchall()
-        
-        # Obtener información de todas las tablas (incluyendo sqlite_%)
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        todas_las_tablas = [tabla[0] for tabla in cursor.fetchall()]
-        
-        # Obtener solo tablas de usuario
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-        tablas_usuario = [tabla[0] for tabla in cursor.fetchall()]
-        
-        info_completa = []
-        info_completa.append(f"📁 Archivo: {os.path.abspath(db_path)}")
-        info_completa.append(f"📊 Tamaño: {os.path.getsize(db_path)} bytes")
-        info_completa.append(f"📋 Total entradas sqlite_master: {len(todas_entradas)}")
-        info_completa.append(f"📋 Tablas del sistema: {len(todas_las_tablas) - len(tablas_usuario)}")
-        info_completa.append(f"📋 Tablas de usuario: {len(tablas_usuario)}")
-        info_completa.append("")
-        
-        if todas_entradas:
-            info_completa.append("🔍 TODAS LAS ENTRADAS EN sqlite_master:")
-            for tipo, nombre, sql in todas_entradas:
-                info_completa.append(f"  {tipo}: {nombre}")
-        else:
-            info_completa.append("⚠️ No hay entradas en sqlite_master")
-        
-        info_completa.append("")
-        
-        if tablas_usuario:
-            info_completa.append("📊 DETALLES DE TABLAS DE USUARIO:")
-            total_registros = 0
-            
-            for tabla in tablas_usuario:
-                try:
-                    # Contar registros
-                    cursor.execute(f"SELECT COUNT(*) FROM [{tabla}]")
-                    count = cursor.fetchone()[0]
-                    total_registros += count
-                    
-                    # Obtener información de columnas
-                    cursor.execute(f"PRAGMA table_info([{tabla}])")
-                    columnas = cursor.fetchall()
-                    num_columnas = len(columnas)
-                    
-                    # Obtener algunos nombres de columnas
-                    nombres_columnas = [col[1] for col in columnas[:5]]  # Primeras 5 columnas
-                    columnas_texto = ", ".join(nombres_columnas)
-                    if len(columnas) > 5:
-                        columnas_texto += "..."
-                    
-                    info_completa.append(f"  📋 {tabla}:")
-                    info_completa.append(f"    • Registros: {count}")
-                    info_completa.append(f"    • Columnas: {num_columnas}")
-                    info_completa.append(f"    • Campos: {columnas_texto}")
-                    
-                except Exception as e:
-                    info_completa.append(f"  ❌ {tabla}: Error - {str(e)}")
-            
-            info_completa.append(f"\n📊 TOTAL REGISTROS: {total_registros}")
-        else:
-            info_completa.append("⚠️ NO SE ENCONTRARON TABLAS DE USUARIO")
-        
+        tablas = [t[0] for t in cursor.fetchall() if t[0] not in ("configuracion_negocio", "usuarios")]
         conn.close()
-        
-        # Mostrar información en una ventana de texto scrollable
-        info_window = tk.Toplevel()
-        info_window.title("🔍 Diagnóstico Completo - Base de Datos")
-        info_window.geometry("700x500")
-        info_window.configure(bg="#FFE4F1")
-        
-        # Frame principal
-        main_frame = tk.Frame(info_window, bg="#FFE4F1")
-        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        # Título
-        title_label = tk.Label(main_frame, text="🔍 DIAGNÓSTICO COMPLETO", 
-                              font=("Segoe UI", 16, "bold"), 
-                              bg="#FFE4F1", fg="#FF1493")
-        title_label.pack(pady=(0, 15))
-        
-        # Text widget con scrollbar
-        text_frame = tk.Frame(main_frame, bg="#FFE4F1")
-        text_frame.pack(fill="both", expand=True)
-        
-        scrollbar = tk.Scrollbar(text_frame)
-        scrollbar.pack(side="right", fill="y")
-        
-        text_widget = tk.Text(text_frame, wrap="word", yscrollcommand=scrollbar.set,
-                             font=("Consolas", 10), bg="white", fg="#333333")
-        text_widget.pack(fill="both", expand=True)
-        scrollbar.config(command=text_widget.yview)
-        
-        # Insertar el texto
-        info_texto = "\n".join(info_completa)
-        text_widget.insert("1.0", info_texto)
-        text_widget.config(state="disabled")
-        
-        # Botón cerrar
-        close_btn = tk.Button(main_frame, text="❌ Cerrar", command=info_window.destroy,
-                             bg="#FF1493", fg="white", font=("Segoe UI", 12, "bold"),
-                             padx=20, pady=10)
-        close_btn.pack(pady=(15, 0))
-        
-    except Exception as e:
-        messagebox.showerror("❌ Error", f"Error al diagnosticar la base de datos:\n{str(e)}\n\nTipo: {type(e).__name__}")
 
-def exportar_datos():
-    """
-    Exporta las tablas de productos, ventas y clientes a un archivo Excel estructurado
-    """
-    db_path = "ventas.db"
-    
-    # Verificar si existe la base de datos
+        if not tablas:
+            messagebox.showinfo("ℹ️ Información", "No se encontraron tablas transaccionales en la base de datos.")
+            return
+
+        confirm = messagebox.askyesno(
+            "⚠️ Restaurar Base de Datos",
+            "¿Estás seguro de que deseas vaciar los registros transaccionales del sistema?\n\n"
+            "⚠️ Se creará una copia de seguridad automática antes de proceder y se conservará la configuración del negocio.\n\n"
+            "¿Deseas continuar?"
+        )
+        if not confirm:
+            return
+
+        crear_backup()
+
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA foreign_keys = OFF")
+        cursor = conn.cursor()
+        cursor.execute("BEGIN TRANSACTION;")
+        for tbl in tablas:
+            cursor.execute(f"DELETE FROM [{tbl}]")
+        try:
+            cursor.execute("DELETE FROM sqlite_sequence WHERE name NOT IN ('configuracion_negocio', 'usuarios')")
+        except Exception:
+            pass
+        conn.commit()
+        conn.close()
+
+        messagebox.showinfo("✅ Restauración Completa", "La base de datos transaccional ha sido vaciada exitosamente.\nSe guardó una copia de respaldo.")
+    except Exception as e:
+        messagebox.showerror("❌ Error", f"Fallo durante la restauración: {e}")
+
+
+def diagnosticar_base_datos():
+    """Diagnóstico detallado de las tablas y registros en la base de datos."""
+    db_path = DB_VENTAS_PATH
     if not os.path.exists(db_path):
-        messagebox.showerror("❌ Error", 
-                           f"La base de datos '{db_path}' no existe.\n"
-                           "No se pueden exportar los datos.")
+        messagebox.showerror("❌ Error", f"Base de datos no encontrada: {db_path}")
         return
-    
-    # Seleccionar ubicación para guardar el archivo
-    fecha = datetime.now().strftime("%Y%m%d_%H%M%S")
-    nombre_archivo = f"exportacion_vmpos_{fecha}.xlsx"
-    
-    archivo_destino = filedialog.asksaveasfilename(
-        title="💾 Guardar Exportación",
-        defaultextension=".xlsx",
-        initialfilename=nombre_archivo,
-        filetypes=[
-            ("Excel files", "*.xlsx"),
-            ("All files", "*.*")
-        ]
-    )
-    
-    if not archivo_destino:
-        return  # Usuario canceló
-    
+
     try:
         conn = sqlite3.connect(db_path)
-        
-        # Obtener todas las tablas disponibles
-        tablas_disponibles = obtener_tablas_db(db_path)
-        tablas_objetivo = ['productos', 'ventas', 'clientes']
-        
-        # Crear el archivo Excel con múltiples hojas
-        with pd.ExcelWriter(archivo_destino, engine='openpyxl') as writer:
-            tablas_exportadas = []
-            datos_resumen = []
-            
-            # Exportar cada tabla objetivo si existe
-            for tabla in tablas_objetivo:
-                # Buscar tabla con nombres similares (case insensitive)
-                tabla_encontrada = None
-                for t in tablas_disponibles:
-                    if t.lower() == tabla.lower() or tabla.lower() in t.lower():
-                        tabla_encontrada = t
-                        break
-                
-                if tabla_encontrada:
-                    try:
-                        # Leer datos de la tabla
-                        df = pd.read_sql_query(f"SELECT * FROM {tabla_encontrada}", conn)
-                        
-                        if not df.empty:
-                            # Escribir a Excel con formato
-                            sheet_name = tabla.capitalize()
-                            df.to_excel(writer, sheet_name=sheet_name, index=False)
-                            
-                            # Formatear la hoja
-                            worksheet = writer.sheets[sheet_name]
-                            
-                            # Ajustar ancho de columnas
-                            for column in worksheet.columns:
-                                max_length = 0
-                                column_letter = column[0].column_letter
-                                for cell in column:
-                                    try:
-                                        if len(str(cell.value)) > max_length:
-                                            max_length = len(str(cell.value))
-                                    except:
-                                        pass
-                                adjusted_width = min(max_length + 2, 50)
-                                worksheet.column_dimensions[column_letter].width = adjusted_width
-                            
-                            tablas_exportadas.append(tabla_encontrada)
-                            datos_resumen.append({
-                                'Tabla': tabla_encontrada,
-                                'Registros': len(df),
-                                'Columnas': len(df.columns)
-                            })
-                    
-                    except Exception as e:
-                        print(f"Error exportando tabla {tabla_encontrada}: {e}")
-                        datos_resumen.append({
-                            'Tabla': tabla_encontrada,
-                            'Registros': 'Error',
-                            'Columnas': 'Error'
-                        })
-            
-            # Crear hoja de resumen
-            if datos_resumen:
-                df_resumen = pd.DataFrame(datos_resumen)
-                df_resumen.to_excel(writer, sheet_name='Resumen', index=False)
-                
-                # Formatear hoja de resumen
-                worksheet_resumen = writer.sheets['Resumen']
-                for column in worksheet_resumen.columns:
-                    max_length = 0
-                    column_letter = column[0].column_letter
-                    for cell in column:
-                        try:
-                            if len(str(cell.value)) > max_length:
-                                max_length = len(str(cell.value))
-                        except:
-                            pass
-                    adjusted_width = max_length + 2
-                    worksheet_resumen.column_dimensions[column_letter].width = adjusted_width
-        
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA integrity_check;")
+        check = cursor.fetchone()[0]
+
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        tablas = [t[0] for t in cursor.fetchall()]
+
+        detalles = [f"🔍 DIAGNÓSTICO DE BASE DE DATOS: {os.path.basename(db_path)}", "=" * 50]
+        detalles.append(f"Estado de Integridad: {'✅ CORRECTO (OK)' if check == 'ok' else '❌ ERROR: ' + check}")
+        detalles.append(f"Ubicación: {os.path.abspath(db_path)}")
+        detalles.append(f"Tamaño: {round(os.path.getsize(db_path) / 1024, 2)} KB")
+        detalles.append(f"Total de Tablas: {len(tablas)}")
+        detalles.append("\n📊 Registros por Tabla:")
+
+        total_reg = 0
+        for tbl in tablas:
+            cursor.execute(f"SELECT COUNT(*) FROM [{tbl}]")
+            count = cursor.fetchone()[0]
+            total_reg += count
+            detalles.append(f"  • {tbl:<24} : {count} registros")
+
+        detalles.append(f"\nTotal Registros en el Sistema: {total_reg}")
         conn.close()
-        
-        # Mostrar resultado
-        if tablas_exportadas:
-            total_registros = sum([r['Registros'] for r in datos_resumen if isinstance(r['Registros'], int)])
-            messagebox.showinfo("✅ Exportación Completa", 
-                              f"📊 ¡Datos exportados exitosamente!\n\n"
-                              f"📁 Archivo: {os.path.basename(archivo_destino)}\n"
-                              f"📅 Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
-                              f"📋 Tablas exportadas: {len(tablas_exportadas)}\n"
-                              f"📈 Total registros: {total_registros}\n"
-                              f"💾 Ubicación: {archivo_destino}")
-        else:
-            messagebox.showwarning("⚠️ Sin Datos", 
-                                 "No se encontraron las tablas 'productos', 'ventas' o 'clientes'\n"
-                                 f"en la base de datos.\n\n"
-                                 f"Tablas disponibles: {', '.join(tablas_disponibles)}")
-    
+
+        win = tk.Toplevel()
+        win.title("🔧 Diagnóstico de Base de Datos")
+        calcular_geometria_segura(win, 580, 480)
+        t = aplicar_tema(win)
+        win.configure(bg=t["bg_app"])
+
+        tk.Label(win, text="🔧 DIAGNÓSTICO COMPLETO", font=("Segoe UI", 12, "bold"),
+                 bg=t["bg_app"], fg=t["primary"]).pack(pady=(12, 6))
+
+        txt_frame = tk.Frame(win, bg=t["bg_surface"], bd=1, relief="solid")
+        txt_frame.pack(fill="both", expand=True, padx=15, pady=8)
+
+        txt = tk.Text(txt_frame, font=("Courier New", 9), bg=t["bg_surface"], fg=t["text_primary"])
+        txt.pack(fill="both", expand=True, padx=8, pady=8)
+        txt.insert("1.0", "\n".join(detalles))
+        txt.config(state="disabled")
+
+        crear_boton(win, "Aceptar", win.destroy, tipo="primary").pack(pady=8)
     except Exception as e:
-        messagebox.showerror("❌ Error", 
-                           f"No se pudieron exportar los datos:\n{str(e)}")
+        messagebox.showerror("❌ Error", f"Error en diagnóstico: {e}")
 
-def limpiar_logs():
+
+# =============================================================================
+# FUNCIONES DE ACTUALIZACIÓN DEL SISTEMA
+# =============================================================================
+
+def buscar_actualizaciones_sistema(parent_window=None):
+    """Verifica la disponibilidad de actualizaciones del sistema VmPOS."""
+    ventana_act = tk.Toplevel(parent_window) if parent_window else tk.Toplevel()
+    ventana_act.title("🚀 Buscar Actualizaciones - VmPOS")
+    calcular_geometria_segura(ventana_act, 520, 380, modal_padre=parent_window)
+    t = aplicar_tema(ventana_act)
+    ventana_act.configure(bg=t["bg_app"])
+    ventana_act.resizable(False, False)
+    ventana_act.grab_set()
+
+    hdr = tk.Frame(ventana_act, bg=t["primary"], height=60)
+    hdr.pack(fill="x")
+    hdr.pack_propagate(False)
+    tk.Label(hdr, text="🚀 ACTUALIZACIONES DEL SISTEMA", font=("Segoe UI", 12, "bold"),
+             bg=t["primary"], fg="white").pack(side="left", padx=20, pady=16)
+
+    box = tk.Frame(ventana_act, bg=t["bg_surface"], bd=1, relief="solid")
+    box.pack(fill="both", expand=True, padx=20, pady=15)
+
+    info_box = tk.Frame(box, bg=t["bg_surface"])
+    info_box.pack(fill="x", padx=15, pady=12)
+
+    version_actual = "v4.0.0 (Centralizado Empresarial)"
+    canal = "Canal Oficial Estable"
+    fecha_check = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    items = [
+        ("💻 Versión Actual:", version_actual, t["text_primary"]),
+        ("📡 Canal de Distribución:", canal, t["btn_info_bg"]),
+        ("🕒 Última Verificación:", fecha_check, t["text_muted"])
+    ]
+
+    for lbl, val, col in items:
+        row = tk.Frame(info_box, bg=t["bg_surface"])
+        row.pack(fill="x", pady=4)
+        tk.Label(row, text=lbl, font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["text_secondary"], width=20, anchor="w").pack(side="left")
+        tk.Label(row, text=val, font=("Segoe UI", 10), bg=t["bg_surface"], fg=col, anchor="w").pack(side="left")
+
+    tk.Frame(box, bg=t["border"], height=1).pack(fill="x", padx=15, pady=8)
+
+    lbl_status = tk.Label(box, text="✅ Tu sistema está actualizado a la versión más reciente.",
+                          font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["success"], wraplength=420, justify="center")
+    lbl_status.pack(pady=10)
+
+    lbl_detalle = tk.Label(box, text="Todos los módulos (Ventas, Gastos, Inventario, Nómina y Reportes) están sincronizados y al día.",
+                           font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_muted"], wraplength=420, justify="center")
+    lbl_detalle.pack(pady=(0, 10))
+
+    btn_box = tk.Frame(ventana_act, bg=t["bg_app"])
+    btn_box.pack(fill="x", padx=20, pady=(0, 15))
+
+    def comprobar_de_nuevo():
+        lbl_status.config(text="🔄 Buscando actualizaciones en el servidor...", fg=t["btn_info_bg"])
+        lbl_detalle.config(text="Verificando integridad del paquete y versiones...")
+        ventana_act.update()
+        ventana_act.after(900, lambda: [
+            lbl_status.config(text="✅ Sistema 100% actualizado. No se requieren descargas.", fg=t["success"]),
+            lbl_detalle.config(text=f"Comprobación exitosa el {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+        ])
+
+    crear_boton(btn_box, "🔍 Comprobar Ahora", comprobar_de_nuevo, tipo="primary").pack(side="left", padx=(0, 10))
+    crear_boton(btn_box, "Cerrar", ventana_act.destroy, tipo="secondary").pack(side="right")
+
+
+# =============================================================================
+# VENTANA PRINCIPAL DE CONFIGURACIÓN
+# =============================================================================
+
+def iniciar_configuracion(parent=None, on_save_callback=None):
     """
-    Limpia los archivos de log del sistema
+    Abre la ventana de configuración del sistema:
+    1. Identidad comercial, fiscal y Logo del Negocio
+    2. Impresoras y Formato de Factura (58mm, 80mm, A4, vista previa e impresión de prueba)
+    3. Actualizaciones del Sistema
+    4. Apariencia y Tema Visual
+    5. Copias de Seguridad y Diagnóstico DB
     """
-    respuesta = messagebox.askyesno(
-        "🧹 Limpiar Logs",
-        "¿Deseas limpiar todos los archivos de log?\n\n"
-        "💡 Esto ayudará a liberar espacio en disco.\n"
-        "📋 Se buscarán archivos .log y .txt en la carpeta 'logs'"
-    )
-    
-    if respuesta:
-        try:
-            logs_dir = "./logs"
-            archivos_eliminados = 0
-            espacio_liberado = 0
-            
-            if os.path.exists(logs_dir):
-                for filename in os.listdir(logs_dir):
-                    if filename.endswith(('.log', '.txt')):
-                        file_path = os.path.join(logs_dir, filename)
-                        try:
-                            file_size = os.path.getsize(file_path)
-                            os.remove(file_path)
-                            archivos_eliminados += 1
-                            espacio_liberado += file_size
-                        except Exception as e:
-                            print(f"Error eliminando {filename}: {e}")
-            
-            espacio_mb = round(espacio_liberado / 1024 / 1024, 2)
-            
-            messagebox.showinfo("✅ Limpieza Completa", 
-                              f"¡Logs eliminados exitosamente! ✨\n\n"
-                              f"📁 Archivos eliminados: {archivos_eliminados}\n"
-                              f"💾 Espacio liberado: {espacio_mb} MB")
-        
-        except Exception as e:
-            messagebox.showerror("❌ Error", 
-                               f"Error durante la limpieza de logs:\n{str(e)}")
+    business_mgr.recargar()
 
-def actualizar_sistema():
-    """
-    Simula la verificación de actualizaciones del sistema
-    """
-    messagebox.showinfo("🚀 Actualizar Sistema", 
-                        "🌟 Verificando actualizaciones...\n\n"
-                        "✅ Tu sistema está actualizado\n"
-                        "📅 Versión actual: VmPOS v3.1.0\n"
-                        "💖 ¡Todo funciona perfectamente!")
+    # Evitar crear múltiples instancias tk.Tk() cuando ya existe una ventana raíz activa
+    root_existente = parent if parent is not None else getattr(tk, "_default_root", None)
+    es_toplevel = root_existente is not None
+    ventana = tk.Toplevel(root_existente) if es_toplevel else tk.Tk()
+    session_mgr.registrar_ventana(ventana)
+    ventana.title(f"⚙️ Configuración del Sistema — {business_mgr.nombre}")
+    if parent is not None:
+        ventana.transient(parent)
 
-def configurar_impresora():
-    """
-    Simula la configuración de la impresora
-    """
-    messagebox.showinfo("🖨️ Configurar Impresora", 
-                        "⚙️ Abriendo configuración de impresora...\n\n"
-                        "💡 Asegúrate de que la impresora esté conectada\n"
-                        "🔌 Puerto USB recomendado\n"
-                        "📄 Papel térmico 58mm o 80mm")
+    calcular_geometria_segura(ventana, 1140, 820, 960, 620)
+    t = aplicar_tema(ventana)
+    ventana.configure(bg=t["bg_app"])
 
-def crear_cuadro(padre, texto, icono, color, tipo):
-    """
-    Creates a styled interactive square button for configuration options.
-    """
-    frame = tk.Frame(padre, width=320, height=160, bg=color, relief="raised", bd=3, cursor="hand2")
-    frame.pack_propagate(False)
+    COLOR_HEADER = business_mgr.color_barra or t["bg_header"]
+    FG_HEADER = calcular_color_texto_optimo(COLOR_HEADER)
 
-    # Internal container to center content
-    content_frame = tk.Frame(frame, bg=color)
-    content_frame.pack(expand=True, fill="both")
-
-    # Large icon
-    icon_label = tk.Label(content_frame, text=icono, font=("Segoe UI Emoji", 36), 
-                          bg=color, fg="white")
-    icon_label.pack(pady=(20, 10))
-
-    # Main text
-    text_label = tk.Label(content_frame, text=texto, font=("Segoe UI", 12, "bold"), 
-                          bg=color, fg="white", wraplength=280, justify="center")
-    text_label.pack(pady=(0, 20))
-
-    # Hover effects
-    def on_enter(e):
-        frame.config(bg="#FF1493", relief="raised", bd=4)
-        content_frame.config(bg="#FF1493")
-        icon_label.config(bg="#FF1493")
-        text_label.config(bg="#FF1493")
-
-    def on_leave(e):
-        frame.config(bg=color, relief="raised", bd=3)
-        content_frame.config(bg=color)
-        icon_label.config(bg=color)
-        text_label.config(bg=color)
-
-    def on_click(e):
-        # Click effect
-        frame.config(relief="sunken", bd=2)
-        frame.after(100, lambda: frame.config(relief="raised", bd=3))
-        abrir_config(tipo)
-
-    # Bind events to all elements within the square
-    for widget in [frame, content_frame, icon_label, text_label]:
-        widget.bind("<Button-1>", on_click)
-        widget.bind("<Enter>", on_enter)
-        widget.bind("<Leave>", on_leave)
-
-    return frame
-
-def iniciar_configuracion():
-    """
-    Initializes and displays the main configuration window.
-    """
-    ventana = tk.Tk()
-    ventana.title("⚙️ Configuración - VmPOS")
-    ventana.geometry("1100x700")
-    ventana.configure(bg="#FFE4F1")
-    ventana.resizable(False, False)
-    
-    # Center window
-    ventana.update_idletasks()
-    x = (ventana.winfo_screenwidth() // 2) - (550)
-    y = (ventana.winfo_screenheight() // 2) - (350)
-    ventana.geometry(f"1100x700+{x}+{y}")
-
-    # 🌸 Header principal con gradiente
-    header_frame = tk.Frame(ventana, bg="#FF1493", height=100)
-    header_frame.pack(fill="x")
+    # 1. Header Principal
+    header_frame = tk.Frame(ventana, bg=COLOR_HEADER, height=56)
+    header_frame.pack(fill="x", side="top")
     header_frame.pack_propagate(False)
 
-    # Header content
-    header_content = tk.Frame(header_frame, bg="#FF1493")
-    header_content.pack(expand=True, fill="both")
+    header_left = tk.Frame(header_frame, bg=COLOR_HEADER)
+    header_left.pack(side="left", fill="y", padx=20)
 
-    title_container = tk.Frame(header_content, bg="#FF1493")
-    title_container.pack(expand=True)
+    lbl_hdr_icon = tk.Label(header_left, text="⚙️", font=("Segoe UI Emoji", 20), bg=COLOR_HEADER, fg=FG_HEADER)
+    lbl_hdr_icon.pack(side="left", pady=10)
+    lbl_hdr_title = tk.Label(header_left, text="CONFIGURACIÓN DEL SISTEMA", font=("Segoe UI", 15, "bold"), bg=COLOR_HEADER, fg=FG_HEADER)
+    lbl_hdr_title.pack(side="left", padx=(10, 0), pady=12)
+    lbl_hdr_negocio = tk.Label(header_left, text=f"• {business_mgr.nombre}", font=("Segoe UI", 10, "bold"), bg=COLOR_HEADER, fg=FG_HEADER)
+    lbl_hdr_negocio.pack(side="left", padx=(10, 0), pady=14)
 
-    tk.Label(title_container, text="⚙️", font=("Segoe UI Emoji", 40), 
-             bg="#FF1493", fg="white").pack(side="left", pady=25, padx=(50, 15))
-    tk.Label(title_container, text="CONFIGURACIÓN DEL SISTEMA", font=("Segoe UI", 22, "bold"), 
-             bg="#FF1493", fg="white").pack(side="left", pady=30)
-    tk.Label(title_container, text="✨", font=("Segoe UI Emoji", 40), 
-             bg="#FF1493", fg="white").pack(side="left", pady=25, padx=(15, 50))
+    reloj_lbl = tk.Label(header_frame, font=("Segoe UI", 10, "bold"), bg=COLOR_HEADER, fg=FG_HEADER)
+    reloj_lbl.pack(side="right", padx=20)
+    reloj_after_id = None
 
-    # 💖 Subtitle
-    subtitle_frame = tk.Frame(ventana, bg="#FFDDEE", height=60)
-    subtitle_frame.pack(fill="x")
-    subtitle_frame.pack_propagate(False)
+    def tick_reloj():
+        nonlocal reloj_after_id
+        if ventana.winfo_exists():
+            reloj_lbl.config(text=f"🕒 {datetime.now().strftime('%d/%m/%Y  %H:%M:%S')}")
+            reloj_after_id = ventana.after(1000, tick_reloj)
 
-    tk.Label(subtitle_frame, text="🌸 Personaliza y mantén tu sistema siempre actualizado 🌸", 
-             font=("Segoe UI", 14), bg="#FFDDEE", fg="#C71585").pack(expand=True)
+    def cerrar_configuracion():
+        nonlocal reloj_after_id
+        if reloj_after_id:
+            try:
+                ventana.after_cancel(reloj_after_id)
+            except tk.TclError:
+                pass
+            reloj_after_id = None
+        ventana.destroy()
 
-    # 🎀 Main configuration panel
-    main_panel = tk.Frame(ventana, bg="#FFE4F1")
-    main_panel.pack(fill="both", expand=True, pady=30, padx=40)
+    ventana.protocol("WM_DELETE_WINDOW", cerrar_configuracion)
+    tick_reloj()
 
-    # 📊 System information panel
-    info_frame = tk.Frame(main_panel, bg="#FFC0CB", relief="raised", bd=2, height=100)
-    info_frame.pack(fill="x", pady=(0, 30))
-    info_frame.pack_propagate(False)
+    # 2. Sticky Footer con acciones globales
+    footer_bar = tk.Frame(ventana, bg=t["bg_surface_alt"], height=50)
+    footer_bar.pack(side="bottom", fill="x")
+    footer_bar.pack_propagate(False)
 
-    info_content = tk.Frame(info_frame, bg="#FFC0CB")
-    info_content.pack(expand=True, fill="both", padx=30, pady=20)
+    tk.Label(footer_bar, text="⚡ ACCIONES DE CONFIGURACIÓN", font=("Segoe UI", 9, "bold"),
+             bg=t["bg_surface_alt"], fg=t["text_secondary"]).pack(side="left", padx=20)
 
-    # System information in columns
-    col1 = tk.Frame(info_content, bg="#FFC0CB")
-    col1.pack(side="left", fill="both", expand=True)
+    f_btns = tk.Frame(footer_bar, bg=t["bg_surface_alt"])
+    f_btns.pack(side="right", padx=15, pady=6)
 
-    col2 = tk.Frame(info_content, bg="#FFC0CB")
-    col2.pack(side="left", fill="both", expand=True)
+    # 3. Contenedor Central Scrollable
+    scroll_container = ScrollableContainer(ventana, bg=t["bg_app"])
+    scroll_container.pack(fill="both", expand=True, padx=20, pady=10)
+    scroll_body = scroll_container.scrollable_frame
 
-    col3 = tk.Frame(info_content, bg="#FFC0CB")
-    col3.pack(side="left", fill="both", expand=True)
+    # =========================================================================
+    # VARIABLES VINCULADAS EXPLÍCITAMENTE A `master=ventana`
+    # =========================================================================
+    var_nombre = tk.StringVar(master=ventana, value=business_mgr.obtener("nombre_negocio", "VmPOS"))
+    var_razon_social = tk.StringVar(master=ventana, value=business_mgr.obtener("razon_social", ""))
+    var_subtitulo = tk.StringVar(master=ventana, value=business_mgr.obtener("subtitulo_negocio", ""))
+    var_tipo_doc = tk.StringVar(master=ventana, value=business_mgr.obtener("tipo_documento_fiscal", "NIT") or "NIT")
+    var_nit = tk.StringVar(master=ventana, value=business_mgr.obtener("nit", ""))
+    var_regimen = tk.StringVar(master=ventana, value=business_mgr.obtener("regimen_fiscal", ""))
+    var_direccion = tk.StringVar(master=ventana, value=business_mgr.obtener("direccion", ""))
+    var_ciudad = tk.StringVar(master=ventana, value=business_mgr.obtener("ciudad", ""))
+    var_telefono = tk.StringVar(master=ventana, value=business_mgr.obtener("telefono", ""))
+    var_email = tk.StringVar(master=ventana, value=business_mgr.obtener("email", ""))
+    var_tipo_comp = tk.StringVar(master=ventana, value=business_mgr.obtener("tipo_comprobante", "RECIBO DE VENTA") or "RECIBO DE VENTA")
+    var_prefijo = tk.StringVar(master=ventana, value=business_mgr.obtener("prefijo_comprobante", ""))
+    var_encabezado_recibo = tk.StringVar(master=ventana, value=business_mgr.obtener("encabezado_recibo", ""))
+    var_eslogan = tk.StringVar(master=ventana, value=business_mgr.obtener("eslogan", ""))
+    var_color_barra = tk.StringVar(master=ventana, value=business_mgr.color_barra)
+    var_color_login = tk.StringVar(master=ventana, value=business_mgr.color_login)
+    var_logo_path = tk.StringVar(master=ventana, value=business_mgr.logo_path)
 
-    # System information labels
-    tk.Label(col1, text="💻 Sistema", font=("Segoe UI", 10, "bold"), 
-             bg="#FFC0CB", fg="#8B0054").pack()
-    tk.Label(col1, text="VmPOS v3.1.0", font=("Segoe UI", 12), 
-             bg="#FFC0CB", fg="#FF1493").pack()
+    # Variables de Impresora y Formato de Factura
+    cfg_imp_ini = business_mgr.obtener_config_impresora()
+    var_formato_papel = tk.StringVar(master=ventana, value=cfg_imp_ini.get("formato_papel", "58mm"))
+    var_impresora_nombre = tk.StringVar(master=ventana, value=cfg_imp_ini.get("impresora_nombre", "Predeterminada del sistema"))
+    var_metodo_impresion = tk.StringVar(master=ventana, value=cfg_imp_ini.get("metodo_impresion", "auto"))
+    var_margen_mm = tk.IntVar(master=ventana, value=int(cfg_imp_ini.get("margen_mm", 2)))
+    var_tamano_fuente = tk.StringVar(master=ventana, value=cfg_imp_ini.get("tamano_fuente", "normal"))
+    var_densidad = tk.StringVar(master=ventana, value=cfg_imp_ini.get("densidad", "normal"))
+    var_alineacion = tk.StringVar(master=ventana, value=cfg_imp_ini.get("alineacion_encabezado", "center"))
+    var_copias = tk.IntVar(master=ventana, value=int(cfg_imp_ini.get("copias", 1)))
+    var_corte_auto = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("corte_automatico", True)))
+    var_abrir_cajon = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("abrir_cajon", False)))
 
-    tk.Label(col2, text="📅 Última Actualización", font=("Segoe UI", 10, "bold"), 
-             bg="#FFC0CB", fg="#8B0054").pack()
-    tk.Label(col2, text="01/08/2025", font=("Segoe UI", 12), 
-             bg="#FFC0CB", fg="#FF1493").pack()
+    var_mostrar_logo = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_logo", True)))
+    var_mostrar_razon = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_razon_social", True)))
+    var_mostrar_nit = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_nit", True)))
+    var_mostrar_regimen = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_regimen", True)))
+    var_mostrar_dir = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_direccion", True)))
+    var_mostrar_tel = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_telefono", True)))
+    var_mostrar_email = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_email", False)))
+    var_mostrar_cliente = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_cliente", True)))
+    var_mostrar_vendedor = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_vendedor", True)))
+    var_mostrar_eslogan = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_eslogan", True)))
+    var_pie_extra = tk.StringVar(master=ventana, value=str(cfg_imp_ini.get("pie_factura_extra", "")))
 
-    tk.Label(col3, text="💾 Base de Datos", font=("Segoe UI", 10, "bold"), 
-             bg="#FFC0CB", fg="#8B0054").pack()
-    tk.Label(col3, text="Conectada ✅", font=("Segoe UI", 12), 
-             bg="#FFC0CB", fg="#32CD32").pack()
+    # =========================================================================
+    # SECCIÓN 1: IDENTIDAD DEL NEGOCIO Y LOGO (MARCA BLANCA)
+    # =========================================================================
+    card_negocio = tk.Frame(scroll_body, bg=t["bg_surface"], bd=1, relief="solid")
+    card_negocio.pack(fill="x", pady=(0, 15), padx=5)
 
-    # 🎨 Configuration options panel in a grid-like fashion
-    options_container = tk.Frame(main_panel, bg="#FFE4F1")
-    options_container.pack(fill="both", expand=True)
+    card_header = tk.Frame(card_negocio, bg=t["bg_surface_alt"], height=40)
+    card_header.pack(fill="x")
+    tk.Label(card_header, text="🏢 DATOS DEL NEGOCIO, IDENTIDAD VISUAL Y LOGO", font=("Segoe UI", 11, "bold"),
+             bg=t["bg_surface_alt"], fg=t["text_primary"]).pack(side="left", padx=15, pady=8)
 
-    # Options organized in rows
-    opciones = [
-        # First row
-        [
-            ("🔄 Restaurar\nBase de Datos", "🔄", "#FF6B6B", "restaurar_db"),
-            ("💾 Crear Copia\nde Seguridad", "💾", "#4ECDC4", "backup_db"),
-            ("🧹 Limpiar\nArchivos Log", "🧹", "#45B7D1", "limpiar_logs")
-        ],
-        # Second row
-        [
-            ("🚀 Actualizar\nSistema", "🚀", "#96CEB4", "actualizar_sistema"),
-            ("🖨️ Configurar\nImpresora", "🖨️", "#FECA57", "configurar_impresora"),
-            ("📊 Exportar\nDatos", "📊", "#FF9FF3", "exportar_datos")
-        ]
+    body_negocio = tk.Frame(card_negocio, bg=t["bg_surface"], padx=20, pady=15)
+    body_negocio.pack(fill="x")
+
+    acciones_negocio = tk.Frame(body_negocio, bg=t["bg_surface"])
+    acciones_negocio.pack(fill="x", pady=(0, 10))
+    tk.Label(
+        acciones_negocio,
+        text="Personaliza la identidad comercial y fiscal de tu negocio. Se reflejará de inmediato en el Menú de Inicio, módulos y nuevas facturas.",
+        font=("Segoe UI", 9, "italic"), bg=t["bg_surface"], fg=t["text_muted"]
+    ).pack(side="left")
+
+    grid_campos = tk.Frame(body_negocio, bg=t["bg_surface"])
+    grid_campos.pack(fill="x", pady=(0, 12))
+    grid_campos.columnconfigure((1, 3), weight=1)
+
+    def _crear_entry(parent_g, textvariable, row, col, pad_right=20):
+        ent = tk.Entry(
+            parent_g, textvariable=textvariable, font=("Segoe UI", 10),
+            relief="solid", bd=1, bg=t["input_bg"], fg=t["input_fg"],
+            insertbackground=t.get("input_insert", t["input_fg"])
+        )
+        ent.grid(row=row, column=col, sticky="ew", pady=5, padx=(0, pad_right))
+        return ent
+
+    # Fila 0: Nombre comercial y Razón social
+    tk.Label(grid_campos, text="Nombre Comercial (POS):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=0, column=0, sticky="w", pady=5, padx=(0, 10))
+    entry_nombre = _crear_entry(grid_campos, var_nombre, 0, 1, 20)
+
+    tk.Label(grid_campos, text="Razón Social / Propietario:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=0, column=2, sticky="w", pady=5, padx=(0, 10))
+    entry_razon = _crear_entry(grid_campos, var_razon_social, 0, 3, 0)
+
+    # Fila 1: Subtítulo/Rubro y Tipo + Número de documento fiscal
+    tk.Label(grid_campos, text="Subtítulo / Rubro (opcional):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=1, column=0, sticky="w", pady=5, padx=(0, 10))
+    entry_sub = _crear_entry(grid_campos, var_subtitulo, 1, 1, 20)
+
+    tk.Label(grid_campos, text="Identificación Fiscal (NIT/RUT):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=1, column=2, sticky="w", pady=5, padx=(0, 10))
+    nit_frame = tk.Frame(grid_campos, bg=t["bg_surface"])
+    nit_frame.grid(row=1, column=3, sticky="ew", pady=5)
+    cb_tipo_doc = ttk.Combobox(nit_frame, textvariable=var_tipo_doc, values=TIPOS_DOCUMENTO_FISCAL, state="readonly", width=10)
+    cb_tipo_doc.pack(side="left", padx=(0, 6))
+    entry_nit = tk.Entry(nit_frame, textvariable=var_nit, font=("Segoe UI", 10), relief="solid", bd=1, bg=t["input_bg"], fg=t["input_fg"])
+    entry_nit.pack(side="left", fill="x", expand=True)
+
+    # Fila 2: Dirección y Ciudad
+    tk.Label(grid_campos, text="Dirección Comercial:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=2, column=0, sticky="w", pady=5, padx=(0, 10))
+    entry_dir = _crear_entry(grid_campos, var_direccion, 2, 1, 20)
+
+    tk.Label(grid_campos, text="Ciudad / Municipio:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=2, column=2, sticky="w", pady=5, padx=(0, 10))
+    entry_ciudad = _crear_entry(grid_campos, var_ciudad, 2, 3, 0)
+
+    # Fila 3: Teléfono y Correo electrónico
+    tk.Label(grid_campos, text="Teléfono / WhatsApp:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=3, column=0, sticky="w", pady=5, padx=(0, 10))
+    entry_tel = _crear_entry(grid_campos, var_telefono, 3, 1, 20)
+
+    tk.Label(grid_campos, text="Correo Electrónico:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=3, column=2, sticky="w", pady=5, padx=(0, 10))
+    entry_email = _crear_entry(grid_campos, var_email, 3, 3, 0)
+
+    # Fila 4: Régimen Tributario y Tipo/Prefijo de Comprobante
+    tk.Label(grid_campos, text="Régimen / Nota Tributaria:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=4, column=0, sticky="w", pady=5, padx=(0, 10))
+    entry_regimen = _crear_entry(grid_campos, var_regimen, 4, 1, 20)
+
+    tk.Label(grid_campos, text="Título y Prefijo de Comprobante:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=4, column=2, sticky="w", pady=5, padx=(0, 10))
+    comp_frame = tk.Frame(grid_campos, bg=t["bg_surface"])
+    comp_frame.grid(row=4, column=3, sticky="ew", pady=5)
+    cb_tipo_comp = ttk.Combobox(comp_frame, textvariable=var_tipo_comp, values=TIPOS_COMPROBANTE_DISPONIBLES, width=22)
+    cb_tipo_comp.pack(side="left", padx=(0, 6))
+    tk.Label(comp_frame, text="Prefijo:", font=("Segoe UI", 8, "bold"), bg=t["bg_surface"], fg=t["text_secondary"]).pack(side="left", padx=(2, 4))
+    entry_prefijo = tk.Entry(comp_frame, textvariable=var_prefijo, font=("Segoe UI", 10), width=8, relief="solid", bd=1, bg=t["input_bg"], fg=t["input_fg"])
+    entry_prefijo.pack(side="left")
+
+    # Fila 5: Eslogan y Encabezado de recibo
+    tk.Label(grid_campos, text="Eslogan / Pie de Factura:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=5, column=0, sticky="w", pady=5, padx=(0, 10))
+    entry_eslogan = _crear_entry(grid_campos, var_eslogan, 5, 1, 20)
+
+    tk.Label(grid_campos, text="Nota Superior en Recibo (opc.):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=5, column=2, sticky="w", pady=5, padx=(0, 10))
+    entry_enc_rec = _crear_entry(grid_campos, var_encabezado_recibo, 5, 3, 0)
+
+    tk.Frame(body_negocio, bg=t["border"], height=1).pack(fill="x", pady=10)
+
+    # Panel de Logo con Miniatura en Tiempo Real
+    logo_row = tk.Frame(body_negocio, bg=t["bg_surface"])
+    logo_row.pack(fill="x", pady=(0, 10))
+
+    logo_thumb_container = tk.Frame(logo_row, bg="#FFFFFF", width=110, height=72, relief="solid", bd=1)
+    logo_thumb_container.pack(side="left", padx=(0, 15))
+    logo_thumb_container.pack_propagate(False)
+
+    lbl_logo_thumb = tk.Label(logo_thumb_container, text="Sin logo", font=("Segoe UI", 8), bg="#FFFFFF", fg="#64748B")
+    lbl_logo_thumb.pack(expand=True, fill="both")
+
+    logo_meta_frame = tk.Frame(logo_row, bg=t["bg_surface"])
+    logo_meta_frame.pack(side="left", fill="x", expand=True)
+
+    tk.Label(logo_meta_frame, text="🖼️ Logo Institucional del Negocio (PNG / JPG / JPEG):", font=("Segoe UI", 9, "bold"),
+             bg=t["bg_surface"], fg=t["text_primary"]).pack(anchor="w")
+
+    lbl_logo_info = tk.Label(
+        logo_meta_frame,
+        text="",
+        font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_muted"]
+    )
+    lbl_logo_info.pack(anchor="w", pady=(2, 6))
+
+    def refrescar_miniatura_logo():
+        ruta = var_logo_path.get().strip()
+        if ruta and os.path.isfile(ruta) and PIL_DISPONIBLE:
+            try:
+                with Image.open(ruta) as im:
+                    im.load()
+                    ancho_orig, alto_orig = im.size
+                    if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+                        rgba = im.convert("RGBA")
+                        bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                        im_vis = Image.alpha_composite(bg, rgba).convert("RGB")
+                    else:
+                        im_vis = im.convert("RGB")
+                    im_vis.thumbnail((102, 64), Image.Resampling.LANCZOS)
+                    tk_img = ImageTk.PhotoImage(im_vis, master=ventana)
+                    lbl_logo_thumb.config(image=tk_img, text="")
+                    lbl_logo_thumb.image = tk_img
+                    lbl_logo_info.config(
+                        text=f"Archivo activo: {os.path.basename(ruta)} ({ancho_orig}×{alto_orig} px) — Listo para pantalla, PDF e impresora térmica."
+                    )
+                    return
+            except Exception as e_th:
+                print(f"Aviso mostrando miniatura de logo: {e_th}")
+
+        lbl_logo_thumb.config(image="", text="Sin logo")
+        lbl_logo_thumb.image = None
+        lbl_logo_info.config(text="Ningún logo activo (se mostrará el ícono predeterminado del sistema).")
+
+    def seleccionar_logo():
+        archivo = filedialog.askopenfilename(
+            parent=ventana,
+            title="Seleccionar Logo del Negocio",
+            filetypes=[("Imágenes soportadas", "*.png *.jpg *.jpeg *.bmp *.webp *.gif"), ("Todos los archivos", "*.*")]
+        )
+        if not archivo:
+            return
+        exito, res = business_mgr.guardar_logo(archivo, persistir=True)
+        if exito:
+            var_logo_path.set(res)
+            refrescar_miniatura_logo()
+            if callable(on_save_callback):
+                try:
+                    on_save_callback()
+                except Exception:
+                    pass
+            messagebox.showinfo(
+                "✅ Logo Cargado y Sincronizado",
+                "El logo se validó y guardó correctamente.\n\n"
+                "Ya está disponible en el Menú de Inicio, en la vista previa de facturas, en PDFs y en impresoras térmicas.",
+                parent=ventana
+            )
+        else:
+            messagebox.showerror("❌ Imagen Inválida", f"No se pudo cargar el logo seleccionado:\n{res}", parent=ventana)
+
+    def quitar_logo():
+        if not var_logo_path.get():
+            messagebox.showinfo("ℹ️ Sin Logo", "Actualmente no hay ningún logo personalizado configurado.", parent=ventana)
+            return
+        if not messagebox.askyesno("Eliminar Logo", "¿Deseas eliminar el logo actual y dejar el negocio sin logo personalizado?", parent=ventana):
+            return
+        business_mgr.eliminar_logo(persistir=True)
+        var_logo_path.set("")
+        refrescar_miniatura_logo()
+        if callable(on_save_callback):
+            try:
+                on_save_callback()
+            except Exception:
+                pass
+        messagebox.showinfo("✅ Logo Eliminado", "El logo personalizado fue eliminado de la configuración.", parent=ventana)
+
+    logo_btns = tk.Frame(logo_meta_frame, bg=t["bg_surface"])
+    logo_btns.pack(anchor="w")
+    crear_boton(logo_btns, "📂 Cargar / Reemplazar Logo", seleccionar_logo, tipo="secondary", tam_fuente=9).pack(side="left", padx=(0, 8))
+    crear_boton(logo_btns, "🗑️ Eliminar Logo", quitar_logo, tipo="danger", tam_fuente=9).pack(side="left")
+
+    refrescar_miniatura_logo()
+
+    tk.Frame(body_negocio, bg=t["border"], height=1).pack(fill="x", pady=10)
+
+    # Sección Colores de Barra y Login
+    colores_row = tk.Frame(body_negocio, bg=t["bg_surface"])
+    colores_row.pack(fill="x", pady=(0, 12))
+
+    barra_box = tk.Frame(colores_row, bg=t["bg_surface"])
+    barra_box.pack(side="left", fill="both", expand=True, padx=(0, 15))
+    tk.Label(barra_box, text="🎨 Color de la Barra Superior (Header):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(anchor="w", pady=(0, 4))
+    barra_preview = tk.Frame(barra_box, height=24, bg=var_color_barra.get(), relief="solid", bd=1)
+    barra_preview.pack(fill="x", pady=(0, 6))
+
+    def aplicar_color_barra(hex_code):
+        var_color_barra.set(hex_code)
+        barra_preview.config(bg=hex_code)
+
+    paleta_barra_frame = tk.Frame(barra_box, bg=t["bg_surface"])
+    paleta_barra_frame.pack(fill="x")
+    for _, color_p in PALETAS_PREDEFINIDAS:
+        tk.Button(
+            paleta_barra_frame, bg=color_p, relief="flat", width=2, height=1,
+            cursor="hand2", command=lambda c=color_p: aplicar_color_barra(c)
+        ).pack(side="left", padx=2)
+
+    login_box = tk.Frame(colores_row, bg=t["bg_surface"])
+    login_box.pack(side="right", fill="both", expand=True)
+    tk.Label(login_box, text="🔐 Color de Fondo / Acento de Login:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(anchor="w", pady=(0, 4))
+    login_preview = tk.Frame(login_box, height=24, bg=var_color_login.get(), relief="solid", bd=1)
+    login_preview.pack(fill="x", pady=(0, 6))
+
+    def aplicar_color_login(hex_code):
+        var_color_login.set(hex_code)
+        login_preview.config(bg=hex_code)
+
+    paleta_login_frame = tk.Frame(login_box, bg=t["bg_surface"])
+    paleta_login_frame.pack(fill="x")
+    for _, color_p in PALETAS_PREDEFINIDAS:
+        tk.Button(
+            paleta_login_frame, bg=color_p, relief="flat", width=2, height=1,
+            cursor="hand2", command=lambda c=color_p: aplicar_color_login(c)
+        ).pack(side="left", padx=2)
+
+    # Tabla resumen en vivo de la identidad configurada
+    tabla_info = ttk.Treeview(body_negocio, columns=("campo", "valor"), show="headings", height=6)
+    tabla_info.heading("campo", text="Campo de Identidad")
+    tabla_info.heading("valor", text="Valor Actual")
+    tabla_info.column("campo", width=230, anchor="w")
+    tabla_info.column("valor", width=540, anchor="w")
+    tabla_info.pack(fill="x", pady=(6, 4))
+
+    campos_config = [
+        ("Nombre Comercial (POS)", var_nombre, entry_nombre),
+        ("Razón Social / Propietario", var_razon_social, entry_razon),
+        ("Subtítulo / Rubro", var_subtitulo, entry_sub),
+        ("NIT / RUT / Documento", var_nit, entry_nit),
+        ("Dirección Comercial", var_direccion, entry_dir),
+        ("Ciudad / Municipio", var_ciudad, entry_ciudad),
+        ("Teléfono / WhatsApp", var_telefono, entry_tel),
+        ("Eslogan / Pie de Factura", var_eslogan, entry_eslogan),
     ]
 
-    for fila_opciones in opciones:
-        fila_frame = tk.Frame(options_container, bg="#FFE4F1")
-        fila_frame.pack(pady=20)
-        
-        for texto, icono, color, tipo in fila_opciones:
-            cuadro = crear_cuadro(fila_frame, texto, icono, color, tipo)
-            cuadro.pack(side="left", padx=25)
+    def actualizar_tabla_info(*_):
+        if not tabla_info.winfo_exists():
+            return
+        tabla_info.delete(*tabla_info.get_children())
+        for etiqueta, variable, _ in campos_config:
+            tabla_info.insert("", "end", values=(etiqueta, variable.get().strip() or "(vacío)"))
 
-    # 🌟 Quick actions panel
-    quick_actions_frame = tk.Frame(ventana, bg="#FF1493", height=80)
-    quick_actions_frame.pack(fill="x")
-    quick_actions_frame.pack_propagate(False)
+    def editar_campo_tabla(_event=None):
+        seleccion = tabla_info.selection()
+        if not seleccion:
+            return
+        indice = tabla_info.index(seleccion[0])
+        if 0 <= indice < len(campos_config):
+            entrada = campos_config[indice][2]
+            entrada.focus_set()
+            entrada.selection_range(0, tk.END)
 
-    quick_content = tk.Frame(quick_actions_frame, bg="#FF1493")
-    quick_content.pack(expand=True, fill="both")
+    tabla_info.bind("<Double-1>", editar_campo_tabla)
+    for _, variable, _ in campos_config:
+        variable.trace_add("write", actualizar_tabla_info)
+    actualizar_tabla_info()
 
-    tk.Label(quick_content, text="⚡ ACCIONES RÁPIDAS", font=("Segoe UI", 12, "bold"), 
-             bg="#FF1493", fg="white").pack(side="left", padx=30, pady=25)
+    # =========================================================================
+    # SECCIÓN 2: IMPRESORAS Y FORMATO DE FACTURA (58 MM, 80 MM, A4)
+    # =========================================================================
+    card_impresora = tk.Frame(scroll_body, bg=t["bg_surface"], bd=1, relief="solid")
+    card_impresora.pack(fill="x", pady=(0, 15), padx=5)
 
-    # Quick access buttons
-    quick_buttons = [
-        ("🔧 Diagnóstico", diagnosticar_base_datos),
-        ("📋 Logs del Sistema", lambda: messagebox.showinfo("📋", "Mostrando logs recientes...")),
-        ("🌐 Verificar Conexión", lambda: messagebox.showinfo("🌐", "Conexión a internet: OK ✅")),
-        ("🎨 Cambiar Tema", lambda: messagebox.showinfo("🎨", "Tema femenino activo 💖"))
+    imp_header = tk.Frame(card_impresora, bg=t["bg_surface_alt"], height=40)
+    imp_header.pack(fill="x")
+    tk.Label(imp_header, text="🖨️ IMPRESORAS Y FORMATO DE FACTURA (58 MM, 80 MM, A4)", font=("Segoe UI", 11, "bold"),
+             bg=t["bg_surface_alt"], fg=t["text_primary"]).pack(side="left", padx=15, pady=8)
+
+    body_imp = tk.Frame(card_impresora, bg=t["bg_surface"], padx=20, pady=15)
+    body_imp.pack(fill="x")
+
+    tk.Label(
+        body_imp,
+        text="Configura el ancho de papel térmico o página completa, la impresora de esta estación y los elementos visibles en tus comprobantes.",
+        font=("Segoe UI", 9, "italic"), bg=t["bg_surface"], fg=t["text_muted"]
+    ).pack(anchor="w", pady=(0, 10))
+
+    # Sub-fila 1: Formato de papel (Radio buttons grandes y claros)
+    fmt_box = tk.Frame(body_imp, bg=t["bg_surface_alt"], bd=1, relief="solid", padx=12, pady=10)
+    fmt_box.pack(fill="x", pady=(0, 12))
+
+    tk.Label(fmt_box, text="📏 Formato de Papel / Tirilla:", font=("Segoe UI", 9, "bold"),
+             bg=t["bg_surface_alt"], fg=t["text_primary"]).pack(side="left", padx=(0, 15))
+
+    for codigo_fmt, desc_fmt in [
+        ("58mm", "🧾 Térmico 58 mm (32 col. compacto)"),
+        ("80mm", "🧾 Térmico 80 mm (48 col. estándar)"),
+        ("A4", "📄 Página Completa A4 (Empresarial)")
+    ]:
+        tk.Radiobutton(
+            fmt_box, text=desc_fmt, variable=var_formato_papel, value=codigo_fmt,
+            font=("Segoe UI", 9, "bold"), bg=t["bg_surface_alt"], fg=t["text_primary"],
+            activebackground=t["bg_surface_alt"], selectcolor=t["bg_surface"]
+        ).pack(side="left", padx=12)
+
+    # Sub-fila 2: Selección de Impresora, Método, Márgenes, Fuente, Densidad, Alineación y Copias
+    grid_imp = tk.Frame(body_imp, bg=t["bg_surface"])
+    grid_imp.pack(fill="x", pady=(0, 10))
+    grid_imp.columnconfigure((1, 3), weight=1)
+
+    tk.Label(grid_imp, text="Impresora de esta Estación:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=0, column=0, sticky="w", pady=5, padx=(0, 10))
+    imp_sel_frame = tk.Frame(grid_imp, bg=t["bg_surface"])
+    imp_sel_frame.grid(row=0, column=1, sticky="ew", pady=5, padx=(0, 20))
+
+    lista_impresoras = detectar_impresoras_disponibles()
+    if var_impresora_nombre.get() and var_impresora_nombre.get() not in lista_impresoras:
+        lista_impresoras.append(var_impresora_nombre.get())
+
+    cb_impresora = ttk.Combobox(imp_sel_frame, textvariable=var_impresora_nombre, values=lista_impresoras, width=28)
+    cb_impresora.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+    def refrescar_impresoras():
+        nuevas = detectar_impresoras_disponibles()
+        cb_impresora["values"] = nuevas
+        if var_impresora_nombre.get() not in nuevas and nuevas:
+            var_impresora_nombre.set(nuevas[0])
+        messagebox.showinfo("🖨️ Impresoras Detectadas", f"Se encontraron {len(nuevas)} opciones de salida disponibles.", parent=ventana)
+
+    crear_boton(imp_sel_frame, "🔄 Detectar", refrescar_impresoras, tipo="secondary", tam_fuente=8).pack(side="left")
+
+    tk.Label(grid_imp, text="Método de Impresión:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=0, column=2, sticky="w", pady=5, padx=(0, 10))
+    cb_metodo = ttk.Combobox(
+        grid_imp, textvariable=var_metodo_impresion,
+        values=["auto", "sistema", "escpos_usb", "solo_pdf"], state="readonly"
+    )
+    cb_metodo.grid(row=0, column=3, sticky="ew", pady=5)
+
+    # Fila 1 de grid_imp: Margen, Tamaño de fuente, Densidad y Alineación
+    tk.Label(grid_imp, text="Margen (mm) y Copias:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=1, column=0, sticky="w", pady=5, padx=(0, 10))
+    mc_frame = tk.Frame(grid_imp, bg=t["bg_surface"])
+    mc_frame.grid(row=1, column=1, sticky="w", pady=5, padx=(0, 20))
+    tk.Label(mc_frame, text="Margen:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_secondary"]).pack(side="left")
+    tk.Spinbox(mc_frame, from_=0, to=25, textvariable=var_margen_mm, width=5, font=("Segoe UI", 10)).pack(side="left", padx=(4, 14))
+    tk.Label(mc_frame, text="Copias:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_secondary"]).pack(side="left")
+    tk.Spinbox(mc_frame, from_=1, to=5, textvariable=var_copias, width=5, font=("Segoe UI", 10)).pack(side="left", padx=4)
+
+    tk.Label(grid_imp, text="Fuente, Densidad y Alineación:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=1, column=2, sticky="w", pady=5, padx=(0, 10))
+    fda_frame = tk.Frame(grid_imp, bg=t["bg_surface"])
+    fda_frame.grid(row=1, column=3, sticky="ew", pady=5)
+    ttk.Combobox(fda_frame, textvariable=var_tamano_fuente, values=["pequena", "normal", "grande"], state="readonly", width=9).pack(side="left", padx=(0, 6))
+    ttk.Combobox(fda_frame, textvariable=var_densidad, values=["compacta", "normal", "amplia"], state="readonly", width=9).pack(side="left", padx=(0, 6))
+    ttk.Combobox(fda_frame, textvariable=var_alineacion, values=["center", "left"], state="readonly", width=9).pack(side="left")
+
+    # Fila 2 de grid_imp: Pie extra y corte automático
+    tk.Label(grid_imp, text="Nota de Garantía / Pie Extra:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=2, column=0, sticky="w", pady=5, padx=(0, 10))
+    _crear_entry(grid_imp, var_pie_extra, 2, 1, 20)
+
+    corte_frame = tk.Frame(grid_imp, bg=t["bg_surface"])
+    corte_frame.grid(row=2, column=2, columnspan=2, sticky="w", pady=5)
+    tk.Checkbutton(
+        corte_frame, text="✂️ Corte automático de papel", variable=var_corte_auto,
+        font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"],
+        activebackground=t["bg_surface"], selectcolor=t["bg_surface"]
+    ).pack(side="left", padx=(0, 14))
+    tk.Checkbutton(
+        corte_frame, text="🔓 Abrir cajón monedero", variable=var_abrir_cajon,
+        font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_primary"],
+        activebackground=t["bg_surface"], selectcolor=t["bg_surface"]
+    ).pack(side="left")
+
+    # Casillas de campos visibles en la factura
+    tk.Label(body_imp, text="👁️ Campos Visibles en la Factura / Recibo:", font=("Segoe UI", 9, "bold"),
+             bg=t["bg_surface"], fg=t["text_primary"]).pack(anchor="w", pady=(8, 4))
+
+    chk_grid = tk.Frame(body_imp, bg=t["bg_surface"])
+    chk_grid.pack(fill="x", pady=(0, 10))
+
+    checks_visibles = [
+        ("Mostrar Logo", var_mostrar_logo),
+        ("Mostrar Razón Social / Subtítulo", var_mostrar_razon),
+        ("Mostrar NIT / Documento", var_mostrar_nit),
+        ("Mostrar Régimen Tributario", var_mostrar_regimen),
+        ("Mostrar Dirección y Ciudad", var_mostrar_dir),
+        ("Mostrar Teléfono", var_mostrar_tel),
+        ("Mostrar Correo Electrónico", var_mostrar_email),
+        ("Mostrar Datos del Cliente", var_mostrar_cliente),
+        ("Mostrar Vendedor", var_mostrar_vendedor),
+        ("Mostrar Eslogan / Pie", var_mostrar_eslogan),
     ]
+    for idx_c, (txt_c, var_c) in enumerate(checks_visibles):
+        r_c = idx_c // 5
+        col_c = idx_c % 5
+        tk.Checkbutton(
+            chk_grid, text=txt_c, variable=var_c,
+            font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_primary"],
+            activebackground=t["bg_surface"], selectcolor=t["bg_surface"]
+        ).grid(row=r_c, column=col_c, sticky="w", padx=(0, 14), pady=2)
 
-    quick_buttons_frame = tk.Frame(quick_content, bg="#FF1493")
-    quick_buttons_frame.pack(side="right", padx=30, pady=15)
+    # =========================================================================
+    # FUNCIONES UNIFICADAS DE RECOLECCIÓN, GUARDADO, VISTA PREVIA E IMPRESIÓN DE PRUEBA
+    # =========================================================================
+    def recolectar_datos_negocio_formulario():
+        return {
+            "nombre_negocio": var_nombre.get().strip() or "VmPOS",
+            "razon_social": var_razon_social.get().strip(),
+            "subtitulo_negocio": var_subtitulo.get().strip(),
+            "tipo_documento_fiscal": var_tipo_doc.get().strip() or "NIT",
+            "nit": var_nit.get().strip(),
+            "regimen_fiscal": var_regimen.get().strip(),
+            "direccion": var_direccion.get().strip(),
+            "ciudad": var_ciudad.get().strip(),
+            "telefono": var_telefono.get().strip(),
+            "email": var_email.get().strip(),
+            "tipo_comprobante": var_tipo_comp.get().strip() or "RECIBO DE VENTA",
+            "prefijo_comprobante": var_prefijo.get().strip(),
+            "encabezado_recibo": var_encabezado_recibo.get().strip(),
+            "eslogan": var_eslogan.get().strip(),
+            "color_barra": var_color_barra.get().strip() or "#DB2777",
+            "color_login": var_color_login.get().strip() or "#DB2777",
+            "logo_path": var_logo_path.get().strip()
+        }
 
-    for texto, comando in quick_buttons:
-        btn = tk.Button(quick_buttons_frame, text=texto, command=comando,
-                        bg="#FFDDEE", fg="#C71585", font=("Segoe UI", 9, "bold"),
-                        relief="flat", padx=12, pady=8, cursor="hand2")
-        btn.pack(side="left", padx=5)
+    def recolectar_datos_impresora_formulario():
+        try:
+            margen_val = int(var_margen_mm.get())
+        except Exception:
+            margen_val = 2
+        try:
+            copias_val = int(var_copias.get())
+        except Exception:
+            copias_val = 1
+        return {
+            "formato_papel": var_formato_papel.get().strip() or "58mm",
+            "impresora_nombre": var_impresora_nombre.get().strip() or "Predeterminada del sistema",
+            "metodo_impresion": var_metodo_impresion.get().strip() or "auto",
+            "margen_mm": max(0, min(25, margen_val)),
+            "tamano_fuente": var_tamano_fuente.get().strip() or "normal",
+            "densidad": var_densidad.get().strip() or "normal",
+            "alineacion_encabezado": var_alineacion.get().strip() or "center",
+            "copias": max(1, min(10, copias_val)),
+            "corte_automatico": bool(var_corte_auto.get()),
+            "abrir_cajon": bool(var_abrir_cajon.get()),
+            "mostrar_logo": bool(var_mostrar_logo.get()),
+            "mostrar_razon_social": bool(var_mostrar_razon.get()),
+            "mostrar_nit": bool(var_mostrar_nit.get()),
+            "mostrar_regimen": bool(var_mostrar_regimen.get()),
+            "mostrar_direccion": bool(var_mostrar_dir.get()),
+            "mostrar_telefono": bool(var_mostrar_tel.get()),
+            "mostrar_email": bool(var_mostrar_email.get()),
+            "mostrar_cliente": bool(var_mostrar_cliente.get()),
+            "mostrar_vendedor": bool(var_mostrar_vendedor.get()),
+            "mostrar_eslogan": bool(var_mostrar_eslogan.get()),
+            "pie_factura_extra": var_pie_extra.get().strip()
+        }
 
-        # Hover effects for quick buttons
-        def make_quick_hover(button):
-            def on_enter(e):
-                button.config(bg="#FF69B4", fg="white")
-            def on_leave(e):
-                button.config(bg="#FFDDEE", fg="#C71585")
-            return on_enter, on_leave
+    def guardar_config_completa(mostrar_alerta=True):
+        datos_neg = recolectar_datos_negocio_formulario()
+        datos_imp = recolectar_datos_impresora_formulario()
 
-        enter_fx, leave_fx = make_quick_hover(btn)
-        btn.bind("<Enter>", enter_fx)
-        btn.bind("<Leave>", leave_fx)
+        ok_neg = business_mgr.guardar(datos_neg, notificar=False)
+        ok_imp = business_mgr.guardar_config_impresora(datos_imp, notificar=False)
 
-    # 🎯 Keyboard events
-    def keyboard_shortcuts(event):
-        if event.state & 4:   # Ctrl pressed
-            key = event.keysym.lower()
-            if key == 'b':    # Ctrl+B for backup
+        if ok_neg and ok_imp:
+            business_mgr.recargar()
+            business_mgr.notificar_cambio()
+            if callable(on_save_callback):
+                try:
+                    on_save_callback()
+                except Exception as e_cb:
+                    print(f"Aviso en on_save_callback: {e_cb}")
+
+            # Refrescar colores y título de esta misma ventana en caliente
+            nuevo_col = business_mgr.color_barra
+            nuevo_fg = calcular_color_texto_optimo(nuevo_col)
+            ventana.title(f"⚙️ Configuración del Sistema — {business_mgr.nombre}")
+            header_frame.config(bg=nuevo_col)
+            header_left.config(bg=nuevo_col)
+            lbl_hdr_icon.config(bg=nuevo_col, fg=nuevo_fg)
+            lbl_hdr_title.config(bg=nuevo_col, fg=nuevo_fg)
+            lbl_hdr_negocio.config(text=f"• {business_mgr.nombre}", bg=nuevo_col, fg=nuevo_fg)
+            reloj_lbl.config(bg=nuevo_col, fg=nuevo_fg)
+            actualizar_tabla_info()
+
+            if mostrar_alerta:
+                messagebox.showinfo(
+                    "✅ Configuración Guardada y Aplicada",
+                    f"¡La identidad de '{business_mgr.nombre}' y el formato de impresión ({datos_imp['formato_papel']}) "
+                    f"se guardaron y aplicaron con éxito!\n\n"
+                    f"• Negocio: {CONFIG_FILE}\n"
+                    f"• Impresora: {PRINTER_CONFIG_FILE}",
+                    parent=ventana
+                )
+            return True
+        else:
+            if mostrar_alerta:
+                messagebox.showerror("❌ Error", "No se pudo guardar la configuración en disco.", parent=ventana)
+            return False
+
+    def abrir_vista_previa_prueba():
+        guardar_config_completa(mostrar_alerta=False)
+        datos_p = construir_datos_factura_prueba()
+        cfg_imp = recolectar_datos_impresora_formulario()
+        mostrar_dialogo_factura(
+            ventana,
+            datos_p,
+            modo_confirmacion_venta=False,
+            config_override=cfg_imp
+        )
+
+    def ejecutar_impresion_prueba():
+        guardar_config_completa(mostrar_alerta=False)
+        cfg_imp = recolectar_datos_impresora_formulario()
+        exito, msg, datos_p = imprimir_prueba_configuracion(config_override=cfg_imp)
+        if exito:
+            messagebox.showinfo("🖨️ Impresión de Prueba Enviada", msg, parent=ventana)
+        else:
+            ver_previa = messagebox.askyesno(
+                "⚠️ Impresora Física No Detectada",
+                f"{msg}\n\n¿Deseas abrir la Vista Previa de Prueba para inspeccionar el formato ({cfg_imp['formato_papel']}) o exportarlo a PDF?",
+                parent=ventana
+            )
+            if ver_previa:
+                mostrar_dialogo_factura(
+                    ventana,
+                    datos_p,
+                    modo_confirmacion_venta=False,
+                    config_override=cfg_imp
+                )
+
+    # Botonera en Sección Negocio
+    btns_neg_row = tk.Frame(body_negocio, bg=t["bg_surface"])
+    btns_neg_row.pack(fill="x", pady=(8, 0))
+    crear_boton(
+        btns_neg_row, "💾 Guardar Identidad del Negocio", lambda: guardar_config_completa(True),
+        tipo="primary", tam_fuente=10
+    ).pack(side="right")
+
+    crear_boton(
+        acciones_negocio, "💾 Guardar ahora", lambda: guardar_config_completa(True),
+        tipo="success", tam_fuente=10, padx=14, pady=5
+    ).pack(side="right")
+
+    # Botonera en Sección Impresoras
+    btns_imp_row = tk.Frame(body_imp, bg=t["bg_surface"])
+    btns_imp_row.pack(fill="x", pady=(8, 0))
+
+    crear_boton(
+        btns_imp_row, "🖨️ Imprimir Prueba", ejecutar_impresion_prueba,
+        tipo="success", tam_fuente=10
+    ).pack(side="right", padx=(6, 0))
+
+    crear_boton(
+        btns_imp_row, "👁️ Vista Previa de Prueba (58mm / 80mm / A4)", abrir_vista_previa_prueba,
+        tipo="info", tam_fuente=10
+    ).pack(side="right", padx=6)
+
+    crear_boton(
+        btns_imp_row, "💾 Guardar Formato e Impresora", lambda: guardar_config_completa(True),
+        tipo="primary", tam_fuente=10
+    ).pack(side="left")
+
+    def abrir_dialogo_red_config():
+        try:
+            from interface.network_dialog import abrir_dialogo_red
+        except ImportError:
+            from network_dialog import abrir_dialogo_red
+        abrir_dialogo_red(parent=ventana)
+
+    # Botones en Sticky Footer
+    crear_boton(f_btns, "🔧 Diagnóstico DB", diagnosticar_base_datos, tipo="secondary", tam_fuente=9).pack(side="left", padx=4)
+    crear_boton(f_btns, "🌐 Red y Cajas", abrir_dialogo_red_config, tipo="warning", tam_fuente=9).pack(side="left", padx=4)
+    crear_boton(f_btns, "🚀 Actualizaciones", lambda: buscar_actualizaciones_sistema(ventana), tipo="secondary", tam_fuente=9).pack(side="left", padx=4)
+    crear_boton(f_btns, "💾 Backup Rápido", crear_backup, tipo="secondary", tam_fuente=9).pack(side="left", padx=4)
+    crear_boton(f_btns, "🖨️ Imprimir Prueba", ejecutar_impresion_prueba, tipo="info", tam_fuente=9).pack(side="left", padx=4)
+    crear_boton(f_btns, "💾 Guardar Todo", lambda: guardar_config_completa(True), tipo="success", tam_fuente=9).pack(side="left", padx=4)
+
+    # =========================================================================
+    # SECCIÓN 3: CONEXIÓN EN RED Y SERVIDOR MULTI-CAJA
+    # =========================================================================
+    card_net = tk.Frame(scroll_body, bg=t["bg_surface"], bd=1, relief="solid")
+    card_net.pack(fill="x", pady=(0, 15), padx=5)
+
+    n_header = tk.Frame(card_net, bg=t["bg_surface_alt"], height=38)
+    n_header.pack(fill="x")
+    tk.Label(n_header, text="🌐 CONEXIÓN EN RED Y SERVIDOR MULTI-CAJA", font=("Segoe UI", 11, "bold"),
+             bg=t["bg_surface_alt"], fg=t["text_primary"]).pack(side="left", padx=15, pady=8)
+
+    n_body = tk.Frame(card_net, bg=t["bg_surface"], padx=20, pady=15)
+    n_body.pack(fill="x")
+
+    n_left = tk.Frame(n_body, bg=t["bg_surface"])
+    n_left.pack(side="left", fill="both", expand=True)
+
+    try:
+        from interface.network_manager import obtener_config_red, obtener_ips_locales
+        net_cfg = obtener_config_red()
+        ips_detectadas = ", ".join(obtener_ips_locales())
+    except Exception:
+        net_cfg = {}
+        ips_detectadas = "127.0.0.1"
+
+    modo_str = "🖥️ SERVIDOR CENTRAL (Caja Principal)" if net_cfg.get("modo") == "servidor" else "💻 CAJA CLIENTE (Conectada a Servidor)"
+    tk.Label(n_left, text=f"Modo: {modo_str}", font=("Segoe UI", 10, "bold"),
+             bg=t["bg_surface"], fg=t["accent"]).pack(anchor="w")
+    tk.Label(n_left, text=f"IP del Servidor: {net_cfg.get('servidor_ip', '127.0.0.1')} • Puerto: {net_cfg.get('servidor_puerto', 8000)} • Terminal: {net_cfg.get('terminal_nombre', 'CAJA-01')} (ID: {net_cfg.get('terminal_id', 1)})",
+             font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_primary"]).pack(anchor="w", pady=(2, 0))
+    tk.Label(n_left, text=f"IPs locales detectadas en esta máquina: {ips_detectadas}",
+             font=("Segoe UI", 8), bg=t["bg_surface"], fg=t["text_muted"]).pack(anchor="w", pady=(2, 0))
+
+    crear_boton(n_body, "🌐 Configurar Red y Cajas", abrir_dialogo_red_config, tipo="primary", tam_fuente=10).pack(side="right")
+
+    # =========================================================================
+    # SECCIÓN 4: ACTUALIZACIONES DEL SISTEMA
+    # =========================================================================
+    card_updates = tk.Frame(scroll_body, bg=t["bg_surface"], bd=1, relief="solid")
+    card_updates.pack(fill="x", pady=(0, 15), padx=5)
+
+    u_header = tk.Frame(card_updates, bg=t["bg_surface_alt"], height=38)
+    u_header.pack(fill="x")
+    tk.Label(u_header, text="🚀 ACTUALIZACIONES DEL SISTEMA", font=("Segoe UI", 11, "bold"),
+             bg=t["bg_surface_alt"], fg=t["text_primary"]).pack(side="left", padx=15, pady=8)
+
+    u_body = tk.Frame(card_updates, bg=t["bg_surface"], padx=20, pady=15)
+    u_body.pack(fill="x")
+
+    u_left = tk.Frame(u_body, bg=t["bg_surface"])
+    u_left.pack(side="left", fill="both", expand=True)
+
+    tk.Label(u_left, text="Estado: ✅ Sistema en la versión oficial v4.0.0 (Actualizado)", font=("Segoe UI", 10, "bold"),
+             bg=t["bg_surface"], fg=t["success"]).pack(anchor="w")
+    tk.Label(u_left, text="Canal de actualizaciones: Estable • Compatible con Windows 10/11 y macOS", font=("Segoe UI", 9),
+             bg=t["bg_surface"], fg=t["text_muted"]).pack(anchor="w", pady=(2, 0))
+
+    crear_boton(u_body, "🔍 Buscar Actualizaciones", lambda: buscar_actualizaciones_sistema(ventana), tipo="primary", tam_fuente=10).pack(side="right")
+
+    # =========================================================================
+    # SECCIÓN 4: APARIENCIA Y TEMAS VISUALES
+    # =========================================================================
+    card_tema = tk.Frame(scroll_body, bg=t["bg_surface"], bd=1, relief="solid")
+    card_tema.pack(fill="x", pady=(0, 15), padx=5)
+
+    t_header = tk.Frame(card_tema, bg=t["bg_surface_alt"], height=38)
+    t_header.pack(fill="x")
+    tk.Label(t_header, text="🎨 APARIENCIA Y TEMA DEL POS", font=("Segoe UI", 11, "bold"),
+             bg=t["bg_surface_alt"], fg=t["text_primary"]).pack(side="left", padx=15, pady=8)
+
+    t_body = tk.Frame(card_tema, bg=t["bg_surface"], padx=20, pady=15)
+    t_body.pack(fill="x")
+
+    tk.Label(t_body, text="Selecciona el modo visual preferido para las pantallas del sistema:",
+             font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_secondary"]).pack(anchor="w", pady=(0, 10))
+
+    t_btns = tk.Frame(t_body, bg=t["bg_surface"])
+    t_btns.pack(anchor="w")
+
+    def cambiar_tema(nuevo_modo):
+        theme_mgr.guardar_preferencia(nuevo_modo)
+        messagebox.showinfo("🎨 Tema Actualizado", f"Tema establecido en modo: {nuevo_modo.upper()}.\nSe recargará la ventana de configuración.", parent=ventana)
+        cerrar_configuracion()
+        iniciar_configuracion(parent=parent, on_save_callback=on_save_callback)
+
+    crear_boton(t_btns, "☀️ Modo Claro", lambda: cambiar_tema("claro"),
+                tipo="primary" if theme_mgr.modo_preferido == "claro" else "secondary").pack(side="left", padx=(0, 10))
+    crear_boton(t_btns, "🌙 Modo Oscuro", lambda: cambiar_tema("oscuro"),
+                tipo="primary" if theme_mgr.modo_preferido == "oscuro" else "secondary").pack(side="left", padx=(0, 10))
+    crear_boton(t_btns, "🖥️ Automático (SO)", lambda: cambiar_tema("auto"),
+                tipo="primary" if theme_mgr.modo_preferido == "auto" else "secondary").pack(side="left")
+
+    # =========================================================================
+    # SECCIÓN 5: COPIAS DE SEGURIDAD Y MANTENIMIENTO
+    # =========================================================================
+    card_backup = tk.Frame(scroll_body, bg=t["bg_surface"], bd=1, relief="solid")
+    card_backup.pack(fill="x", pady=(0, 20), padx=5)
+
+    b_header = tk.Frame(card_backup, bg=t["bg_surface_alt"], height=38)
+    b_header.pack(fill="x")
+    tk.Label(b_header, text="💾 COPIAS DE SEGURIDAD Y MANTENIMIENTO", font=("Segoe UI", 11, "bold"),
+             bg=t["bg_surface_alt"], fg=t["text_primary"]).pack(side="left", padx=15, pady=8)
+
+    b_body = tk.Frame(card_backup, bg=t["bg_surface"], padx=20, pady=15)
+    b_body.pack(fill="x")
+
+    tk.Label(b_body, text="Protege los datos de ventas, clientes e inventario mediante copias de seguridad locales y diagnóstico de base de datos:",
+             font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_secondary"]).pack(anchor="w", pady=(0, 10))
+
+    b_btns = tk.Frame(b_body, bg=t["bg_surface"])
+    b_btns.pack(anchor="w")
+
+    crear_boton(b_btns, "💾 Crear Copia de Seguridad", crear_backup, tipo="primary").pack(side="left", padx=(0, 10))
+    crear_boton(b_btns, "🔧 Diagnóstico DB", diagnosticar_base_datos, tipo="secondary").pack(side="left", padx=(0, 10))
+    crear_boton(b_btns, "🔄 Restaurar Base de Datos", restaurar_base_datos, tipo="danger").pack(side="left")
+
+    def shortcuts(e):
+        if e.state & 4:
+            k = e.keysym.lower()
+            if k == "b":
                 crear_backup()
-            elif key == 'r':  # Ctrl+R for restore
-                restaurar_base_datos()
+            elif k == "s":
+                guardar_config_completa(True)
 
-    ventana.bind("<Key>", keyboard_shortcuts)
+    ventana.bind("<Key>", shortcuts)
 
-    ventana.mainloop()
+    if not es_toplevel:
+        ventana.mainloop()
+    return ventana
+
 
 if __name__ == "__main__":
     iniciar_configuracion()

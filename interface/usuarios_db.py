@@ -10,13 +10,11 @@ import hashlib
 import os
 from datetime import datetime
 
-# Ruta de la base de datos
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATABASE_DIR = os.path.join(BASE_DIR, '..', 'database')
-DATABASE_PATH = os.path.join(DATABASE_DIR, 'usuarios.db')
-
-# Crear directorio de base de datos si no existe
-os.makedirs(DATABASE_DIR, exist_ok=True)
+# Importar ruta de configuración centralizada
+try:
+    from interface.config import DB_USUARIOS_PATH as DATABASE_PATH
+except ImportError:
+    from config import DB_USUARIOS_PATH as DATABASE_PATH
 
 # Módulos disponibles en el sistema
 MODULOS_DISPONIBLES = [
@@ -38,7 +36,7 @@ def crear_tablas_iniciales():
     Crea las tablas necesarias en la base de datos si no existen.
     """
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = conectar_usuarios_db()
         cursor = conn.cursor()
         
         # Crear tabla de usuarios
@@ -51,7 +49,14 @@ def crear_tablas_iniciales():
                 estado TEXT NOT NULL DEFAULT 'Activo',
                 ultimo_acceso DATETIME,
                 fecha_registro DATETIME DEFAULT CURRENT_TIMESTAMP,
-                fecha_modificacion DATETIME DEFAULT CURRENT_TIMESTAMP
+                fecha_modificacion DATETIME DEFAULT CURRENT_TIMESTAMP,
+                nombre TEXT DEFAULT '',
+                apellidos TEXT DEFAULT '',
+                tipo_nomina TEXT DEFAULT 'Porcentual',
+                salario_diario REAL DEFAULT 0.0,
+                comision_porcentaje REAL DEFAULT 0.0,
+                comisiones_acumuladas REAL DEFAULT 0.0,
+                solicitud_liquidacion DATETIME
             )
         ''')
         
@@ -67,6 +72,22 @@ def crear_tablas_iniciales():
         ''')
         
         conn.commit()
+
+        # Migraciones (agregar columnas si no existen)
+        try:
+            cursor.execute("ALTER TABLE usuarios ADD COLUMN comision_porcentaje REAL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE usuarios ADD COLUMN comisiones_acumuladas REAL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE usuarios ADD COLUMN solicitud_liquidacion DATETIME")
+        except sqlite3.OperationalError:
+            pass
+
+        conn.commit()
         conn.close()
         print("✅ Tablas de usuarios creadas/verificadas correctamente.")
         return True
@@ -75,19 +96,7 @@ def crear_tablas_iniciales():
         print(f"❌ Error al crear tablas: {e}")
         return False
 
-def insertar_usuario(usuario, password, rol, estado="Activo"):
-    """
-    Inserta un nuevo usuario en la base de datos.
-    
-    Args:
-        usuario (str): Nombre de usuario
-        password (str): Contraseña en texto plano
-        rol (str): Rol del usuario (Administrador, Gerente, Vendedor)
-        estado (str): Estado del usuario (Activo, Inactivo)
-    
-    Returns:
-        bool: True si se insertó correctamente, False si ya existe
-    """
+def insertar_usuario(usuario, password, rol, estado="Activo", comision_porcentaje=0.0, nombre="", apellidos="", tipo_nomina="Porcentual", salario_diario=0.0):
     try:
         conn = sqlite3.connect(DATABASE_PATH)
         cursor = conn.cursor()
@@ -102,9 +111,9 @@ def insertar_usuario(usuario, password, rol, estado="Activo"):
         # Insertar nuevo usuario
         password_hash = hash_password(password)
         cursor.execute('''
-            INSERT INTO usuarios (usuario, password, rol, estado, fecha_registro, fecha_modificacion)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (usuario, password_hash, rol, estado, datetime.now(), datetime.now()))
+            INSERT INTO usuarios (usuario, password, rol, estado, fecha_registro, fecha_modificacion, comision_porcentaje, comisiones_acumuladas, nombre, apellidos, tipo_nomina, salario_diario)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+        ''', (usuario, password_hash, rol, estado, datetime.now(), datetime.now(), comision_porcentaje, nombre, apellidos, tipo_nomina, salario_diario))
         
         conn.commit()
         conn.close()
@@ -127,7 +136,7 @@ def obtener_usuarios():
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT id, usuario, rol, estado, ultimo_acceso, fecha_registro
+            SELECT id, usuario, rol, estado, ultimo_acceso, fecha_registro, comision_porcentaje, comisiones_acumuladas, solicitud_liquidacion
             FROM usuarios
             ORDER BY fecha_registro DESC
         ''')
@@ -140,7 +149,10 @@ def obtener_usuarios():
                 'rol': row[2],
                 'estado': row[3],
                 'ultimo_acceso': row[4] if row[4] else "Nunca",
-                'fecha_registro': row[5]
+                'fecha_registro': row[5],
+                'comision_porcentaje': row[6] if row[6] is not None else 0.0,
+                'comisiones_acumuladas': row[7] if row[7] is not None else 0.0,
+                'solicitud_liquidacion': row[8]
             })
         
         conn.close()
@@ -150,19 +162,9 @@ def obtener_usuarios():
         print(f"❌ Error al obtener usuarios: {e}")
         return []
 
-def actualizar_usuario_db(id_usuario, usuario=None, rol=None, estado=None, password=None):
+def actualizar_usuario_db(id_usuario, usuario=None, rol=None, estado=None, password=None, comision_porcentaje=None, nombre=None, apellidos=None, tipo_nomina=None, salario_diario=None):
     """
     Actualiza la información de un usuario existente.
-    
-    Args:
-        id_usuario (int): ID del usuario a actualizar
-        usuario (str, optional): Nuevo nombre de usuario
-        rol (str, optional): Nuevo rol
-        estado (str, optional): Nuevo estado
-        password (str, optional): Nueva contraseña en texto plano
-    
-    Returns:
-        bool: True si se actualizó correctamente, False en caso contrario
     """
     try:
         conn = sqlite3.connect(DATABASE_PATH)
@@ -187,6 +189,23 @@ def actualizar_usuario_db(id_usuario, usuario=None, rol=None, estado=None, passw
         if password:
             campos_actualizar.append("password = ?")
             valores.append(hash_password(password))
+
+        if comision_porcentaje is not None:
+            campos_actualizar.append("comision_porcentaje = ?")
+            valores.append(comision_porcentaje)
+
+        if nombre is not None:
+            campos_actualizar.append("nombre = ?")
+            valores.append(nombre)
+        if apellidos is not None:
+            campos_actualizar.append("apellidos = ?")
+            valores.append(apellidos)
+        if tipo_nomina is not None:
+            campos_actualizar.append("tipo_nomina = ?")
+            valores.append(tipo_nomina)
+        if salario_diario is not None:
+            campos_actualizar.append("salario_diario = ?")
+            valores.append(salario_diario)
         
         # Siempre actualizar fecha de modificación
         campos_actualizar.append("fecha_modificacion = ?")
@@ -211,12 +230,6 @@ def actualizar_usuario_db(id_usuario, usuario=None, rol=None, estado=None, passw
 def eliminar_usuario_db(id_usuario):
     """
     Elimina un usuario de la base de datos.
-    
-    Args:
-        id_usuario (int): ID del usuario a eliminar
-    
-    Returns:
-        bool: True si se eliminó correctamente, False en caso contrario
     """
     try:
         conn = sqlite3.connect(DATABASE_PATH)
@@ -236,13 +249,6 @@ def eliminar_usuario_db(id_usuario):
 def obtener_usuario_por_credenciales(usuario, password):
     """
     Verifica las credenciales de un usuario y retorna su información.
-    
-    Args:
-        usuario (str): Nombre de usuario
-        password (str): Contraseña en texto plano
-    
-    Returns:
-        dict or None: Información del usuario si las credenciales son correctas, None en caso contrario
     """
     try:
         conn = sqlite3.connect(DATABASE_PATH)
@@ -250,7 +256,7 @@ def obtener_usuario_por_credenciales(usuario, password):
         
         password_hash = hash_password(password)
         cursor.execute('''
-            SELECT id, usuario, rol, estado, ultimo_acceso, fecha_registro
+            SELECT id, usuario, rol, estado, ultimo_acceso, fecha_registro, comision_porcentaje, comisiones_acumuladas
             FROM usuarios
             WHERE usuario = ? AND password = ? AND estado = 'Activo'
         ''', (usuario, password_hash))
@@ -272,7 +278,9 @@ def obtener_usuario_por_credenciales(usuario, password):
                 'estado': resultado[3],
                 'ultimo_acceso': resultado[4],
                 'fecha_registro': resultado[5],
-                'permisos': resultado[2].lower()  # Para compatibilidad con el sistema existente
+                'permisos': resultado[2].lower(),  # Para compatibilidad con el sistema existente
+                'comision_porcentaje': resultado[6] if resultado[6] is not None else 0.0,
+                'comisiones_acumuladas': resultado[7] if resultado[7] is not None else 0.0
             }
             
             conn.close()
@@ -284,6 +292,38 @@ def obtener_usuario_por_credenciales(usuario, password):
     except Exception as e:
         print(f"❌ Error al verificar credenciales: {e}")
         return None
+
+def pedir_liquidacion(id_usuario):
+    """Registra la hora en que el empleado pidió liquidación."""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE usuarios SET solicitud_liquidacion = ? WHERE id = ?", (datetime.now(), id_usuario))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"❌ Error al pedir liquidación: {e}")
+        return False
+
+def liquidar_comisiones(id_usuario):
+    """Pone en cero las comisiones y limpia la solicitud."""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        
+        # Obtener cuánto se le va a pagar para registrarlo como gasto o simplemente devolverlo
+        cursor.execute("SELECT comisiones_acumuladas FROM usuarios WHERE id = ?", (id_usuario,))
+        resultado = cursor.fetchone()
+        comisiones = resultado[0] if resultado else 0.0
+
+        cursor.execute("UPDATE usuarios SET comisiones_acumuladas = 0, solicitud_liquidacion = NULL WHERE id = ?", (id_usuario,))
+        conn.commit()
+        conn.close()
+        return comisiones
+    except Exception as e:
+        print(f"❌ Error al liquidar: {e}")
+        return 0.0
 
 def obtener_permisos_por_usuario(usuario_id):
     """
@@ -367,3 +407,12 @@ if __name__ == "__main__":
     # Descomenta la siguiente línea si quieres migrar los usuarios del sistema actual
     # migrar_usuarios_existentes()
     print("✅ Base de datos de usuarios lista.")
+def conectar_usuarios_db():
+    import sqlite3
+    try:
+        from interface.config import DB_USUARIOS_PATH
+    except ImportError:
+        from config import DB_USUARIOS_PATH
+    ruta = os.environ.get("VMPOS_DB_USUARIOS") or DB_USUARIOS_PATH
+    return sqlite3.connect(ruta)
+

@@ -1,0 +1,8 @@
+{
+    "modo": "servidor",
+    "servidor_ip": "127.0.0.1",
+    "servidor_puerto": 8000,
+    "terminal_id": 1,
+    "terminal_nombre": "CAJA-01",
+    "timeout_segundos": 10
+}

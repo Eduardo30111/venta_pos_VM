@@ -10,6 +10,8 @@ import math
 import threading
 import sys
 import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from interface.theme_manager import theme_mgr, aplicar_tema
 
 # Configuración de rutas para PyInstaller
 if getattr(sys, 'frozen', False):
@@ -59,10 +61,11 @@ def mostrar_carga(nombre="Usuario", usuario_info=None):
     # Iniciar TTS en hilo separado para no bloquear la UI
     threading.Thread(target=reproducir_bienvenida, daemon=True).start()
 
+    t = theme_mgr.get_theme_tokens()
     ventana = tk.Tk()
     ventana.title(f"VmPOS - Bienvenido {nombre_real} ✨")
     ventana.geometry("550x350")  # Tamaño reducido
-    ventana.configure(bg="#ff9ff3")
+    ventana.configure(bg=t["accent"])
     ventana.resizable(False, False)
     ventana.overrideredirect(True)  # Sin barra de título para carga más elegante
     
@@ -72,18 +75,16 @@ def mostrar_carga(nombre="Usuario", usuario_info=None):
     y = (ventana.winfo_screenheight() // 2) - (350 // 2)
     ventana.geometry(f"550x350+{x}+{y}")
 
-    # Marco principal con borde redondeado simulado
-    main_frame = tk.Frame(ventana, bg="#ffeaa7", width=530, height=330)
+    # Marco principal con borde
+    main_frame = tk.Frame(ventana, bg=t["bg_surface"], width=530, height=330)
     main_frame.place(relx=0.5, rely=0.5, anchor="center")
-    main_frame.pack_propagate(False)
 
     # Header compacto
-    header_frame = tk.Frame(main_frame, bg="#e84393", height=60)
+    header_frame = tk.Frame(main_frame, bg=t["accent"], height=60)
     header_frame.pack(fill="x")
-    header_frame.pack_propagate(False)
 
     # Iconos animados del header (reducidos)
-    icons_frame = tk.Frame(header_frame, bg="#e84393")
+    icons_frame = tk.Frame(header_frame, bg=t["accent"])
     icons_frame.pack(expand=True)
 
     icons = ["🌸", "💖", "✨"]  # Menos iconos para mayor velocidad
@@ -91,40 +92,38 @@ def mostrar_carga(nombre="Usuario", usuario_info=None):
     
     for i, icon in enumerate(icons):
         label = tk.Label(icons_frame, text=icon, font=("Segoe UI Emoji", 16), 
-                         bg="#e84393", fg="white")
+                         bg=t["accent"], fg="white")
         label.grid(row=0, column=i, padx=20, pady=15)
         icon_labels.append(label)
 
     # Información del usuario
-    user_info_frame = tk.Frame(main_frame, bg="#ffeaa7")
+    user_info_frame = tk.Frame(main_frame, bg=t["bg_surface"])
     user_info_frame.pack(pady=15)
 
     if usuario_info:
-        # Corrección: se usan las claves correctas 'usuario' y 'permisos'
         nombre_usuario = usuario_info.get('usuario', nombre_real)
         permisos_usuario = usuario_info.get('rol_completo', usuario_info.get('permisos', 'No definido'))
 
         tk.Label(user_info_frame, text=f"¡Hola {nombre_usuario.capitalize()}! 👋", 
-                 font=("Segoe UI", 20, "bold"), bg="#ffeaa7", fg="#e84393").pack()
+                 font=("Segoe UI", 20, "bold"), bg=t["bg_surface"], fg=t["accent"]).pack()
         
         tk.Label(user_info_frame, text=f"Rol: {permisos_usuario}", 
-                 font=("Segoe UI", 12), bg="#ffeaa7", fg="#2d3436").pack()
+                 font=("Segoe UI", 12), bg=t["bg_surface"], fg=t["text_primary"]).pack()
         
         tk.Label(user_info_frame, text="Iniciando VmPOS...", 
-                 font=("Segoe UI", 14), bg="#ffeaa7", fg="#636e72").pack(pady=(5, 0))
+                 font=("Segoe UI", 14), bg=t["bg_surface"], fg=t["text_secondary"]).pack(pady=(5, 0))
     else:
         tk.Label(user_info_frame, text=f"¡Hola {nombre_real}! 👋", 
-                 font=("Segoe UI", 20, "bold"), bg="#ffeaa7", fg="#e84393").pack()
+                 font=("Segoe UI", 20, "bold"), bg=t["bg_surface"], fg=t["accent"]).pack()
         
         tk.Label(user_info_frame, text="Iniciando VmPOS...", 
-                 font=("Segoe UI", 14), bg="#ffeaa7", fg="#636e72").pack(pady=(10, 0))
+                 font=("Segoe UI", 14), bg=t["bg_surface"], fg=t["text_secondary"]).pack(pady=(10, 0))
 
     # Loader circular más pequeño y rápido
-    loader_frame = tk.Frame(main_frame, bg="#ffeaa7", width=100, height=100)
+    loader_frame = tk.Frame(main_frame, bg=t["bg_surface"], width=100, height=100)
     loader_frame.pack(pady=15)
-    loader_frame.pack_propagate(False)
 
-    canvas = tk.Canvas(loader_frame, width=80, height=80, bg="#ffeaa7", 
+    canvas = tk.Canvas(loader_frame, width=80, height=80, bg=t["bg_surface"], 
                        highlightthickness=0)
     canvas.place(relx=0.5, rely=0.5, anchor="center")
 
@@ -139,31 +138,36 @@ def mostrar_carga(nombre="Usuario", usuario_info=None):
         y = center_y + radius * math.sin(math.radians(angle))
         
         circle = canvas.create_oval(x-3, y-3, x+3, y+3, 
-                                     fill="#fed3d7", outline="", width=0)
+                                     fill=t["border"], outline="", width=0)
         circles.append(circle)
 
     # Barra de progreso más pequeña
-    progress_frame = tk.Frame(main_frame, bg="#ffeaa7")
+    progress_frame = tk.Frame(main_frame, bg=t["bg_surface"])
     progress_frame.pack(pady=10, padx=40, fill="x")
 
-    progress_bg = tk.Frame(progress_frame, bg="#fed3d7", height=4)
+    progress_bg = tk.Frame(progress_frame, bg=t["border"], height=4)
     progress_bg.pack(fill="x")
 
-    progress_bar = tk.Frame(progress_bg, bg="#fd79a8", height=4, width=0)
+    progress_bar = tk.Frame(progress_bg, bg=t["accent"], height=4, width=0)
     progress_bar.pack(side="left")
 
     # Estado de carga
     status_label = tk.Label(main_frame, text="Preparando...", 
-                            font=("Segoe UI", 11), bg="#ffeaa7", fg="#2d3436")
+                            font=("Segoe UI", 11), bg=t["bg_surface"], fg=t["text_primary"])
     status_label.pack(pady=5)
 
     # Footer compacto
-    footer_frame = tk.Frame(main_frame, bg="#e84393", height=40)
+    footer_frame = tk.Frame(main_frame, bg=t["accent"], height=40)
     footer_frame.pack(side="bottom", fill="x")
-    footer_frame.pack_propagate(False)
 
-    tk.Label(footer_frame, text="VmPOS • Centro de Copiado & Papelería", 
-             font=("Segoe UI", 10, "bold"), bg="#e84393", fg="white").pack(pady=10)
+    try:
+        from business_manager import business_mgr
+    except ImportError:
+        from interface.business_manager import business_mgr
+    business_mgr.recargar()
+    txt_footer_carga = f"{business_mgr.nombre} • {business_mgr.subtitulo}" if business_mgr.subtitulo else business_mgr.nombre
+    tk.Label(footer_frame, text=txt_footer_carga, 
+             font=("Segoe UI", 10, "bold"), bg=t["accent"], fg="white").pack(pady=10)
 
     # Variables de animación (optimizadas)
     progress_width = 0
@@ -203,11 +207,11 @@ def mostrar_carga(nombre="Usuario", usuario_info=None):
                 # Animar círculos del loader
                 for i, circle in enumerate(circles):
                     if i == indice:
-                        canvas.itemconfig(circle, fill="#fd79a8")
+                        canvas.itemconfig(circle, fill=t["accent"])
                     elif i == (indice - 1) % 8:
-                        canvas.itemconfig(circle, fill="#a29bfe")
+                        canvas.itemconfig(circle, fill="#8B5CF6")
                     else:
-                        canvas.itemconfig(circle, fill="#fed3d7")
+                        canvas.itemconfig(circle, fill=t["border"])
                 
                 # Animar barra de progreso
                 progress_width = (ciclos / (total_cycles - 1)) * max_width
@@ -222,7 +226,7 @@ def mostrar_carga(nombre="Usuario", usuario_info=None):
             elif ventana.winfo_exists():
                 # Finalizar
                 status_label.config(text="¡Listo! 🎉")
-                progress_bar.config(width=max_width, bg="#55efc4")
+                progress_bar.config(width=max_width, bg="#10B981")
                 ventana.update()
                 ventana.after(200, ventana.destroy)  # Cerrar rápidamente
         except tk.TclError:

@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.bak
+
+# Entornos virtuales
+venv/
+.venv/
+env/
+ENV/
+
+# PyInstaller / Compilación
+build/
+*.spec.bak
+
+# Archivos pesados de distribución (se descargan o generan con build_windows / build_macos)
+dist/*.zip
+dist/*.dmg
+dist/VmPOS/
+dist/VmPOS.app/
+
+# Logs y depuración
+*.log
+trace_output.log
+scratch/
+.system_generated/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db

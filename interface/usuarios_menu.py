@@ -1,528 +1,555 @@
 # -*- coding: utf-8 -*-
 """
 Archivo: usuarios_menu.py
-Interfaz de gestión de usuarios para VmPOS.
+Interfaz de gestión de usuarios para VmPOS conectada a la API REST centralizada.
+Alineado con el Modelo de Datos de implementation_plan.md
 """
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
-import os
-import sqlite3
+import sys, os
 
-# Importar funciones de la base de datos de usuarios
-from usuarios_db import (
-    crear_tablas_iniciales, insertar_usuario, obtener_usuarios,
-    actualizar_usuario_db, eliminar_usuario_db,
-    obtener_permisos_por_usuario, MODULOS_DISPONIBLES, hash_password,
-    obtener_usuario_por_credenciales, inicializar_admin_default,
-    migrar_usuarios_existentes
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from client.api_client import api
+from interface.theme_manager import (
+    theme_mgr, aplicar_tema, calcular_geometria_segura,
+    crear_boton, ScrollableContainer, calcular_color_texto_optimo,
+    iniciar_observador_tema
 )
+try:
+    from session_manager import session_mgr
+except ImportError:
+    from interface.session_manager import session_mgr
 
-# 🌐 Variables globales para los widgets de la interfaz
+# Variables globales
 entradas = {}
 tabla = None
 ventana_usuarios = None
 rol_var = None
 estado_var = None
+tipo_nomina_var = None
+salario_diario_var = None
 id_usuario_seleccionado = None
 
-def inicializar_sistema_usuarios():
-    """Inicializa el sistema de usuarios creando tablas y datos por defecto."""
-    print("🔧 Inicializando sistema de usuarios...")
-    crear_tablas_iniciales()
-    inicializar_admin_default()
-    
-    # Verificar si hay usuarios en la base de datos
-    usuarios = obtener_usuarios()
-    if len(usuarios) == 0:
-        print("📥 Base de datos vacía, cargando datos de ejemplo...")
-        cargar_datos_ejemplo()
-    else:
-        print(f"✅ Se encontraron {len(usuarios)} usuarios en la base de datos.")
+def _sincronizar_local_nomina(user_dict, forzar_config=True):
+    """Sincroniza el usuario creado/editado con usuarios.db para Nómina y Comisiones."""
+    try:
+        from interface.nomina_manager import sincronizar_usuario_desde_dict
+        sincronizar_usuario_desde_dict(user_dict, forzar_config=forzar_config)
+    except Exception:
+        try:
+            from nomina_manager import sincronizar_usuario_desde_dict
+            sincronizar_usuario_desde_dict(user_dict, forzar_config=forzar_config)
+        except Exception as e_sync:
+            print(f"Aviso sincronizando usuario local: {e_sync}")
 
-def cargar_datos_ejemplo():
-    """Carga datos de ejemplo en la base de datos."""
-    usuarios_ejemplo = [
-        {"usuario": "admin", "password": "admin123", "rol": "Administrador", "estado": "Activo"},
-        {"usuario": "eduardo", "password": "2121", "rol": "Administrador", "estado": "Activo"},
-        {"usuario": "andres", "password": "2180", "rol": "Vendedor", "estado": "Activo"},
-        {"usuario": "gerente", "password": "manager", "rol": "Gerente", "estado": "Activo"},
-        {"usuario": "vendedor1", "password": "pass123", "rol": "Vendedor", "estado": "Activo"}
-    ]
-    
-    for user in usuarios_ejemplo:
-        resultado = insertar_usuario(
-            user["usuario"],
-            user["password"],
-            user["rol"],
-            user["estado"]
-        )
-        if resultado:
-            print(f"✅ Usuario '{user['usuario']}' creado correctamente.")
+def obtener_usuarios():
+    """Obtiene la lista de usuarios desde la API REST y sincroniza con usuarios.db"""
+    try:
+        resp = api.get("/usuarios?size=1000")
+        if resp.status_code == 200:
+            data = resp.json()
+            items = data.get("items", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            for it in items:
+                _sincronizar_local_nomina(it, forzar_config=False)
+            return items
         else:
-            print(f"⚠️ Usuario '{user['usuario']}' ya existe o hubo un error.")
+            return []
+    except Exception as e:
+        print(f"Error al obtener usuarios: {e}")
+        return []
+
+def insertar_usuario(usuario, password, rol, estado, comision=0.0, nombre="", apellidos="", tipo_nom="Porcentual", salario=0.0, documento=""):
+    """Crea un nuevo usuario a través de la API REST y lo sincroniza en usuarios.db"""
+    payload = {
+        "usuario": usuario,
+        "password": password,
+        "rol": rol,
+        "estado": estado,
+        "nombre": nombre or "",
+        "apellidos": apellidos or "",
+        "documento": documento or None,
+        "tipo_remuneracion": tipo_nom or "Porcentual",
+        "salario_diario": float(salario) if salario else 0.0,
+        "porcentaje_comision": float(comision) if comision else 0.0
+    }
+    try:
+        resp = api.post("/usuarios", json=payload)
+        if resp.status_code in (200, 201):
+            _sincronizar_local_nomina(payload, forzar_config=True)
+            return True, "Usuario creado exitosamente"
+        else:
+            detail = resp.text
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except:
+                pass
+            return False, f"Error del servidor ({resp.status_code}):\n{detail}"
+    except Exception as e:
+        return False, f"Error de conexión:\n{e}"
+
+def actualizar_usuario_db(id_usuario, usuario, rol, estado, password=None, comision=0.0, nombre="", apellidos="", tipo_nom="Porcentual", salario=0.0, documento=""):
+    """Actualiza un usuario a través de la API REST y lo sincroniza en usuarios.db"""
+    payload = {
+        "usuario": usuario,
+        "rol": rol,
+        "estado": estado,
+        "nombre": nombre or "",
+        "apellidos": apellidos or "",
+        "documento": documento or None,
+        "tipo_remuneracion": tipo_nom or "Porcentual",
+        "salario_diario": float(salario) if salario else 0.0,
+        "porcentaje_comision": float(comision) if comision else 0.0
+    }
+    if password:
+        payload["password"] = password
+
+    try:
+        resp = api.put(f"/usuarios/{id_usuario}", json=payload)
+        if resp.status_code in (200, 204):
+            _sincronizar_local_nomina(payload, forzar_config=True)
+            return True, "Usuario actualizado exitosamente"
+        else:
+            detail = resp.text
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except:
+                pass
+            return False, f"Error del servidor ({resp.status_code}):\n{detail}"
+    except Exception as e:
+        return False, f"Error de conexión:\n{e}"
+
+def eliminar_usuario_db(id_usuario):
+    """Elimina un usuario a través de la API REST"""
+    try:
+        resp = api.delete(f"/usuarios/{id_usuario}")
+        if resp.status_code in (200, 204):
+            return True, "Usuario eliminado correctamente"
+        else:
+            detail = resp.text
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except:
+                pass
+            return False, f"Error del servidor ({resp.status_code}):\n{detail}"
+    except Exception as e:
+        return False, f"Error de conexión:\n{e}"
 
 def actualizar_tabla():
-    """
-    Actualiza la tabla con los datos más recientes de la base de datos.
-    """
+    """Actualiza la tabla con los datos más recientes de la API"""
     global tabla
-    
     if not tabla:
         return
-    
-    # Limpiar tabla actual
+
     for item in tabla.get_children():
         tabla.delete(item)
 
-    # Obtener usuarios de la base de datos
     usuarios = obtener_usuarios()
-    print(f"📋 Cargando {len(usuarios)} usuarios en la tabla.")
-
-    # Insertar los datos en la tabla
-    for usuario in usuarios:
-        # Formatear las fechas para mejor visualización
-        fecha_registro = usuario['fecha_registro']
-        if isinstance(fecha_registro, str):
+    for u in usuarios:
+        fecha_registro = u.get("fecha_registro", "")
+        if isinstance(fecha_registro, str) and fecha_registro:
             try:
-                # Intentar parsear la fecha si viene como string
-                fecha_obj = datetime.fromisoformat(fecha_registro.replace('Z', '+00:00'))
+                fecha_obj = datetime.fromisoformat(fecha_registro.replace("Z", "+00:00"))
                 fecha_formateada = fecha_obj.strftime("%d/%m/%Y %H:%M")
             except:
-                fecha_formateada = fecha_registro
+                fecha_formateada = fecha_registro[:16]
         else:
-            fecha_formateada = str(fecha_registro) if fecha_registro else "No disponible"
-        
-        ultimo_acceso = usuario['ultimo_acceso']
-        if ultimo_acceso and ultimo_acceso != "Nunca":
+            fecha_formateada = "No disponible"
+
+        ultimo_acceso = u.get("ultimo_acceso")
+        if ultimo_acceso:
             try:
-                if isinstance(ultimo_acceso, str):
-                    fecha_obj = datetime.fromisoformat(ultimo_acceso.replace('Z', '+00:00'))
-                    ultimo_acceso = fecha_obj.strftime("%d/%m/%Y %H:%M")
+                fecha_obj = datetime.fromisoformat(str(ultimo_acceso).replace("Z", "+00:00"))
+                ultimo_acceso = fecha_obj.strftime("%d/%m/%Y %H:%M")
             except:
-                pass
-        
+                ultimo_acceso = str(ultimo_acceso)[:16]
+        else:
+            ultimo_acceso = "Nunca"
+
+        nombre_completo = f"{u.get('nombre', '')} {u.get('apellidos', '')}".strip() or u.get("usuario")
+        remun = f"{u.get('tipo_remuneracion', 'Porcentual')}"
+        if u.get("tipo_remuneracion") == "Fija":
+            remun += f" (${u.get('salario_diario', 0):,.0f})"
+        else:
+            remun += f" ({u.get('porcentaje_comision', 0):.1f}%)"
+
         valores = (
-            usuario['id'],
-            usuario['usuario'],
-            usuario['rol'],
-            usuario['estado'],
-            ultimo_acceso if ultimo_acceso else "Nunca",
+            u["id"],
+            u["usuario"],
+            nombre_completo,
+            u.get("documento") or "Sin doc",
+            u["rol"],
+            remun,
+            u.get("estado", "Activo"),
+            ultimo_acceso,
             fecha_formateada
         )
-        
         tabla.insert("", "end", values=valores)
-    
-    print("✅ Tabla actualizada correctamente.")
 
 def seleccionar_usuario(event):
-    """
-    Carga los datos del usuario seleccionado en los campos de edición.
-    """
-    global id_usuario_seleccionado
-    global entradas, rol_var, estado_var
+    """Carga los datos del usuario seleccionado en los campos del formulario"""
+    global id_usuario_seleccionado, rol_var, estado_var, tipo_nomina_var, salario_diario_var
 
-    item_seleccionado = tabla.focus()
-    if not item_seleccionado:
+    sel = tabla.selection()
+    if not sel:
         return
-    
+
+    item_seleccionado = sel[0]
     try:
-        # Obtener los valores de la fila seleccionada
-        valores = tabla.item(item_seleccionado, 'values')
-        
+        valores = tabla.item(item_seleccionado, "values")
         if not valores:
             return
-        
-        # Guardar el ID del usuario seleccionado
+
         id_usuario_seleccionado = int(valores[0])
-        
-        # Cargar los valores en los campos de entrada
-        entradas['Usuario'].delete(0, tk.END)
-        entradas['Usuario'].insert(0, valores[1])
-        
-        # Limpiar el campo de contraseña por seguridad
-        entradas['Password'].delete(0, tk.END)
-        entradas['Password'].insert(0, "")  # Campo vacío para nueva contraseña (opcional)
-        
-        # Establecer rol y estado
-        rol_var.set(valores[2])
-        estado_var.set(valores[3])
-        
-        print(f"👤 Usuario seleccionado: {valores[1]} (ID: {id_usuario_seleccionado})")
-        
+
+        limpiar_campos(reset_id=False)
+
+        usuarios = obtener_usuarios()
+        for u in usuarios:
+            if u["id"] == id_usuario_seleccionado:
+                entradas["Usuario"].insert(0, u.get("usuario", ""))
+                entradas["Nombre"].insert(0, u.get("nombre", ""))
+                entradas["Apellidos"].insert(0, u.get("apellidos", ""))
+                entradas["Documento"].insert(0, u.get("documento") or "")
+
+                rol_var.set(u.get("rol", "Vendedor"))
+                estado_var.set(u.get("estado", "Activo"))
+
+                tipo_nom = u.get("tipo_remuneracion", "Porcentual")
+                tipo_nomina_var.set(tipo_nom)
+
+                if tipo_nom == "Fija":
+                    salario_diario_var.set(str(int(u.get("salario_diario", 0))))
+                else:
+                    salario_diario_var.set(str(u.get("porcentaje_comision", 0)))
+                break
     except Exception as e:
-        print(f"❌ Error al seleccionar usuario: {e}")
-        messagebox.showerror("Error", f"Error al cargar datos del usuario: {e}")
+        print(f"Error al seleccionar usuario: {e}")
 
 def guardar_usuario():
-    """
-    Guarda o actualiza un usuario en la base de datos.
-    """
+    """Guarda o actualiza un usuario"""
     global id_usuario_seleccionado
-    
-    usuario = entradas['Usuario'].get().strip()
-    password = entradas['Password'].get().strip()
+
+    usuario = entradas["Usuario"].get().strip()
+    password = entradas["Password"].get().strip()
+    nombre = entradas["Nombre"].get().strip()
+    apellidos = entradas["Apellidos"].get().strip()
+    documento = entradas["Documento"].get().strip()
+
     rol = rol_var.get()
     estado = estado_var.get()
-    
-    # Validaciones
+    tipo_nom = tipo_nomina_var.get()
+
+    try:
+        valor_nom = float(salario_diario_var.get().replace("$", "").replace(",", "").strip() or 0)
+    except ValueError:
+        valor_nom = 0.0
+
+    if tipo_nom == "Porcentual" and valor_nom > 100.0:
+        tipo_nom = "Fija"
+        tipo_nomina_var.set("Fija")
+
+    salario = valor_nom if tipo_nom == "Fija" else 0.0
+    comision = valor_nom if tipo_nom == "Porcentual" else 0.0
+
     if not usuario:
-        messagebox.showerror("Error", "El campo Usuario es obligatorio.")
-        entradas['Usuario'].focus()
+        messagebox.showerror("Error", "El campo Usuario es obligatorio.", parent=ventana_usuarios)
+        entradas["Usuario"].focus()
         return
-    
     if rol == "Seleccionar" or not rol:
-        messagebox.showerror("Error", "Debes seleccionar un rol.")
+        messagebox.showerror("Error", "Debes seleccionar un rol válido (Administrador, Vendedor, Operario).", parent=ventana_usuarios)
         return
-    
     if estado == "Seleccionar" or not estado:
-        messagebox.showerror("Error", "Debes seleccionar un estado.")
+        messagebox.showerror("Error", "Debes seleccionar un estado.", parent=ventana_usuarios)
         return
-    
+
     try:
         if id_usuario_seleccionado:
-            # Actualizar usuario existente
-            print(f"🔄 Actualizando usuario con ID: {id_usuario_seleccionado}")
-            
-            # Si no se proporciona contraseña, no la actualizar
-            if password:
-                resultado = actualizar_usuario_db(
-                    id_usuario_seleccionado, 
-                    usuario=usuario, 
-                    rol=rol, 
-                    estado=estado, 
-                    password=password
-                )
+            ok, msg = actualizar_usuario_db(
+                id_usuario_seleccionado,
+                usuario=usuario,
+                rol=rol,
+                estado=estado,
+                password=password if password else None,
+                comision=comision,
+                nombre=nombre,
+                apellidos=apellidos,
+                tipo_nom=tipo_nom,
+                salario=salario,
+                documento=documento
+            )
+            if ok:
+                messagebox.showinfo("Éxito", f"Usuario '{usuario}' actualizado correctamente.", parent=ventana_usuarios)
+                limpiar_campos()
+                actualizar_tabla()
             else:
-                resultado = actualizar_usuario_db(
-                    id_usuario_seleccionado, 
-                    usuario=usuario, 
-                    rol=rol, 
-                    estado=estado
-                )
-            
-            if resultado:
-                messagebox.showinfo("Éxito", f"Usuario '{usuario}' actualizado correctamente.")
-            else:
-                messagebox.showerror("Error", "No se pudo actualizar el usuario.")
+                messagebox.showerror("Error", msg, parent=ventana_usuarios)
         else:
-            # Crear nuevo usuario
             if not password:
-                messagebox.showerror("Error", "La contraseña es obligatoria para un nuevo usuario.")
-                entradas['Password'].focus()
+                messagebox.showerror("Error", "La contraseña es obligatoria para un nuevo usuario.", parent=ventana_usuarios)
+                entradas["Password"].focus()
                 return
-            
-            print(f"➕ Creando nuevo usuario: {usuario}")
-            resultado = insertar_usuario(usuario, password, rol, estado)
-            
-            if resultado:
-                messagebox.showinfo("Éxito", f"Usuario '{usuario}' creado correctamente.")
+
+            ok, msg = insertar_usuario(
+                usuario, password, rol, estado, comision, nombre, apellidos, tipo_nom, salario, documento
+            )
+            if ok:
+                messagebox.showinfo("Éxito", f"Usuario '{usuario}' registrado correctamente.", parent=ventana_usuarios)
+                limpiar_campos()
+                actualizar_tabla()
             else:
-                messagebox.showerror("Error", f"No se pudo crear el usuario. Es posible que ya exista.")
-        
-        # Limpiar campos y actualizar tabla
-        limpiar_campos()
-        actualizar_tabla()
-        
+                messagebox.showerror("Error", msg, parent=ventana_usuarios)
     except Exception as e:
-        print(f"❌ Error al guardar usuario: {e}")
-        messagebox.showerror("Error de base de datos", f"Ocurrió un error al guardar el usuario:\n{e}")
+        messagebox.showerror("Error", f"Ocurrió un error inesperado:\n{e}", parent=ventana_usuarios)
 
 def eliminar_usuario():
-    """
-    Elimina el usuario seleccionado de la base de datos.
-    """
+    """Elimina el usuario seleccionado"""
     global id_usuario_seleccionado
-    
+
     if not id_usuario_seleccionado:
-        messagebox.showwarning("Advertencia", "Por favor, selecciona un usuario de la tabla para eliminar.")
+        messagebox.showwarning("Advertencia", "Por favor, selecciona un usuario de la tabla para eliminar.", parent=ventana_usuarios)
         return
-    
-    # Obtener nombre del usuario para confirmar
-    usuario_seleccionado = entradas['Usuario'].get()
-    
-    # Confirmación
+
+    usuario_seleccionado = entradas["Usuario"].get()
+
     respuesta = messagebox.askyesno(
-        "Confirmar eliminación", 
-        f"¿Estás seguro de que quieres eliminar el usuario '{usuario_seleccionado}'?\n\nEsta acción no se puede deshacer."
+        "Confirmar Eliminación",
+        f"¿Estás seguro de que quieres eliminar al usuario '{usuario_seleccionado}'?\nEsta acción no se puede deshacer.",
+        parent=ventana_usuarios
     )
-    
+
     if not respuesta:
         return
-    
-    try:
-        print(f"🗑️ Eliminando usuario con ID: {id_usuario_seleccionado}")
-        resultado = eliminar_usuario_db(id_usuario_seleccionado)
-        
-        if resultado:
-            messagebox.showinfo("Éxito", f"Usuario '{usuario_seleccionado}' eliminado correctamente.")
-            limpiar_campos()
-            actualizar_tabla()
-        else:
-            messagebox.showerror("Error", "No se pudo eliminar el usuario.")
-            
-    except Exception as e:
-        print(f"❌ Error al eliminar usuario: {e}")
-        messagebox.showerror("Error de base de datos", f"Ocurrió un error al eliminar el usuario:\n{e}")
 
-def limpiar_campos():
-    """
-    Limpia todos los campos de entrada y restablece la selección.
-    """
+    ok, msg = eliminar_usuario_db(id_usuario_seleccionado)
+    if ok:
+        messagebox.showinfo("Éxito", f"Usuario '{usuario_seleccionado}' eliminado correctamente.", parent=ventana_usuarios)
+        limpiar_campos()
+        actualizar_tabla()
+    else:
+        messagebox.showerror("Error", msg, parent=ventana_usuarios)
+
+def limpiar_campos(reset_id=True):
+    """Limpia los campos del formulario"""
     global id_usuario_seleccionado
-    
-    # Limpiar campos de texto
-    for campo in ["Usuario", "Password"]:
+    if reset_id:
+        id_usuario_seleccionado = None
+
+    for campo in ["Usuario", "Password", "Nombre", "Apellidos", "Documento"]:
         if campo in entradas:
             entradas[campo].delete(0, tk.END)
-    
-    # Restablecer comboboxes
-    if rol_var:
-        rol_var.set("Seleccionar")
-    if estado_var:
-        estado_var.set("Seleccionar")
 
-    # Limpiar selección
-    id_usuario_seleccionado = None
-    
-    if tabla and tabla.selection():
-        tabla.selection_remove(tabla.selection())
-    
-    # Focus en el primer campo
-    if 'Usuario' in entradas:
-        entradas['Usuario'].focus()
-    
-    print("🧹 Campos limpiados.")
+    if reset_id:
+        if rol_var:
+            rol_var.set("Vendedor")
+        if estado_var:
+            estado_var.set("Activo")
+        if tipo_nomina_var:
+            tipo_nomina_var.set("Porcentual")
+        if salario_diario_var:
+            salario_diario_var.set("0")
 
 def probar_login():
-    """
-    Función para probar el sistema de login con las credenciales ingresadas.
-    """
-    usuario = entradas['Usuario'].get().strip()
-    contrasena = entradas['Password'].get().strip()
+    """Prueba si las credenciales son válidas directamente con la API"""
+    usuario = entradas["Usuario"].get().strip()
+    password = entradas["Password"].get().strip()
 
-    if not usuario or not contrasena:
-        messagebox.showerror("Error", "Por favor, introduce un usuario y una contraseña para probar.")
+    if not usuario or not password:
+        messagebox.showwarning("Advertencia", "Ingresa usuario y contraseña en los campos para probar.", parent=ventana_usuarios)
         return
+
+    try:
+        test_client_resp = api.post("/auth/login", json={"usuario": usuario, "password": password, "terminal_id": 1})
+        if test_client_resp.status_code == 200:
+            messagebox.showinfo("Login Exitoso", f"✅ Las credenciales de '{usuario}' son VÁLIDAS.", parent=ventana_usuarios)
+        else:
+            messagebox.showerror("Login Fallido", f"❌ Credenciales incorrectas o usuario inactivo.\nStatus: {test_client_resp.status_code}", parent=ventana_usuarios)
+    except Exception as e:
+        messagebox.showerror("Error", f"Error al probar login: {e}", parent=ventana_usuarios)
+
+def iniciar_usuarios(parent_pid=""):
+    """Inicializa la ventana de gestión de usuarios"""
+    global tabla, entradas, ventana_usuarios, rol_var, estado_var, tipo_nomina_var, salario_diario_var
+
+    try:
+        ventana_usuarios = tk.Tk()
+        parent_pid = parent_pid or os.environ.get("VMPOS_PARENT_PID", "")
+        session_mgr.iniciar_vigilante_padre(ventana_usuarios, parent_pid=parent_pid)
+        iniciar_observador_tema(ventana_usuarios)
+
+        ventana_usuarios.title("👥 Gestión de Usuarios - VmPOS")
         
-    print(f"🔐 Probando login para usuario: {usuario}")
-    usuario_verificado = obtener_usuario_por_credenciales(usuario, contrasena)
+        t = aplicar_tema(ventana_usuarios)
+        calcular_geometria_segura(ventana_usuarios, 1100, 720, min_w=880, min_h=540)
+        ventana_usuarios.configure(bg=t["bg_app"])
 
-    if usuario_verificado:
-        mensaje = f"✅ Login exitoso!\n\n" \
-                  f"Usuario: {usuario_verificado['usuario']}\n" \
-                  f"Rol: {usuario_verificado['rol']}\n" \
-                  f"Estado: {usuario_verificado['estado']}"
-        messagebox.showinfo("Login Exitoso", mensaje)
-        print(f"✅ Login exitoso para {usuario_verificado['usuario']}")
-    else:
-        messagebox.showerror("Login Fallido", "❌ Credenciales incorrectas o usuario inactivo.")
-        print(f"❌ Login fallido para usuario: {usuario}")
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure("Treeview", background=t["table_bg"], foreground=t["table_fg"], rowheight=26, fieldbackground=t["table_field_bg"], font=("Segoe UI", 9))
+        style.map("Treeview", background=[("selected", t["btn_primary_bg"])], foreground=[("selected", "white")])
+        style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"), background=t["table_header_bg"], foreground=t["table_header_fg"], relief="flat")
+        style.map("Treeview.Heading", background=[("active", t["btn_primary_bg"])])
 
-def refrescar_tabla():
-    """Refresca la tabla de usuarios."""
-    print("🔄 Refrescando tabla...")
-    actualizar_tabla()
-    messagebox.showinfo("Información", "Tabla actualizada correctamente.")
+        header_frame = tk.Frame(ventana_usuarios, bg=t["btn_primary_bg"])
+        header_frame.pack(fill="x")
 
-def iniciar_usuarios():
-    """
-    Función principal que inicializa la ventana de gestión de usuarios.
-    """
-    global tabla, entradas, ventana_usuarios, rol_var, estado_var
-    
-    print("🚀 Iniciando ventana de gestión de usuarios...")
-    
-    # Inicializar sistema de usuarios
-    inicializar_sistema_usuarios()
-    
-    # Crear ventana principal
-    ventana_usuarios = tk.Tk()
-    ventana_usuarios.title("👥 Gestión de Usuarios - VmPOS")
-    ventana_usuarios.geometry("1200x750")
-    ventana_usuarios.resizable(False, False)
-    ventana_usuarios.configure(bg="#FFE4F1")
+        fg_h = calcular_color_texto_optimo(t["btn_primary_bg"])
+        tk.Label(header_frame, text="👥 GESTIÓN DE USUARIOS Y PERMISOS", font=("Segoe UI", 15, "bold"), bg=t["btn_primary_bg"], fg=fg_h).pack(pady=8)
 
-    # Centrar ventana
-    ventana_usuarios.update_idletasks()
-    x = (ventana_usuarios.winfo_screenwidth() // 2) - 600
-    y = (ventana_usuarios.winfo_screenheight() // 2) - 375
-    ventana_usuarios.geometry(f"1200x750+{x}+{y}")
+        main_frame = tk.Frame(ventana_usuarios, bg=t["bg_app"])
+        main_frame.pack(fill="both", expand=True, padx=15, pady=5)
 
-    # Configurar estilos
-    style = ttk.Style()
-    style.theme_use('clam')
-    style.configure('Feminine.TLabel', background='#FFE4F1', foreground='#C71585', font=('Segoe UI', 10))
-    style.configure('Header.TLabel', background='#FF1493', foreground='white', font=('Segoe UI', 16, 'bold'))
-    style.configure('Feminine.TButton', background='#FF69B4', foreground='white', font=('Segoe UI', 10, 'bold'), relief="flat")
-    
-    # Estilo para la tabla
-    style.configure("Treeview",
-                    background="#FADDEE",
-                    foreground="#333",
-                    rowheight=25,
-                    fieldbackground="#FADDEE")
-    style.map('Treeview', background=[('selected', '#fd79a8')], foreground=[('selected', 'white')])
-    style.configure("Treeview.Heading",
-                    font=("Segoe UI", 10, "bold"),
-                    background="#e84393",
-                    foreground="white",
-                    relief="flat")
-    style.map("Treeview.Heading", background=[('active', '#e84393')])
+        form_frame = tk.LabelFrame(main_frame, text="✨ Ficha de Usuario", font=("Segoe UI", 10, "bold"),
+                                   bg=t["bg_surface"], fg=t["btn_primary_bg"], padx=12, pady=8, relief="solid", bd=1)
+        form_frame.pack(fill="x", padx=5, pady=3)
 
-    # 🌸 Header principal
-    header_frame = tk.Frame(ventana_usuarios, bg="#FF1493", height=80)
-    header_frame.pack(fill="x")
-    header_frame.pack_propagate(False)
+        roles = ["Administrador", "Vendedor", "Operario"]
+        estados = ["Activo", "Inactivo"]
 
-    tk.Label(header_frame, text="👥 Gestión de Usuarios del Sistema",
-             font=("Segoe UI", 20, "bold"), bg="#FF1493", fg="white").pack(pady=15)
+        rol_var = tk.StringVar(value="Vendedor")
+        estado_var = tk.StringVar(value="Activo")
+        tipo_nomina_var = tk.StringVar(value="Porcentual")
+        salario_diario_var = tk.StringVar(value="0")
 
-    # Contenedor principal
-    main_frame = tk.Frame(ventana_usuarios, bg="#FFE4F1")
-    main_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        tk.Label(form_frame, text="👤 Usuario:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=0, column=0, padx=5, pady=3, sticky="w")
+        entrada_usuario = tk.Entry(form_frame, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid")
+        entrada_usuario.grid(row=0, column=1, padx=5, pady=3, sticky="w")
+        entradas["Usuario"] = entrada_usuario
 
-    # Formulario para usuarios
-    form_frame = tk.LabelFrame(main_frame, text="✨ Nuevo/Editar Usuario", font=("Segoe UI", 12, "bold"),
-                               bg="#FFDDEE", fg="#C71585", padx=15, pady=15, relief="flat")
-    form_frame.pack(fill="x", padx=10, pady=10)
-    
-    # Crear grid para el formulario
-    campos = ["Usuario", "Password"]
-    roles = ["Administrador", "Vendedor"]
-    estados = ["Activo", "Inactivo"]
-    
-    # Variables de control para Comboboxes
-    rol_var = tk.StringVar(value="Seleccionar")
-    estado_var = tk.StringVar(value="Seleccionar")
-    
-    # Campo Usuario
-    tk.Label(form_frame, text="👤 Usuario:", font=("Segoe UI", 11, "bold"), 
-             bg="#FFDDEE", fg="#C71585").grid(row=0, column=0, padx=5, pady=8, sticky="w")
-    entrada_usuario = tk.Entry(form_frame, font=("Segoe UI", 11), width=35, 
-                               bg="#FFFFFF", fg="#C71585", bd=1, relief="solid")
-    entrada_usuario.grid(row=0, column=1, padx=5, pady=8, sticky="w")
-    entradas['Usuario'] = entrada_usuario
-    
-    # Campo Contraseña
-    tk.Label(form_frame, text="🔒 Contraseña:", font=("Segoe UI", 11, "bold"), 
-             bg="#FFDDEE", fg="#C71585").grid(row=1, column=0, padx=5, pady=8, sticky="w")
-    entrada_password = tk.Entry(form_frame, font=("Segoe UI", 11), width=35, 
-                                bg="#FFFFFF", fg="#C71585", bd=1, relief="solid", show="*")
-    entrada_password.grid(row=1, column=1, padx=5, pady=8, sticky="w")
-    entradas['Password'] = entrada_password
-    
-    # Campo Rol
-    tk.Label(form_frame, text="👑 Rol:", font=("Segoe UI", 11, "bold"), 
-             bg="#FFDDEE", fg="#C71585").grid(row=2, column=0, padx=5, pady=8, sticky="w")
-    combo_rol = ttk.Combobox(form_frame, textvariable=rol_var, values=roles, 
-                             state="readonly", width=32, font=("Segoe UI", 11))
-    combo_rol.grid(row=2, column=1, padx=5, pady=8, sticky="w")
-    
-    # Campo Estado
-    tk.Label(form_frame, text="📊 Estado:", font=("Segoe UI", 11, "bold"), 
-             bg="#FFDDEE", fg="#C71585").grid(row=3, column=0, padx=5, pady=8, sticky="w")
-    combo_estado = ttk.Combobox(form_frame, textvariable=estado_var, values=estados, 
-                                state="readonly", width=32, font=("Segoe UI", 11))
-    combo_estado.grid(row=3, column=1, padx=5, pady=8, sticky="w")
-    
-    # Botones de acción
-    botones_frame = tk.Frame(form_frame, bg="#FFDDEE")
-    botones_frame.grid(row=4, column=0, columnspan=2, pady=15)
-    
-    btn_guardar = tk.Button(botones_frame, text="💾 Guardar Usuario", command=guardar_usuario, 
-                            bg="#FF69B4", fg="white", font=("Segoe UI", 11, "bold"), 
-                            relief="flat", padx=15, pady=8, cursor="hand2")
-    btn_guardar.pack(side="left", padx=5)
-    
-    btn_eliminar = tk.Button(botones_frame, text="🗑️ Eliminar", command=eliminar_usuario, 
-                             bg="#ff4d4d", fg="white", font=("Segoe UI", 11, "bold"), 
-                             relief="flat", padx=15, pady=8, cursor="hand2")
-    btn_eliminar.pack(side="left", padx=5)
-    
-    btn_limpiar = tk.Button(botones_frame, text="🧹 Limpiar", command=limpiar_campos, 
-                            bg="#3399ff", fg="white", font=("Segoe UI", 11, "bold"), 
-                            relief="flat", padx=15, pady=8, cursor="hand2")
-    btn_limpiar.pack(side="left", padx=5)
+        tk.Label(form_frame, text="🔒 Contraseña:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=0, column=2, padx=(15, 5), pady=3, sticky="w")
+        entrada_password = tk.Entry(form_frame, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid", show="*")
+        entrada_password.grid(row=0, column=3, padx=5, pady=3, sticky="w")
+        entradas["Password"] = entrada_password
 
-    btn_login = tk.Button(botones_frame, text="🔑 Probar Login", command=probar_login, 
-                          bg="#8B008B", fg="white", font=("Segoe UI", 11, "bold"), 
-                          relief="flat", padx=15, pady=8, cursor="hand2")
-    btn_login.pack(side="left", padx=5)
-    
-    btn_refrescar = tk.Button(botones_frame, text="🔄 Refrescar", command=refrescar_tabla, 
-                              bg="#17a2b8", fg="white", font=("Segoe UI", 11, "bold"), 
-                              relief="flat", padx=15, pady=8, cursor="hand2")
-    btn_refrescar.pack(side="left", padx=5)
+        tk.Label(form_frame, text="📛 Nombre:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=1, column=0, padx=5, pady=3, sticky="w")
+        entrada_nombre = tk.Entry(form_frame, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid")
+        entrada_nombre.grid(row=1, column=1, padx=5, pady=3, sticky="w")
+        entradas["Nombre"] = entrada_nombre
 
-    # Marco de la tabla de usuarios
-    tabla_frame = tk.LabelFrame(main_frame, text="📋 Lista de Usuarios en Base de Datos", 
-                                font=("Segoe UI", 12, "bold"),
-                                bg="#FFE4F1", fg="#C71585", padx=15, pady=15, relief="flat")
-    tabla_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        tk.Label(form_frame, text="📛 Apellidos:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=1, column=2, padx=(15, 5), pady=3, sticky="w")
+        entrada_apellidos = tk.Entry(form_frame, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid")
+        entrada_apellidos.grid(row=1, column=3, padx=5, pady=3, sticky="w")
+        entradas["Apellidos"] = entrada_apellidos
 
-    # Crear la tabla (Treeview)
-    columnas = ("ID", "Usuario", "Rol", "Estado", "Último Acceso", "Fecha Registro")
-    tabla = ttk.Treeview(tabla_frame, columns=columnas, show="headings", height=15)
-    
-    # Configurar columnas
-    anchos_columnas = {"ID": 60, "Usuario": 150, "Rol": 120, "Estado": 100, "Último Acceso": 150, "Fecha Registro": 150}
-    
-    for col in columnas:
-        tabla.heading(col, text=col)
-        tabla.column(col, width=anchos_columnas.get(col, 120), anchor="center")
-    
-    # Scrollbar para la tabla
-    scrollbar = ttk.Scrollbar(tabla_frame, orient="vertical", command=tabla.yview)
-    tabla.configure(yscrollcommand=scrollbar.set)
-    
-    # Empaquetar tabla y scrollbar
-    tabla.pack(side="left", fill="both", expand=True, padx=(0, 5), pady=5)
-    scrollbar.pack(side="right", fill="y", pady=5)
-    
-    # Vincular evento de selección
-    tabla.bind("<<TreeviewSelect>>", seleccionar_usuario)
+        tk.Label(form_frame, text="🪪 Documento/NIT:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=2, column=0, padx=5, pady=3, sticky="w")
+        entrada_doc = tk.Entry(form_frame, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid")
+        entrada_doc.grid(row=2, column=1, padx=5, pady=3, sticky="w")
+        entradas["Documento"] = entrada_doc
 
-    # Información sobre la tabla
-    info_frame = tk.Frame(tabla_frame, bg="#FFE4F1")
-    info_frame.pack(fill="x", pady=(5, 0))
-    
-    tk.Label(info_frame, text="💡 Selecciona un usuario de la tabla para editar sus datos", 
-             font=("Segoe UI", 10, "italic"), bg="#FFE4F1", fg="#666666").pack()
+        tk.Label(form_frame, text="👑 Rol:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=2, column=2, padx=(15, 5), pady=3, sticky="w")
+        combo_rol = ttk.Combobox(form_frame, textvariable=rol_var, values=roles, state="readonly", width=22, font=("Segoe UI", 9))
+        combo_rol.grid(row=2, column=3, padx=5, pady=3, sticky="w")
 
-    # 📊 Footer con información del sistema
-    footer = tk.Frame(ventana_usuarios, bg="#e84393", height=60)
-    footer.pack(fill="x", side="bottom")
-    footer.pack_propagate(False)
+        lbl_tipo_nomina = tk.Label(form_frame, text="📄 Remuneración:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"])
+        lbl_tipo_nomina.grid(row=3, column=0, padx=5, pady=3, sticky="w")
+        combo_tipo_nomina = ttk.Combobox(form_frame, textvariable=tipo_nomina_var, values=["Porcentual", "Fija"], state="readonly", width=22, font=("Segoe UI", 9))
+        combo_tipo_nomina.grid(row=3, column=1, padx=5, pady=3, sticky="w")
 
-    footer_left = tk.Frame(footer, bg="#e84393")
-    footer_left.pack(side="left", padx=20, pady=15)
+        lbl_valor_nomina = tk.Label(form_frame, text="💰 Comisión (%):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"])
+        lbl_valor_nomina.grid(row=3, column=2, padx=(15, 5), pady=3, sticky="w")
+        entrada_valor_nomina = tk.Entry(form_frame, textvariable=salario_diario_var, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid")
+        entrada_valor_nomina.grid(row=3, column=3, padx=5, pady=3, sticky="w")
 
-    footer_right = tk.Frame(footer, bg="#e84393")
-    footer_right.pack(side="right", padx=20, pady=15)
+        tk.Label(form_frame, text="📊 Estado:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=4, column=0, padx=5, pady=3, sticky="w")
+        combo_estado = ttk.Combobox(form_frame, textvariable=estado_var, values=estados, state="readonly", width=22, font=("Segoe UI", 9))
+        combo_estado.grid(row=4, column=1, padx=5, pady=3, sticky="w")
 
-    tk.Label(footer_left, text="📍 Puerto Colombia • 📞 +573215545788",
-             font=("Segoe UI", 10), bg="#e84393", fg="white").pack()
+        def on_tipo_nomina_change(*args):
+            if combo_tipo_nomina.get() == "Fija":
+                lbl_valor_nomina.config(text="💰 Salario Diario ($ COP):")
+            else:
+                lbl_valor_nomina.config(text="💰 Comisión (%):")
 
-    # Contador de usuarios
-    usuarios_count = len(obtener_usuarios())
-    tk.Label(footer_right, text=f"✨ VmPOS v3.1.0 • {usuarios_count} usuarios registrados 💖",
-             font=("Segoe UI", 10), bg="#e84393", fg="#ffd3e8").pack()
+        tipo_nomina_var.trace_add("write", on_tipo_nomina_change)
+        combo_tipo_nomina.bind("<<ComboboxSelected>>", lambda e: combo_tipo_nomina.after(50, on_tipo_nomina_change))
 
-    # Cargar datos iniciales en la tabla
-    actualizar_tabla()
-    
-    # Focus inicial en el campo usuario
-    entradas['Usuario'].focus()
-    
-    # Vincular teclas de acceso rápido
-    ventana_usuarios.bind('<F5>', lambda e: refrescar_tabla())
-    ventana_usuarios.bind('<Escape>', lambda e: limpiar_campos())
-    ventana_usuarios.bind('<Control-s>', lambda e: guardar_usuario())
-    
-    print("✅ Ventana de gestión de usuarios iniciada correctamente.")
-    ventana_usuarios.mainloop()
+        botones_frame = tk.Frame(form_frame, bg=t["bg_surface"])
+        botones_frame.grid(row=5, column=0, columnspan=4, pady=(8, 3))
+
+        btn_guardar = crear_boton(botones_frame, text="💾 Guardar Usuario", command=guardar_usuario, tipo="success", font=("Segoe UI", 9, "bold"), padx=10, pady=5)
+        btn_guardar.pack(side="left", padx=4)
+
+        btn_eliminar = crear_boton(botones_frame, text="🗑️ Eliminar", command=eliminar_usuario, tipo="danger", font=("Segoe UI", 9, "bold"), padx=10, pady=5)
+        btn_eliminar.pack(side="left", padx=4)
+
+        btn_limpiar = crear_boton(botones_frame, text="🧹 Limpiar Campos", command=lambda: limpiar_campos(reset_id=True), tipo="secondary", font=("Segoe UI", 9, "bold"), padx=10, pady=5)
+        btn_limpiar.pack(side="left", padx=4)
+
+        btn_login = crear_boton(botones_frame, text="🔑 Probar Login", command=probar_login, tipo="purple", font=("Segoe UI", 9, "bold"), padx=10, pady=5)
+        btn_login.pack(side="left", padx=4)
+
+        btn_refrescar = crear_boton(botones_frame, text="🔄 Refrescar", command=actualizar_tabla, tipo="primary", font=("Segoe UI", 9, "bold"), padx=10, pady=5)
+        btn_refrescar.pack(side="left", padx=4)
+
+        # Frame de tabla responsiva con dual scrollbars
+        tabla_frame = tk.LabelFrame(main_frame, text="📋 Lista de Usuarios", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["btn_primary_bg"], padx=6, pady=6, relief="solid", bd=1)
+        tabla_frame.pack(fill="both", expand=True, padx=5, pady=3)
+        tabla_frame.rowconfigure(0, weight=1)
+        tabla_frame.columnconfigure(0, weight=1)
+
+        columnas = ("ID", "Usuario", "Nombre", "Documento", "Rol", "Remuneración", "Estado", "Último Acceso", "Registro")
+        tabla = ttk.Treeview(tabla_frame, columns=columnas, show="headings")
+
+        anchos = {
+            "ID": 45,
+            "Usuario": 110,
+            "Nombre": 180,
+            "Documento": 110,
+            "Rol": 110,
+            "Remuneración": 150,
+            "Estado": 85,
+            "Último Acceso": 130,
+            "Registro": 130
+        }
+
+        for col in columnas:
+            tabla.heading(col, text=col)
+            tabla.column(col, width=anchos.get(col, 100), minwidth=60, anchor="center")
+
+        scroll_y = ttk.Scrollbar(tabla_frame, orient="vertical", command=tabla.yview)
+        scroll_x = ttk.Scrollbar(tabla_frame, orient="horizontal", command=tabla.xview)
+        tabla.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        
+        tabla.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
+
+        tabla.bind("<<TreeviewSelect>>", seleccionar_usuario)
+
+        footer = tk.Frame(ventana_usuarios, bg=t["btn_primary_bg"])
+        footer.pack(fill="x", side="bottom")
+
+        try:
+            from business_manager import business_mgr as _bm_u
+        except ImportError:
+            from interface.business_manager import business_mgr as _bm_u
+        _bm_u.recargar()
+        tk.Label(footer, text=f"{_bm_u.obtener_texto_ubicacion_contacto()}  |  {_bm_u.nombre}", font=("Segoe UI", 9), bg=t["btn_primary_bg"], fg=fg_h).pack(pady=6)
+
+        actualizar_tabla()
+        ventana_usuarios.mainloop()
+    except Exception as e:
+        import traceback
+        err_trace = traceback.format_exc()
+        print(f"Error fatal iniciando usuarios_menu: {err_trace}")
+        try:
+            with open("vmpos.log", "a", encoding="utf-8") as f_err:
+                f_err.write(f"\n[ERROR usuarios_menu] {err_trace}\n")
+        except Exception:
+            pass
+        messagebox.showerror("Error al abrir Usuarios", f"No se pudo inicializar el módulo de usuarios:\n{e}")
 
 if __name__ == "__main__":
-    iniciar_usuarios()
+    import argparse
+    parser = argparse.ArgumentParser(description="Usuarios y Permisos VmPOS")
+    parser.add_argument("--parent_pid", default="")
+    if "-h" in sys.argv or "--help" in sys.argv:
+        parser.print_help()
+        sys.exit(0)
+    args, _ = parser.parse_known_args()
+    parent_pid = args.parent_pid or os.environ.get("VMPOS_PARENT_PID", "")
+    iniciar_usuarios(parent_pid=parent_pid)

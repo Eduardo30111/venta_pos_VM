@@ -1,594 +1,954 @@
+"""
+Módulo Profesional de Control de Gastos - VmPOS
+Incluye:
+- Clasificación en 4 categorías contables: Operativo diario, Fijo periódico, Variable, Extraordinario (+ personalizadas).
+- Estados de gasto: Pagado, Pendiente, Vencido, Anulado.
+- Motor de gastos recurrentes (arriendo, servicios, suscripciones) sin duplicidad por reinicio.
+- Impacto contable estricto: Una obligación pendiente no descuenta caja física hasta que se liquida en Efectivo.
+- 3 Vistas: 1) Registro y Lista de Gastos, 2) Gastos Recurrentes, 3) Dashboard de Gastos.
+"""
+
 import tkinter as tk
 from tkinter import ttk, messagebox
-from datetime import datetime
-import sqlite3
+from datetime import datetime, timedelta
 import os
+import sys
+import sqlite3
 
-# Configuración de la base de datos
-base_dir = os.path.dirname(os.path.abspath(__file__))
-database_dir = os.path.join(base_dir, '..', 'database')
-ruta_db = os.path.join(database_dir, 'ventas.db')
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from client.api_client import api
+from interface.business_manager import business_mgr
+from interface.theme_manager import (
+    theme_mgr, aplicar_tema, calcular_geometria_segura,
+    crear_boton, ScrollableContainer, calcular_color_texto_optimo,
+    iniciar_observador_tema
+)
+try:
+    from session_manager import session_mgr
+except ImportError:
+    from interface.session_manager import session_mgr
 
-# Conexión global a la base de datos
-conn = None
-cursor = None
+try:
+    from components.currency_entry import CurrencyEntry, formatear_cop
+except ImportError:
+    from interface.components.currency_entry import CurrencyEntry, formatear_cop
 
-def conectar_db():
-    """Establece conexión con la base de datos"""
-    global conn, cursor
-    try:
-        conn = sqlite3.connect(ruta_db)
-        cursor = conn.cursor()
-        crear_tabla_gastos()
-        return True
-    except Exception as e:
-        messagebox.showerror("Error de conexión", f"No se pudo conectar a la base de datos:\n{e}")
-        return False
+try:
+    from caja_manager import (
+        conectar_db as conectar_sqlite,
+        registrar_movimiento_caja,
+        obtener_sesion_activa,
+        procesar_gastos_recurrentes,
+        pagar_gasto
+    )
+except ImportError:
+    from interface.caja_manager import (
+        conectar_db as conectar_sqlite,
+        registrar_movimiento_caja,
+        obtener_sesion_activa,
+        procesar_gastos_recurrentes,
+        pagar_gasto
+    )
 
-def crear_tabla_gastos():
-    """Crea la tabla de gastos si no existe"""
-    try:
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS gastos (
-                id_gasto INTEGER PRIMARY KEY AUTOINCREMENT,
-                concepto TEXT NOT NULL,
-                valor REAL NOT NULL,
-                fecha TEXT NOT NULL,
-                hora TEXT NOT NULL,
-                fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-    except Exception as e:
-        messagebox.showerror("Error", f"Error al crear tabla de gastos: {e}")
+CATEGORIAS_GASTO = [
+    "Operativo diario",
+    "Fijo periódico",
+    "Variable",
+    "Extraordinario"
+]
 
-def obtener_gastos():
-    """Obtiene todos los gastos de la base de datos"""
-    try:
-        cursor.execute("SELECT * FROM gastos ORDER BY fecha_registro DESC")
-        return cursor.fetchall()
-    except Exception as e:
-        messagebox.showerror("Error", f"Error al obtener gastos: {e}")
+FRECUENCIAS = ["Diaria", "Semanal", "Quincenal", "Mensual", "Anual"]
+
+
+# ==============================================================================
+# FUNCIONES DE BASE DE DATOS
+# ==============================================================================
+
+def obtener_gastos_db(filtro_periodo="Todos", filtro_cat="Todas", filtro_estado="Todos", busqueda=""):
+    """Consulta gastos con filtros contables y búsqueda."""
+    conn = conectar_sqlite()
+    if not conn:
         return []
-
-def agregar_gasto_db(concepto, valor, fecha, hora):
-    """Agrega un gasto a la base de datos"""
     try:
-        cursor.execute("""
-            INSERT INTO gastos (concepto, valor, fecha, hora)
-            VALUES (?, ?, ?, ?)
-        """, (concepto, valor, fecha, hora))
-        conn.commit()
-        return True
-    except Exception as e:
-        messagebox.showerror("Error", f"Error al agregar gasto: {e}")
-        conn.rollback()
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        
+        query = """
+            SELECT 
+                id_gasto, concepto, valor, fecha, hora, metodo_pago,
+                COALESCE(categoria, clasificacion, 'Operativo diario') as categoria,
+                COALESCE(estado, 'Pagado') as estado,
+                fecha_vencimiento, fecha_pago, proveedor, comprobante, observaciones,
+                es_recurrente
+            FROM gastos
+            WHERE 1=1
+        """
+        params = []
+
+        # Filtro de periodo
+        hoy = datetime.now()
+        hoy_str = hoy.strftime("%Y-%m-%d")
+        if filtro_periodo == "Hoy":
+            query += " AND fecha = ?"
+            params.append(hoy_str)
+        elif filtro_periodo == "Ayer":
+            ayer_str = (hoy - timedelta(days=1)).strftime("%Y-%m-%d")
+            query += " AND fecha = ?"
+            params.append(ayer_str)
+        elif filtro_periodo == "Esta semana":
+            inicio_sem = (hoy - timedelta(days=hoy.weekday())).strftime("%Y-%m-%d")
+            query += " AND fecha BETWEEN ? AND ?"
+            params.extend([inicio_sem, hoy_str])
+        elif filtro_periodo == "Este mes":
+            inicio_mes = hoy.strftime("%Y-%m-01")
+            query += " AND fecha BETWEEN ? AND ?"
+            params.extend([inicio_mes, hoy_str])
+
+        # Filtro de categoría
+        if filtro_cat != "Todas":
+            query += " AND (categoria = ? OR clasificacion = ?)"
+            params.extend([filtro_cat, filtro_cat])
+
+        # Filtro de estado
+        if filtro_estado != "Todos":
+            query += " AND estado = ?"
+            params.append(filtro_estado)
+
+        # Búsqueda libre
+        if busqueda:
+            query += " AND (concepto LIKE ? OR proveedor LIKE ? OR comprobante LIKE ?)"
+            patron = f"%{busqueda}%"
+            params.extend([patron, patron, patron])
+
+        query += " ORDER BY id_gasto DESC"
+        cur.execute(query, params)
+        rows = cur.fetchall()
+        
+        # Actualizar automáticamente a 'Vencido' si es Pendiente y pasó la fecha de vencimiento
+        gastos = []
+        for r in rows:
+            g = dict(r)
+            if g.get("estado") == "Pendiente" and g.get("fecha_vencimiento"):
+                if g["fecha_vencimiento"] < hoy_str:
+                    g["estado"] = "Vencido"
+            gastos.append(g)
+        return gastos
+    finally:
+        conn.close()
+
+
+def registrar_nuevo_gasto(
+    concepto: str,
+    valor: float,
+    categoria: str = "Operativo diario",
+    metodo_pago: str = "Efectivo",
+    estado: str = "Pagado",
+    fecha_vencimiento: str = "",
+    proveedor: str = "",
+    comprobante: str = "",
+    observaciones: str = "",
+    usuario: str = "Administrador"
+) -> bool:
+    """Inserta un gasto. Si es Pagado en Efectivo, descuenta de la sesión física de caja."""
+    conn = conectar_sqlite()
+    if not conn:
         return False
-
-def eliminar_gasto_db(id_gasto):
-    """Elimina un gasto de la base de datos"""
     try:
-        cursor.execute("DELETE FROM gastos WHERE id_gasto = ?", (id_gasto,))
-        conn.commit()
-        return True
-    except Exception as e:
-        messagebox.showerror("Error", f"Error al eliminar gasto: {e}")
-        conn.rollback()
-        return False
-
-def modificar_gasto_db(id_gasto, concepto, valor):
-    """Modifica un gasto en la base de datos"""
-    try:
-        cursor.execute("""
-            UPDATE gastos SET concepto = ?, valor = ?
-            WHERE id_gasto = ?
-        """, (concepto, valor, id_gasto))
-        conn.commit()
-        return True
-    except Exception as e:
-        messagebox.showerror("Error", f"Error al modificar gasto: {e}")
-        conn.rollback()
-        return False
-
-def calcular_estadisticas_gastos():
-    """Calcula estadísticas de gastos"""
-    try:
-        # Total de gastos
-        cursor.execute("SELECT SUM(valor) FROM gastos")
-        total_gastos = cursor.fetchone()[0] or 0
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
         
-        # Gastos de hoy
-        fecha_hoy = datetime.now().strftime("%d-%m-%Y")
-        cursor.execute("SELECT COUNT(*), SUM(valor) FROM gastos WHERE fecha = ?", (fecha_hoy,))
-        resultado = cursor.fetchone()
-        gastos_hoy_count = resultado[0] or 0
-        gastos_hoy_valor = resultado[1] or 0
-        
-        # Total de registros
-        cursor.execute("SELECT COUNT(*) FROM gastos")
-        total_registros = cursor.fetchone()[0] or 0
-        
-        return total_gastos, gastos_hoy_count, gastos_hoy_valor, total_registros
-    except Exception as e:
-        messagebox.showerror("Error", f"Error al calcular estadísticas: {e}")
-        return 0, 0, 0, 0
-
-def iniciar_gastos():
-    if not conectar_db():
-        return
-        
-    ventana = tk.Tk()
-    ventana.title("💸 Control de Gastos - VmPOS")
-    ancho_pantalla = ventana.winfo_screenwidth()
-    alto_pantalla = ventana.winfo_screenheight()
-
-    # Definir proporción deseada (por ejemplo, 80% del ancho y 75% del alto)
-    ancho_ventana = int(ancho_pantalla * 0.8)
-    alto_ventana = int(alto_pantalla * 0.75)
-
-    # Calcular posición para centrar la ventana
-    x = (ancho_pantalla // 2) - (ancho_ventana // 2)
-    y = (alto_pantalla // 2) - (alto_ventana // 2)
-
-    # Aplicar tamaño y posición
-    ventana.geometry(f"{ancho_ventana}x{alto_ventana}+{x}+{y}")
-    ventana.configure(bg="#FFE4F1")
-    
-    # Centrar ventana
-    ventana.update_idletasks()
-    x = (ventana.winfo_screenwidth() // 2) - (550)
-    y = (ventana.winfo_screenheight() // 2) - (350)
-    ventana.geometry(f"900x600+{x}+{y}")
-
-    # Variables globales para los campos
-    global concepto_var, valor_var, fecha_var, tabla
-    concepto_var = tk.StringVar()
-    valor_var = tk.StringVar()
-    fecha_var = tk.StringVar(value=datetime.now().strftime("%d-%m-%Y"))
-
-    # 🌸 Header principal
-    header_frame = tk.Frame(ventana, bg="#FF1493", height=100)
-    header_frame.pack(fill="x")
-    header_frame.pack_propagate(False)
-
-    header_content = tk.Frame(header_frame, bg="#FF1493")
-    header_content.pack(expand=True, fill="both")
-
-    title_container = tk.Frame(header_content, bg="#FF1493")
-    title_container.pack(expand=True)
-
-    tk.Label(title_container, text="💸", font=("Segoe UI Emoji", 40), 
-             bg="#FF1493", fg="white").pack(side="left", pady=25, padx=(50, 15))
-    tk.Label(title_container, text="CONTROL DE GASTOS", font=("Segoe UI", 22, "bold"), 
-             bg="#FF1493", fg="white").pack(side="left", pady=30)
-    tk.Label(title_container, text="📊", font=("Segoe UI Emoji", 40), 
-             bg="#FF1493", fg="white").pack(side="left", pady=25, padx=(15, 50))
-
-    # 🕒 Panel de fecha y hora
-    def actualizar_tiempo():
         ahora = datetime.now()
-        lbl_fecha.config(text=f"📅 {ahora.strftime('%d-%m-%Y')}")
-        lbl_hora.config(text=f"⏰ {ahora.strftime('%H:%M:%S')}")
-        fecha_var.set(ahora.strftime("%d-%m-%Y"))
-        ventana.after(1000, actualizar_tiempo)
+        fecha_str = ahora.strftime("%Y-%m-%d")
+        hora_str = ahora.strftime("%H:%M:%S")
+        fecha_pago_val = f"{fecha_str} {hora_str}" if estado == "Pagado" else None
 
-    panel_superior = tk.Frame(ventana, bg="#FFDDEE", relief="raised", bd=2)
-    panel_superior.pack(fill="x", pady=5, padx=10)
+        cur.execute("""
+            INSERT INTO gastos (
+                concepto, valor, fecha, hora, metodo_pago, categoria, clasificacion,
+                descripcion, fecha_vencimiento, fecha_pago, frecuencia, estado,
+                usuario, proveedor, comprobante, observaciones, es_recurrente, recurrencia_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Único', ?, ?, ?, ?, ?, 0, NULL)
+        """, (
+            concepto, valor, fecha_str, hora_str, metodo_pago, categoria, categoria,
+            observaciones, fecha_vencimiento or None, fecha_pago_val, estado,
+            usuario, proveedor, comprobante, observaciones
+        ))
+        id_gasto = cur.lastrowid
 
-    time_container = tk.Frame(panel_superior, bg="#FFDDEE")
-    time_container.pack(pady=15)
-
-    lbl_fecha = tk.Label(time_container, text="", font=("Segoe UI", 12, "bold"), 
-                        bg="#FFDDEE", fg="#C71585")
-    lbl_fecha.pack(side="left", padx=20)
-
-    tk.Label(time_container, text="✨", font=("Segoe UI Emoji", 16), 
-             bg="#FFDDEE").pack(side="left", padx=10)
-
-    lbl_hora = tk.Label(time_container, text="", font=("Segoe UI", 12, "bold"), 
-                       bg="#FFDDEE", fg="#C71585")
-    lbl_hora.pack(side="left", padx=20)
-
-    actualizar_tiempo()
-
-    # 💖 Panel de estadísticas rápidas
-    stats_frame = tk.Frame(ventana, bg="#FFE4F1")
-    stats_frame.pack(fill="x", pady=15, padx=10)
-
-    stats_container = tk.Frame(stats_frame, bg="#FFE4F1")
-    stats_container.pack()
-
-    def actualizar_stats_display():
-        total_gastos, gastos_hoy_count, gastos_hoy_valor, total_registros = calcular_estadisticas_gastos()
-        
-        # Limpiar estadísticas anteriores
-        for widget in stats_container.winfo_children():
-            widget.destroy()
-        
-        stats_data = [
-            ("💰", "Total Gastos", f"${total_gastos:,.0f}", "#FF6B6B"),
-            ("📅", "Gastos Hoy", f"${gastos_hoy_valor:,.0f}", "#4ECDC4"),
-            ("📋", "Total Registros", str(total_registros), "#45B7D1"),
-            ("🔢", "Registros Hoy", str(gastos_hoy_count), "#96CEB4")
-        ]
-
-        for i, (icono, titulo, valor, color) in enumerate(stats_data):
-            card = tk.Frame(stats_container, bg="white", relief="raised", bd=2, width=200, height=100)
-            card.pack(side="left", padx=15, pady=5)
-            card.pack_propagate(False)
-
-            card_header = tk.Frame(card, bg=color, height=25)
-            card_header.pack(fill="x")
-
-            card_content = tk.Frame(card, bg="white")
-            card_content.pack(fill="both", expand=True, padx=10, pady=10)
-
-            tk.Label(card_content, text=icono, font=("Segoe UI Emoji", 20), bg="white").pack()
-            tk.Label(card_content, text=titulo, font=("Segoe UI", 9, "bold"), 
-                    bg="white", fg="#666").pack()
-            tk.Label(card_content, text=valor, font=("Segoe UI", 12, "bold"), 
-                    bg="white", fg=color).pack()
-
-    actualizar_stats_display()
-
-    # 🎀 Panel de formulario
-    form_frame = tk.Frame(ventana, bg="#FFC0CB", relief="raised", bd=2)
-    form_frame.pack(fill="x", pady=15, padx=10)
-
-    tk.Label(form_frame, text="✏️ Registrar Nuevo Gasto", font=("Segoe UI", 14, "bold"), 
-             bg="#FFC0CB", fg="#8B0054").pack(pady=15)
-
-    # Contenedor del formulario
-    form_container = tk.Frame(form_frame, bg="#FFC0CB")
-    form_container.pack(pady=10, padx=30)
-
-    # Primera fila - Concepto y Valor
-    row1 = tk.Frame(form_container, bg="#FFC0CB")
-    row1.pack(fill="x", pady=10)
-
-    tk.Label(row1, text="📝 Concepto:", font=("Segoe UI", 11, "bold"), 
-             bg="#FFC0CB", fg="#8B0054").pack(side="left", padx=(0, 10))
-    concepto_entry = tk.Entry(row1, textvariable=concepto_var, font=("Segoe UI", 11), 
-                             width=25, relief="solid", bd=1)
-    concepto_entry.pack(side="left", padx=(0, 30))
-
-    tk.Label(row1, text="💰 Valor:", font=("Segoe UI", 11, "bold"), 
-             bg="#FFC0CB", fg="#8B0054").pack(side="left", padx=(0, 10))
-    valor_entry = tk.Entry(row1, textvariable=valor_var, font=("Segoe UI", 11), 
-                          width=20, relief="solid", bd=1)
-    valor_entry.pack(side="left")
-
-    # Segunda fila - Fecha y botones
-    row2 = tk.Frame(form_container, bg="#FFC0CB")
-    row2.pack(fill="x", pady=15)
-
-    tk.Label(row2, text="📅 Fecha:", font=("Segoe UI", 11, "bold"), 
-             bg="#FFC0CB", fg="#8B0054").pack(side="left", padx=(0, 10))
-    fecha_entry = tk.Entry(row2, textvariable=fecha_var, font=("Segoe UI", 11), 
-                          width=15, state="readonly", relief="solid", bd=1)
-    fecha_entry.pack(side="left", padx=(0, 50))
-
-    # Botones de acción
-    def ingresar_gasto():
-        if not concepto_var.get().strip():
-            messagebox.showwarning("⚠️ Campo Vacío", "💖 Por favor ingresa un concepto para el gasto")
-            concepto_entry.focus()
-            return
-        
-        try:
-            valor = float(valor_var.get().replace(',', '').replace('$', ''))
-            if valor <= 0:
-                raise ValueError("El valor debe ser mayor a 0")
-        except ValueError:
-            messagebox.showwarning("⚠️ Valor Inválido", "💖 Por favor ingresa un valor numérico válido")
-            valor_entry.focus()
-            return
-
-        # Agregar gasto a la base de datos
-        hora_actual = datetime.now().strftime("%H:%M:%S")
-        if agregar_gasto_db(concepto_var.get().strip(), valor, fecha_var.get(), hora_actual):
-            # Actualizar tabla y estadísticas
-            actualizar_tabla()
-            actualizar_stats_display()
-            
-            # Limpiar campos
-            concepto_var.set("")
-            valor_var.set("")
-            concepto_entry.focus()
-            
-            messagebox.showinfo("✅ Éxito", f"💎 Gasto registrado exitosamente!\n\n"
-                                          f"📝 Concepto: {concepto_var.get().strip()}\n"
-                                          f"💰 Valor: ${valor:,.0f}")
-
-    def eliminar_gasto():
-        seleccionado = tabla.focus()
-        if not seleccionado:
-            messagebox.showwarning("⚠️ Selección", "💖 Por favor selecciona un gasto para eliminar")
-            return
-        
-        respuesta = messagebox.askyesno("🗑️ Confirmar Eliminación", 
-                                       "¿Estás segura de que deseas eliminar este gasto?\n\n"
-                                       "⚠️ Esta acción no se puede deshacer.")
-        if respuesta:
-            # Obtener ID del gasto seleccionado
-            valores = tabla.item(seleccionado)["values"]
-            id_gasto = valores[0]  # El ID está en la primera columna
-            
-            if eliminar_gasto_db(id_gasto):
-                actualizar_tabla()
-                actualizar_stats_display()
-                messagebox.showinfo("✅ Eliminado", "💖 Gasto eliminado exitosamente")
-
-    def modificar_gasto():
-        seleccionado = tabla.focus()
-        if not seleccionado:
-            messagebox.showwarning("⚠️ Selección", "💖 Por favor selecciona un gasto para modificar")
-            return
-        
-        # Obtener datos del gasto seleccionado
-        valores = tabla.item(seleccionado)["values"]
-        id_gasto = valores[0]
-        
-        # Ventana de modificación
-        ventana_mod = tk.Toplevel(ventana)
-        ventana_mod.title("✏️ Modificar Gasto")
-        ventana_mod.geometry("450x300")
-        ventana_mod.configure(bg="#FFE4F1")
-        ventana_mod.resizable(False, False)
-        
-        # Centrar ventana
-        ventana_mod.transient(ventana)
-        ventana_mod.grab_set()
-        
-        tk.Label(ventana_mod, text="✏️ MODIFICAR GASTO", font=("Segoe UI", 16, "bold"), 
-                bg="#FFE4F1", fg="#C71585").pack(pady=20)
-        
-        # Variables para modificación
-        mod_concepto = tk.StringVar(value=valores[1])
-        mod_valor = tk.StringVar(value=str(float(valores[2].replace('$', '').replace(',', ''))))
-        
-        # Campos de modificación
-        campos_frame = tk.Frame(ventana_mod, bg="#FFE4F1")
-        campos_frame.pack(pady=20, padx=30)
-        
-        tk.Label(campos_frame, text="📝 Concepto:", font=("Segoe UI", 11, "bold"), 
-                bg="#FFE4F1", fg="#8B0054").pack(anchor="w", pady=(0, 5))
-        tk.Entry(campos_frame, textvariable=mod_concepto, font=("Segoe UI", 11), 
-                width=40).pack(fill="x", pady=(0, 15))
-        
-        tk.Label(campos_frame, text="💰 Valor:", font=("Segoe UI", 11, "bold"), 
-                bg="#FFE4F1", fg="#8B0054").pack(anchor="w", pady=(0, 5))
-        tk.Entry(campos_frame, textvariable=mod_valor, font=("Segoe UI", 11), 
-                width=40).pack(fill="x", pady=(0, 20))
-        
-        def guardar_cambios():
+        # Si se crea como PAGADO, registrar impacto en libro mayor según medio de pago
+        if estado == "Pagado":
+            activa = obtener_sesion_activa()
+            sesion_id = activa["id"] if activa else None
+            cuenta = "CAJA_FISICA" if metodo_pago == "Efectivo" else "BANCO_TRANSFERENCIA"
             try:
-                nuevo_valor = float(mod_valor.get().replace(',', '').replace('$', ''))
-                if nuevo_valor <= 0:
-                    raise ValueError("El valor debe ser mayor a 0")
-                
-                if modificar_gasto_db(id_gasto, mod_concepto.get().strip(), nuevo_valor):
-                    actualizar_tabla()
-                    actualizar_stats_display()
-                    ventana_mod.destroy()
-                    messagebox.showinfo("✅ Modificado", "💖 Gasto modificado exitosamente")
-                
-            except ValueError as e:
-                messagebox.showwarning("⚠️ Error", "💖 Por favor ingresa un valor numérico válido")
-        
-        # Botones
-        btn_frame = tk.Frame(ventana_mod, bg="#FFE4F1")
-        btn_frame.pack(pady=20)
-        
-        tk.Button(btn_frame, text="💾 Guardar Cambios", command=guardar_cambios,
-                 bg="#32CD32", fg="white", font=("Segoe UI", 11, "bold"), 
-                 padx=20, pady=8, relief="flat", cursor="hand2").pack(side="left", padx=10)
-        
-        tk.Button(btn_frame, text="❌ Cancelar", command=ventana_mod.destroy,
-                 bg="#FF6B6B", fg="white", font=("Segoe UI", 11, "bold"), 
-                 padx=20, pady=8, relief="flat", cursor="hand2").pack(side="left", padx=10)
+                cur.execute("""
+                    INSERT INTO movimientos_financieros (
+                        fecha, hora, tipo, concepto, monto, metodo_pago,
+                        cuenta_afectada, usuario, referencia_origen, sesion_caja_id,
+                        estado, observaciones
+                    ) VALUES (?, ?, 'GASTO_PAGADO', ?, ?, ?, ?, ?, ?, ?, 'Activo', ?)
+                """, (
+                    fecha_str, hora_str, f"Gasto #{id_gasto}: {concepto} ({categoria})",
+                    float(valor), metodo_pago, cuenta, usuario, f"GASTO-{id_gasto}",
+                    sesion_id, f"Proveedor: {proveedor or 'Varios'}"
+                ))
+            except Exception:
+                pass
 
-    # Botones de acción
-    buttons_frame = tk.Frame(row2, bg="#FFC0CB")
-    buttons_frame.pack(side="right")
+            if metodo_pago == "Efectivo":
+                cur.execute("PRAGMA table_info(movimientos_caja)")
+                cols_m = [c[1] for c in cur.fetchall()]
+                col_sesion = "sesion_id" if "sesion_id" in cols_m else "sesion_caja_id"
+                col_concepto = "concepto" if "concepto" in cols_m else "descripcion"
+                col_ref = "id_referencia" if "id_referencia" in cols_m else "referencia_id"
 
-    btn_ingresar = tk.Button(buttons_frame, text="💎 Ingresar", command=ingresar_gasto,
-                            bg="#32CD32", fg="white", font=("Segoe UI", 11, "bold"), 
-                            padx=15, pady=8, relief="flat", cursor="hand2")
-    btn_ingresar.pack(side="left", padx=5)
+                if "terminal" in cols_m:
+                    cur.execute(f"""
+                        INSERT INTO movimientos_caja (
+                            {col_sesion}, fecha, hora, tipo, monto, usuario, terminal, {col_ref}, {col_concepto}
+                        ) VALUES (?, ?, ?, 'EGRESO', ?, ?, 'Terminal-1', ?, ?)
+                    """, (sesion_id, fecha_str, hora_str, valor, usuario, str(id_gasto), f"Gasto #{id_gasto}: {concepto} ({categoria})"))
+                else:
+                    cur.execute(f"""
+                        INSERT INTO movimientos_caja (
+                            {col_sesion}, fecha, hora, tipo, monto, usuario, {col_ref}, {col_concepto}
+                        ) VALUES (?, ?, ?, 'EGRESO', ?, ?, ?, ?)
+                    """, (sesion_id, fecha_str, hora_str, valor, usuario, str(id_gasto), f"Gasto #{id_gasto}: {concepto} ({categoria})"))
 
-    btn_eliminar = tk.Button(buttons_frame, text="🗑️ Eliminar", command=eliminar_gasto,
-                            bg="#FF6B6B", fg="white", font=("Segoe UI", 11, "bold"), 
-                            padx=15, pady=8, relief="flat", cursor="hand2")
-    btn_eliminar.pack(side="left", padx=5)
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[ERROR] registrar_nuevo_gasto: {e}")
+        return False
+    finally:
+        conn.close()
 
-    btn_modificar = tk.Button(buttons_frame, text="✏️ Modificar", command=modificar_gasto,
-                             bg="#4ECDC4", fg="white", font=("Segoe UI", 11, "bold"), 
-                             padx=15, pady=8, relief="flat", cursor="hand2")
-    btn_modificar.pack(side="left", padx=5)
 
-    # 🔍 Panel de búsqueda
-    search_frame = tk.Frame(ventana, bg="#FFE4F1")
-    search_frame.pack(fill="x", pady=10, padx=10)
-
-    search_container = tk.Frame(search_frame, bg="#FFE4F1")
-    search_container.pack()
-
-    tk.Label(search_container, text="🔍 Buscar:", font=("Segoe UI", 11, "bold"), 
-             bg="#FFE4F1", fg="#C71585").pack(side="left", padx=(0, 10))
-    
-    search_var = tk.StringVar()
-    search_entry = tk.Entry(search_container, textvariable=search_var, font=("Segoe UI", 11), 
-                           width=35, relief="solid", bd=1)
-    search_entry.pack(side="left", padx=(0, 10))
-
-    def buscar_gastos():
-        busqueda = search_var.get().lower()
-        if not busqueda:
-            actualizar_tabla()
-            return
-        
-        # Filtrar gastos en la base de datos
+def anular_gasto_db(id_gasto: int) -> bool:
+    """Marca un gasto como Anulado y actualiza la trazabilidad financiera."""
+    conn = conectar_sqlite()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE gastos SET estado = 'Anulado' WHERE id_gasto = ?", (id_gasto,))
         try:
-            cursor.execute("""
-                SELECT * FROM gastos 
-                WHERE LOWER(concepto) LIKE ? OR CAST(valor AS TEXT) LIKE ? OR fecha LIKE ?
-                ORDER BY fecha_registro DESC
-            """, (f'%{busqueda}%', f'%{busqueda}%', f'%{busqueda}%'))
-            gastos_filtrados = cursor.fetchall()
-            
-            tabla.delete(*tabla.get_children())
-            for gasto in gastos_filtrados:
-                tag = "even" if len(tabla.get_children()) % 2 == 0 else "odd"
-                tabla.insert("", "end", values=(
-                    gasto[0],  # id_gasto
-                    gasto[1],  # concepto
-                    f"${gasto[2]:,.0f}",  # valor
-                    gasto[3],  # fecha
-                    gasto[4]   # hora
-                ), tags=(tag,))
-                
-        except Exception as e:
-            messagebox.showerror("Error", f"Error al buscar gastos: {e}")
+            cur.execute("""
+                UPDATE movimientos_financieros 
+                SET estado = 'Anulado', observaciones = observaciones || ' | Gasto anulado'
+                WHERE referencia_origen = ?
+            """, (f"GASTO-{id_gasto}",))
+        except Exception:
+            pass
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
-    tk.Button(search_container, text="💖 Buscar", command=buscar_gastos,
-             bg="#FF69B4", fg="white", font=("Segoe UI", 10, "bold"), 
-             padx=15, pady=5, relief="flat", cursor="hand2").pack(side="left", padx=5)
 
-    tk.Button(search_container, text="🔄 Mostrar Todos", command=lambda: [search_var.set(""), actualizar_tabla()],
-             bg="#9370DB", fg="white", font=("Segoe UI", 10, "bold"), 
-             padx=15, pady=5, relief="flat", cursor="hand2").pack(side="left", padx=5)
+def obtener_recurrentes_db():
+    """Retorna todas las reglas de gastos recurrentes."""
+    conn = conectar_sqlite()
+    if not conn:
+        return []
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM gastos_recurrentes ORDER BY id DESC")
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
 
-    # 📋 Tabla de gastos
-    table_frame = tk.Frame(ventana, bg="#FFE4F1")
-    table_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
-    tk.Label(table_frame, text="📋 Lista de Gastos Registrados", font=("Segoe UI", 14, "bold"), 
-             bg="#FFE4F1", fg="#C71585").pack(pady=(0, 10))
+def guardar_recurrente_db(concepto, valor, frecuencia, categoria, dia_corte, proveedor, metodo_defecto, id_rec=None):
+    """Crea o actualiza una regla de gasto recurrente."""
+    conn = conectar_sqlite()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        if id_rec:
+            cur.execute("""
+                UPDATE gastos_recurrentes SET
+                    concepto = ?, valor = ?, frecuencia = ?, categoria = ?, clasificacion = ?,
+                    dia_corte = ?, proveedor = ?, metodo_pago_defecto = ?
+                WHERE id = ?
+            """, (concepto, valor, frecuencia, categoria, categoria, dia_corte, proveedor, metodo_defecto, id_rec))
+        else:
+            cur.execute("""
+                INSERT INTO gastos_recurrentes (
+                    concepto, valor, frecuencia, categoria, clasificacion, dia_corte, proveedor, metodo_pago_defecto, activo
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """, (concepto, valor, frecuencia, categoria, categoria, dia_corte, proveedor, metodo_defecto))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
-    # Contenedor de tabla con scrollbars
-    table_container = tk.Frame(table_frame, bg="white", relief="raised", bd=2)
-    table_container.pack(fill="both", expand=True)
 
-    # Configurar estilo de la tabla
-    style = ttk.Style()
-    style.configure("Gastos.Treeview", 
-                   background="white",
-                   foreground="#333",
-                   rowheight=35,
-                   fieldbackground="white")
-    style.configure("Gastos.Treeview.Heading",
-                   background="#FF69B4",
-                   foreground="white",
-                   font=('Segoe UI', 11, 'bold'))
+def toggle_activo_recurrente_db(id_rec, estado_actual):
+    """Pausa o activa una regla recurrente."""
+    conn = conectar_sqlite()
+    if not conn:
+        return False
+    try:
+        nuevo = 0 if estado_actual == 1 else 1
+        cur = conn.cursor()
+        cur.execute("UPDATE gastos_recurrentes SET activo = ? WHERE id = ?", (nuevo, id_rec))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
-    columnas = ("ID", "Concepto", "Valor", "Fecha", "Hora")
-    tabla = ttk.Treeview(table_container, columns=columnas, show="headings", 
-                        height=10, style="Gastos.Treeview")
 
-    # Configurar columnas
-    widths = [60, 300, 120, 100, 80]
-    for i, col in enumerate(columnas):
-        tabla.heading(col, text=col)
-        tabla.column(col, width=widths[i], anchor="center")
+# ==============================================================================
+# INTERFAZ GRÁFICA PROFESIONAL
+# ==============================================================================
 
-    # Scrollbars
-    v_scrollbar = ttk.Scrollbar(table_container, orient="vertical", command=tabla.yview)
-    h_scrollbar = ttk.Scrollbar(table_container, orient="horizontal", command=tabla.xview)
-    tabla.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+def iniciar_gastos(parent_pid=""):
+    # Procesar recurrentes pendientes al abrir
+    try:
+        nuevos_rec = procesar_gastos_recurrentes()
+    except Exception:
+        nuevos_rec = 0
 
-    # Grid para mejor organización
-    tabla.grid(row=0, column=0, sticky="nsew")
-    v_scrollbar.grid(row=0, column=1, sticky="ns")
-    h_scrollbar.grid(row=1, column=0, sticky="ew")
+    ventana = tk.Tk()
+    parent_pid = parent_pid or os.environ.get("VMPOS_PARENT_PID", "")
+    session_mgr.iniciar_vigilante_padre(ventana, parent_pid=parent_pid)
+    iniciar_observador_tema(ventana)
+
+    ventana.title(f"💸 Control Integral de Gastos - {business_mgr.nombre}")
+    t = aplicar_tema(ventana)
+    calcular_geometria_segura(ventana, 1180, 760, min_w=950, min_h=580)
+    ventana.configure(bg=t["bg_app"])
+
+    # HEADER
+    header = tk.Frame(ventana, bg=t["primary"])
+    header.pack(fill="x")
     
-    # Configurar el grid para que se expanda
-    table_container.grid_rowconfigure(0, weight=1)
-    table_container.grid_columnconfigure(0, weight=1)
+    fg_h = calcular_color_texto_optimo(t["primary"])
 
-    # Función para desplazamiento con el ratón
-    def on_mousewheel(event):
-        tabla.yview_scroll(int(-1*(event.delta/120)), "units")
-    
-    # Vincular el evento de la rueda del ratón a la tabla
-    tabla.bind("<MouseWheel>", on_mousewheel)
-    
-    # También vincular el evento a la barra de desplazamiento vertical
-    v_scrollbar.bind("<MouseWheel>", on_mousewheel)
-    
-    # Para Linux, necesitamos bindings adicionales
-    tabla.bind("<Button-4>", lambda e: tabla.yview_scroll(-1, "units"))
-    tabla.bind("<Button-5>", lambda e: tabla.yview_scroll(1, "units"))
-    v_scrollbar.bind("<Button-4>", lambda e: tabla.yview_scroll(-1, "units"))
-    v_scrollbar.bind("<Button-5>", lambda e: tabla.yview_scroll(1, "units"))
+    h_left = tk.Frame(header, bg=t["primary"])
+    h_left.pack(side="left", padx=20, pady=10)
+    tk.Label(h_left, text="💸", font=("Segoe UI Emoji", 22), bg=t["primary"], fg=fg_h).pack(side="left", padx=(0, 10))
+    lbl_title = tk.Label(h_left, text="CONTROL INTEGRAL DE GASTOS Y OBLIGACIONES", font=("Segoe UI", 15, "bold"), bg=t["primary"], fg=fg_h)
+    lbl_title.pack(side="left")
 
-    def actualizar_tabla():
-        # Limpiar tabla
-        tabla.delete(*tabla.get_children())
+    h_right = tk.Frame(header, bg=t["primary"])
+    h_right.pack(side="right", padx=20, pady=10)
+    lbl_recurrentes_info = tk.Label(h_right, text=f"⚡ Auto-Recurrentes: {nuevos_rec} generados hoy", font=("Segoe UI", 9, "bold"), bg=t["primary"], fg=fg_h)
+    lbl_recurrentes_info.pack(side="left", padx=10)
+
+    # NOTEBOOK PRINCIPAL CON 3 PESTAÑAS
+    notebook = ttk.Notebook(ventana)
+    notebook.pack(fill="both", expand=True, padx=15, pady=10)
+
+    tab_gastos = tk.Frame(notebook, bg=t["bg_app"])
+    tab_recurrentes = tk.Frame(notebook, bg=t["bg_app"])
+    tab_dashboard = tk.Frame(notebook, bg=t["bg_app"])
+
+    notebook.add(tab_gastos, text="📋 Registro y Lista de Gastos")
+    notebook.add(tab_recurrentes, text="🔄 Gastos Recurrentes (Arriendos/Servicios)")
+    notebook.add(tab_dashboard, text="📊 Dashboard y Vencimientos")
+
+    # ==========================================================================
+    # PESTAÑA 1: REGISTRO Y LISTA DE GASTOS
+    # ==========================================================================
+    top_bar = tk.Frame(tab_gastos, bg=t["bg_surface"], relief="solid", bd=1, highlightbackground=t["border"], highlightthickness=1)
+    top_bar.pack(fill="x", padx=10, pady=(8, 4))
+    top_bar_inner = tk.Frame(top_bar, bg=t["bg_surface"], padx=10, pady=8)
+    top_bar_inner.pack(fill="x")
+
+    # Filtros
+    tk.Label(top_bar_inner, text="📅 Periodo:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(side="left", padx=(0, 4))
+    periodo_var = tk.StringVar(value="Este mes")
+    periodo_combo = ttk.Combobox(top_bar_inner, textvariable=periodo_var, values=["Hoy", "Ayer", "Esta semana", "Este mes", "Todos"], state="readonly", width=12)
+    periodo_combo.pack(side="left", padx=(0, 10))
+
+    tk.Label(top_bar_inner, text="🏷️ Categoría:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(side="left", padx=(0, 4))
+    cat_var = tk.StringVar(value="Todas")
+    cat_combo = ttk.Combobox(top_bar_inner, textvariable=cat_var, values=["Todas"] + CATEGORIAS_GASTO, state="readonly", width=16)
+    cat_combo.pack(side="left", padx=(0, 10))
+
+    tk.Label(top_bar_inner, text="📌 Estado:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(side="left", padx=(0, 4))
+    estado_var = tk.StringVar(value="Todos")
+    estado_combo = ttk.Combobox(top_bar_inner, textvariable=estado_var, values=["Todos", "Pagado", "Pendiente", "Vencido", "Anulado"], state="readonly", width=11)
+    estado_combo.pack(side="left", padx=(0, 10))
+
+    tk.Label(top_bar_inner, text="🔍 Buscar:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(side="left", padx=(0, 4))
+    buscar_var = tk.StringVar()
+    buscar_entry = tk.Entry(top_bar_inner, textvariable=buscar_var, font=("Segoe UI", 9), width=18, relief="solid", bd=1, bg=t["input_bg"], fg=t["input_fg"])
+    buscar_entry.pack(side="left", padx=(0, 10))
+
+    # Botón Nuevo Gasto
+    def abrir_modal_nuevo_gasto():
+        modal = tk.Toplevel(ventana)
+        modal.title("➕ Registrar Nuevo Gasto")
+        t_mod = aplicar_tema(modal)
+        calcular_geometria_segura(modal, 540, 560, modal_padre=ventana)
+        modal.configure(bg=t_mod["bg_app"])
+        modal.transient(ventana)
+        modal.grab_set()
+
+        tk.Label(modal, text="➕ REGISTRO DE GASTO", font=("Segoe UI", 13, "bold"), bg=t_mod["bg_app"], fg=t_mod["primary"]).pack(pady=12)
         
-        # Obtener gastos de la base de datos
-        gastos = obtener_gastos()
-        
-        # Agregar gastos a la tabla
-        for gasto in gastos:
-            tag = "even" if len(tabla.get_children()) % 2 == 0 else "odd"
-            tabla.insert("", "end", values=(
-                gasto[0],  # id_gasto
-                gasto[1],  # concepto
-                f"${gasto[2]:,.0f}",  # valor
-                gasto[3],  # fecha
-                gasto[4]   # hora
+        box = tk.Frame(modal, bg=t_mod["bg_surface"], padx=20, pady=15, relief="solid", bd=1, highlightbackground=t_mod["border"], highlightthickness=1)
+        box.pack(fill="both", expand=True, padx=20, pady=(0, 15))
+
+        # Concepto
+        tk.Label(box, text="📝 Concepto / Motivo *:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_primary"]).grid(row=0, column=0, sticky="w", pady=4)
+        c_entry = tk.Entry(box, font=("Segoe UI", 10), width=35, bg=t_mod["input_bg"], fg=t_mod["input_fg"])
+        c_entry.grid(row=0, column=1, sticky="w", pady=4)
+        c_entry.focus()
+
+        # Valor
+        tk.Label(box, text="💰 Valor (COP) *:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_primary"]).grid(row=1, column=0, sticky="w", pady=4)
+        v_entry = CurrencyEntry(box, initial_value=0, font=("Segoe UI", 10, "bold"), width=20, bg=t_mod["input_bg"], fg=t_mod["input_fg"])
+        v_entry.grid(row=1, column=1, sticky="w", pady=4)
+
+        # Categoría
+        tk.Label(box, text="🏷️ Categoría Contable:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_primary"]).grid(row=2, column=0, sticky="w", pady=4)
+        m_cat_var = tk.StringVar(value="Operativo diario")
+        m_cat_cb = ttk.Combobox(box, textvariable=m_cat_var, values=CATEGORIAS_GASTO, state="readonly", width=25)
+        m_cat_cb.grid(row=2, column=1, sticky="w", pady=4)
+
+        # Método de Pago
+        tk.Label(box, text="💳 Medio de Pago:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_primary"]).grid(row=3, column=0, sticky="w", pady=4)
+        m_met_var = tk.StringVar(value="Efectivo")
+        m_met_cb = ttk.Combobox(box, textvariable=m_met_var, values=["Efectivo", "Transferencia"], state="readonly", width=25)
+        m_met_cb.grid(row=3, column=1, sticky="w", pady=4)
+
+        # Estado inicial
+        tk.Label(box, text="📌 Estado Inicial:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_primary"]).grid(row=4, column=0, sticky="w", pady=4)
+        m_est_var = tk.StringVar(value="Pagado")
+        m_est_cb = ttk.Combobox(box, textvariable=m_est_var, values=["Pagado", "Pendiente"], state="readonly", width=25)
+        m_est_cb.grid(row=4, column=1, sticky="w", pady=4)
+
+        # Fecha Vencimiento
+        tk.Label(box, text="📅 Vencimiento (YYYY-MM-DD):", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_primary"]).grid(row=5, column=0, sticky="w", pady=4)
+        venc_entry = tk.Entry(box, font=("Segoe UI", 10), width=20, bg=t_mod["input_bg"], fg=t_mod["input_fg"])
+        venc_entry.insert(0, (datetime.now() + timedelta(days=15)).strftime("%Y-%m-%d"))
+        venc_entry.grid(row=5, column=1, sticky="w", pady=4)
+
+        # Proveedor
+        tk.Label(box, text="🏢 Proveedor / Acreedor:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_primary"]).grid(row=6, column=0, sticky="w", pady=4)
+        prov_entry = tk.Entry(box, font=("Segoe UI", 10), width=35, bg=t_mod["input_bg"], fg=t_mod["input_fg"])
+        prov_entry.grid(row=6, column=1, sticky="w", pady=4)
+
+        # Comprobante
+        tk.Label(box, text="🧾 N° Comprobante / Factura:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_primary"]).grid(row=7, column=0, sticky="w", pady=4)
+        comp_entry = tk.Entry(box, font=("Segoe UI", 10), width=35, bg=t_mod["input_bg"], fg=t_mod["input_fg"])
+        comp_entry.grid(row=7, column=1, sticky="w", pady=4)
+
+        # Observaciones
+        tk.Label(box, text="📝 Observaciones:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_primary"]).grid(row=8, column=0, sticky="w", pady=4)
+        obs_entry = tk.Entry(box, font=("Segoe UI", 10), width=35, bg=t_mod["input_bg"], fg=t_mod["input_fg"])
+        obs_entry.grid(row=8, column=1, sticky="w", pady=4)
+
+        def guardar():
+            conc = c_entry.get().strip()
+            if not conc:
+                messagebox.showwarning("Campo Vacío", "Por favor ingresa un concepto para el gasto.", parent=modal)
+                c_entry.focus()
+                return
+            monto = float(v_entry.get_value())
+            if monto <= 0:
+                messagebox.showwarning("Monto Inválido", "El valor del gasto debe ser mayor a 0.", parent=modal)
+                v_entry.focus()
+                return
+
+            est = m_est_var.get()
+            venc = venc_entry.get().strip() if est == "Pendiente" else ""
+
+            ok = registrar_nuevo_gasto(
+                concepto=conc,
+                valor=monto,
+                categoria=m_cat_var.get(),
+                metodo_pago=m_met_var.get(),
+                estado=est,
+                fecha_vencimiento=venc,
+                proveedor=prov_entry.get().strip(),
+                comprobante=comp_entry.get().strip(),
+                observaciones=obs_entry.get().strip()
+            )
+            if ok:
+                modal.destroy()
+                recargar_todo()
+                messagebox.showinfo("Éxito", f"Gasto registrado exitosamente:\n\n{conc} - ${monto:,.0f} ({est})")
+            else:
+                messagebox.showerror("Error", "No se pudo registrar el gasto en la base de datos.", parent=modal)
+
+        btn_box = tk.Frame(box, bg=t_mod["bg_surface"])
+        btn_box.grid(row=9, column=0, columnspan=2, pady=(15, 0), sticky="ew")
+
+        crear_boton(btn_box, text="❌ Cancelar", command=modal.destroy, bg=t_mod["btn_secondary_bg"], fg=t_mod["btn_secondary_fg"]).pack(side="left")
+        crear_boton(btn_box, text="💾 Registrar Gasto", command=guardar, bg=t_mod["success"], fg="white").pack(side="right")
+
+    crear_boton(top_bar_inner, text="➕ Nuevo Gasto", command=abrir_modal_nuevo_gasto, bg=t["success"], fg="white", font=("Segoe UI", 9, "bold"), padx=12, pady=4).pack(side="right", padx=5)
+
+    # ACCIONES INFERIORES DE LA TABLA
+    action_bar = tk.Frame(tab_gastos, bg=t["bg_app"])
+    action_bar.pack(fill="x", padx=10, pady=(2, 4))
+
+    def pagar_gasto_seleccionado():
+        item = tree_gastos.focus()
+        if not item:
+            messagebox.showwarning("Selección Requerida", "Por favor selecciona un gasto para liquidar/pagar.")
+            return
+        g_id = tree_gastos.item(item)["values"][0]
+        # Consultar estado
+        conn = conectar_sqlite()
+        cur = conn.cursor()
+        cur.execute("SELECT concepto, valor, estado, metodo_pago FROM gastos WHERE id_gasto = ?", (g_id,))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return
+
+        concepto, valor, estado_act, met_act = row[0], float(row[1]), row[2], row[3]
+        if estado_act == "Pagado":
+            messagebox.showinfo("Ya Pagado", f"El gasto #{g_id} ya fue pagado previamente.")
+            return
+        if estado_act == "Anulado":
+            messagebox.showwarning("Gasto Anulado", f"El gasto #{g_id} está anulado.")
+            return
+
+        # Modal de confirmación de pago
+        p_modal = tk.Toplevel(ventana)
+        p_modal.title(f"💰 Liquidar Gasto #{g_id}")
+        t_pmod = aplicar_tema(p_modal)
+        calcular_geometria_segura(p_modal, 450, 320, modal_padre=ventana)
+        p_modal.configure(bg=t_pmod["bg_app"])
+        p_modal.transient(ventana)
+        p_modal.grab_set()
+
+        tk.Label(p_modal, text=f"💰 LIQUIDAR PAGO DE GASTO #{g_id}", font=("Segoe UI", 12, "bold"), bg=t_pmod["bg_app"], fg=t_pmod["primary"]).pack(pady=12)
+        p_box = tk.Frame(p_modal, bg=t_pmod["bg_surface"], padx=20, pady=15, relief="solid", bd=1, highlightbackground=t_pmod["border"], highlightthickness=1)
+        p_box.pack(fill="both", expand=True, padx=20, pady=(0, 15))
+
+        tk.Label(p_box, text=f"Concepto: {concepto}", font=("Segoe UI", 10, "bold"), bg=t_pmod["bg_surface"], fg=t_pmod["text_primary"]).pack(anchor="w", pady=2)
+        tk.Label(p_box, text=f"Monto a Pagar: ${valor:,.0f}", font=("Segoe UI", 12, "bold"), bg=t_pmod["bg_surface"], fg=t_pmod["danger"]).pack(anchor="w", pady=4)
+
+        tk.Label(p_box, text="Medio con que se cancela:", font=("Segoe UI", 9, "bold"), bg=t_pmod["bg_surface"], fg=t_pmod["text_primary"]).pack(anchor="w", pady=(8, 2))
+        p_met_var = tk.StringVar(value=met_act or "Efectivo")
+        p_cb = ttk.Combobox(p_box, textvariable=p_met_var, values=["Efectivo", "Transferencia"], state="readonly", width=25)
+        p_cb.pack(anchor="w", pady=2)
+
+        tk.Label(p_box, text="N° Comprobante / Soporte:", font=("Segoe UI", 9, "bold"), bg=t_pmod["bg_surface"], fg=t_pmod["text_primary"]).pack(anchor="w", pady=(8, 2))
+        p_comp = tk.Entry(p_box, font=("Segoe UI", 10), width=30, bg=t_pmod["input_bg"], fg=t_pmod["input_fg"])
+        p_comp.pack(anchor="w", pady=2)
+
+        def ejecutar_pago():
+            try:
+                res = pagar_gasto(
+                    id_gasto=g_id,
+                    metodo_pago=p_met_var.get(),
+                    usuario="Administrador",
+                    comprobante=p_comp.get().strip()
+                )
+                p_modal.destroy()
+                recargar_todo()
+                msg = f"Gasto #{g_id} liquidado como PAGADO.\n\nMedio: {res['metodo_pago']}\nMonto: ${res['monto']:,.0f}"
+                if res.get("movimiento_caja_id"):
+                    msg += f"\n\n💵 Se generó EGRESO en la caja física activa."
+                messagebox.showinfo("Gasto Liquidado", msg)
+            except Exception as e:
+                messagebox.showerror("Error", f"Error liquidando gasto: {e}", parent=p_modal)
+
+        p_btns = tk.Frame(p_box, bg=t_pmod["bg_surface"])
+        p_btns.pack(fill="x", pady=(15, 0))
+        crear_boton(p_btns, text="❌ Cancelar", command=p_modal.destroy, bg=t_pmod["btn_secondary_bg"], fg=t_pmod["btn_secondary_fg"]).pack(side="left")
+        crear_boton(p_btns, text="✅ Confirmar Pago", command=ejecutar_pago, bg=t_pmod["success"], fg="white").pack(side="right")
+
+    def anular_gasto():
+        item = tree_gastos.focus()
+        if not item:
+            messagebox.showwarning("Selección", "Por favor selecciona un gasto para anular.")
+            return
+        g_id = tree_gastos.item(item)["values"][0]
+        if messagebox.askyesno("Confirmar Anulación", f"¿Estás seguro de anular el gasto #{g_id}?"):
+            if anular_gasto_db(g_id):
+                recargar_todo()
+                messagebox.showinfo("Anulado", f"El gasto #{g_id} ha sido anulado.")
+
+    btn_pagar = crear_boton(action_bar, text="💰 Pagar / Liquidar Gasto", command=pagar_gasto_seleccionado, bg="#0284C7", fg="white", font=("Segoe UI", 9, "bold"), padx=12, pady=3)
+    btn_pagar.pack(side="left", padx=4)
+
+    btn_anular = crear_boton(action_bar, text="🚫 Anular Gasto", command=anular_gasto, bg=t["danger"], fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=3)
+    btn_anular.pack(side="left", padx=4)
+
+    btn_actualizar = crear_boton(action_bar, text="🔄 Refrescar", command=lambda: recargar_todo(), bg=t["btn_secondary_bg"], fg=t["btn_secondary_fg"], font=("Segoe UI", 9, "bold"), padx=10, pady=3)
+    btn_actualizar.pack(side="left", padx=4)
+
+    lbl_total_filtrado = tk.Label(action_bar, text="Total Filtrado: $0", font=("Segoe UI", 10, "bold"), bg=t["bg_app"], fg=t["primary"])
+    lbl_total_filtrado.pack(side="right", padx=10)
+
+    # TREEVIEW GASTOS
+    frame_tree = tk.Frame(tab_gastos, bg=t["bg_surface"], relief="solid", bd=1, highlightbackground=t["border"], highlightthickness=1)
+    frame_tree.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+
+    cols = ("ID", "Fecha", "Concepto", "Categoría", "Valor", "Medio", "Estado", "Vence", "Proveedor", "Comprobante")
+    tree_gastos = ttk.Treeview(frame_tree, columns=cols, show="headings", height=12)
+    widths = [50, 85, 200, 120, 100, 95, 85, 85, 130, 110]
+    for c, w in zip(cols, widths):
+        tree_gastos.heading(c, text=c)
+        tree_gastos.column(c, width=w, anchor="center" if c in ["ID", "Fecha", "Medio", "Estado", "Vence"] else ("e" if c == "Valor" else "w"))
+
+    sb_v = ttk.Scrollbar(frame_tree, orient="vertical", command=tree_gastos.yview)
+    sb_h = ttk.Scrollbar(frame_tree, orient="horizontal", command=tree_gastos.xview)
+    tree_gastos.configure(yscrollcommand=sb_v.set, xscrollcommand=sb_h.set)
+    tree_gastos.grid(row=0, column=0, sticky="nsew")
+    sb_v.grid(row=0, column=1, sticky="ns")
+    sb_h.grid(row=1, column=0, sticky="ew")
+    frame_tree.grid_rowconfigure(0, weight=1)
+    frame_tree.grid_columnconfigure(0, weight=1)
+
+    # Tags de colores por estado
+    tree_gastos.tag_configure("pagado", foreground="#059669")
+    tree_gastos.tag_configure("pendiente", foreground="#D97706", font=("Segoe UI", 9, "bold"))
+    tree_gastos.tag_configure("vencido", foreground="#DC2626", font=("Segoe UI", 9, "bold"))
+    tree_gastos.tag_configure("anulado", foreground="#9CA3AF")
+
+    def recargar_tabla_gastos():
+        tree_gastos.delete(*tree_gastos.get_children())
+        gastos = obtener_gastos_db(
+            filtro_periodo=periodo_var.get(),
+            filtro_cat=cat_var.get(),
+            filtro_estado=estado_var.get(),
+            busqueda=buscar_var.get().strip()
+        )
+        total_acum = 0.0
+        for g in gastos:
+            v = float(g.get("valor", 0.0))
+            if g.get("estado") != "Anulado":
+                total_acum += v
+            est = g.get("estado", "Pagado")
+            tag = est.lower()
+            tree_gastos.insert("", "end", values=(
+                g["id_gasto"],
+                g.get("fecha", ""),
+                g.get("concepto", ""),
+                g.get("categoria", ""),
+                f"${v:,.0f}",
+                g.get("metodo_pago", ""),
+                est,
+                g.get("fecha_vencimiento") or "-",
+                g.get("proveedor") or "-",
+                g.get("comprobante") or "-"
             ), tags=(tag,))
-        
-        # Configurar colores alternos
-        tabla.tag_configure("even", background="#FFF0F5")
-        tabla.tag_configure("odd", background="white")
+        lbl_total_filtrado.config(text=f"Total Filtrado: ${total_acum:,.0f} ({len(gastos)} registros)")
 
-    # Cargar datos iniciales
-    actualizar_tabla()
+    periodo_combo.bind("<<ComboboxSelected>>", lambda e: recargar_tabla_gastos())
+    cat_combo.bind("<<ComboboxSelected>>", lambda e: recargar_tabla_gastos())
+    estado_combo.bind("<<ComboboxSelected>>", lambda e: recargar_tabla_gastos())
+    buscar_entry.bind("<KeyRelease>", lambda e: recargar_tabla_gastos())
 
-    # 🌟 Footer
-    footer_frame = tk.Frame(ventana, bg="#FF1493", height=50)
-    footer_frame.pack(fill="x")
-    footer_frame.pack_propagate(False)
+    # ==========================================================================
+    # PESTAÑA 2: GASTOS RECURRENTES (ARRIENDOS, SERVICIOS, SUSCRIPCIONES)
+    # ==========================================================================
+    rec_top = tk.Frame(tab_recurrentes, bg=t["bg_surface"], relief="solid", bd=1, highlightbackground=t["border"], highlightthickness=1)
+    rec_top.pack(fill="x", padx=10, pady=8)
+    rec_top_inner = tk.Frame(rec_top, bg=t["bg_surface"], padx=10, pady=8)
+    rec_top_inner.pack(fill="x")
 
-    tk.Label(footer_frame, text="💎 Control de Gastos • Base de Datos Conectada 💎", 
-             font=("Segoe UI", 11, "bold"), bg="#FF1493", fg="white").pack(expand=True, pady=15)
+    tk.Label(rec_top_inner, text="🔄 Reglas Automáticas de Gastos Fijos (Arriendos, Servicios Públicos, Nóminas fijas, Software)",
+             font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(side="left")
 
-    # Enfocar el campo concepto al inicio
-    concepto_entry.focus()
+    def modal_nueva_recurrencia(id_rec=None, datos_prev=None):
+        m_rec = tk.Toplevel(ventana)
+        m_rec.title("🔄 Programar Gasto Recurrente")
+        t_mrec = aplicar_tema(m_rec)
+        calcular_geometria_segura(m_rec, 480, 460, modal_padre=ventana)
+        m_rec.configure(bg=t_mrec["bg_app"])
+        m_rec.transient(ventana)
+        m_rec.grab_set()
 
-    # 🎯 Eventos de teclado
-    def keyboard_shortcuts(event):
-        if event.state & 4:  # Ctrl presionado
-            key = event.keysym.lower()
-            if key == 'n':  # Ctrl+N para nuevo gasto
-                concepto_entry.focus()
-            elif key == 'f':  # Ctrl+F para buscar
-                search_entry.focus()
-            elif key == 's':  # Ctrl+S para guardar
-                ingresar_gasto()
+        tk.Label(m_rec, text="🔄 REGLA DE GASTO RECURRENTE", font=("Segoe UI", 12, "bold"), bg=t_mrec["bg_app"], fg=t_mrec["primary"]).pack(pady=10)
+        box = tk.Frame(m_rec, bg=t_mrec["bg_surface"], padx=20, pady=15, relief="solid", bd=1, highlightbackground=t_mrec["border"], highlightthickness=1)
+        box.pack(fill="both", expand=True, padx=20, pady=(0, 15))
 
-    # Vincular Enter para ingresar gasto
-    def on_enter(event):
-        if event.widget == valor_entry:
-            ingresar_gasto()
+        tk.Label(box, text="📝 Concepto (Ej. Arriendo Local, Internet):", font=("Segoe UI", 9, "bold"), bg=t_mrec["bg_surface"], fg=t_mrec["text_primary"]).grid(row=0, column=0, sticky="w", pady=4)
+        c_ent = tk.Entry(box, font=("Segoe UI", 10), width=30, bg=t_mrec["input_bg"], fg=t_mrec["input_fg"])
+        if datos_prev: c_ent.insert(0, datos_prev.get("concepto", ""))
+        c_ent.grid(row=0, column=1, sticky="w", pady=4)
 
-    valor_entry.bind('<Return>', on_enter)
-    concepto_entry.bind('<Return>', lambda e: valor_entry.focus())
+        tk.Label(box, text="💰 Valor Estimado (COP):", font=("Segoe UI", 9, "bold"), bg=t_mrec["bg_surface"], fg=t_mrec["text_primary"]).grid(row=1, column=0, sticky="w", pady=4)
+        v_ent = CurrencyEntry(box, initial_value=datos_prev.get("valor", 0) if datos_prev else 0, font=("Segoe UI", 10, "bold"), width=18, bg=t_mrec["input_bg"], fg=t_mrec["input_fg"])
+        v_ent.grid(row=1, column=1, sticky="w", pady=4)
 
-    ventana.bind("<KeyPress>", keyboard_shortcuts)
-    ventana.focus_set()
+        tk.Label(box, text="⏰ Frecuencia:", font=("Segoe UI", 9, "bold"), bg=t_mrec["bg_surface"], fg=t_mrec["text_primary"]).grid(row=2, column=0, sticky="w", pady=4)
+        f_var = tk.StringVar(value=datos_prev.get("frecuencia", "Mensual") if datos_prev else "Mensual")
+        f_cb = ttk.Combobox(box, textvariable=f_var, values=FRECUENCIAS, state="readonly", width=18)
+        f_cb.grid(row=2, column=1, sticky="w", pady=4)
 
-    # Cerrar conexión al cerrar ventana
-    def on_closing():
-        if conn:
-            conn.close()
-        ventana.destroy()
+        tk.Label(box, text="🏷️ Categoría:", font=("Segoe UI", 9, "bold"), bg=t_mrec["bg_surface"], fg=t_mrec["text_primary"]).grid(row=3, column=0, sticky="w", pady=4)
+        cat_r_var = tk.StringVar(value=datos_prev.get("categoria", "Fijo periódico") if datos_prev else "Fijo periódico")
+        cat_r_cb = ttk.Combobox(box, textvariable=cat_r_var, values=CATEGORIAS_GASTO, state="readonly", width=18)
+        cat_r_cb.grid(row=3, column=1, sticky="w", pady=4)
 
-    ventana.protocol("WM_DELETE_WINDOW", on_closing)
+        tk.Label(box, text="📅 Día de Corte / Pago (1 a 28):", font=("Segoe UI", 9, "bold"), bg=t_mrec["bg_surface"], fg=t_mrec["text_primary"]).grid(row=4, column=0, sticky="w", pady=4)
+        dia_ent = tk.Spinbox(box, from_=1, to=28, font=("Segoe UI", 10), width=10, bg=t_mrec["input_bg"], fg=t_mrec["input_fg"])
+        if datos_prev: dia_ent.delete(0, "end"); dia_ent.insert(0, str(datos_prev.get("dia_corte", 5)))
+        dia_ent.grid(row=4, column=1, sticky="w", pady=4)
+
+        tk.Label(box, text="🏢 Proveedor:", font=("Segoe UI", 9, "bold"), bg=t_mrec["bg_surface"], fg=t_mrec["text_primary"]).grid(row=5, column=0, sticky="w", pady=4)
+        p_ent = tk.Entry(box, font=("Segoe UI", 10), width=30, bg=t_mrec["input_bg"], fg=t_mrec["input_fg"])
+        if datos_prev: p_ent.insert(0, datos_prev.get("proveedor", ""))
+        p_ent.grid(row=5, column=1, sticky="w", pady=4)
+
+        tk.Label(box, text="💳 Medio por Defecto:", font=("Segoe UI", 9, "bold"), bg=t_mrec["bg_surface"], fg=t_mrec["text_primary"]).grid(row=6, column=0, sticky="w", pady=4)
+        met_r_var = tk.StringVar(value=datos_prev.get("metodo_pago_defecto", "Efectivo") if datos_prev else "Efectivo")
+        met_r_cb = ttk.Combobox(box, textvariable=met_r_var, values=["Efectivo", "Transferencia"], state="readonly", width=18)
+        met_r_cb.grid(row=6, column=1, sticky="w", pady=4)
+
+        def guardar_r():
+            conc = c_ent.get().strip()
+            if not conc:
+                messagebox.showwarning("Concepto Vacío", "Ingresa un concepto.", parent=m_rec); return
+            val = float(v_ent.get_value())
+            if val <= 0:
+                messagebox.showwarning("Valor Inválido", "Ingresa un valor mayor a cero.", parent=m_rec); return
+            try:
+                dc = int(dia_ent.get())
+            except Exception:
+                dc = 1
+
+            if guardar_recurrente_db(conc, val, f_var.get(), cat_r_var.get(), dc, p_ent.get().strip(), met_r_var.get(), id_rec):
+                m_rec.destroy()
+                recargar_todo()
+                messagebox.showinfo("Guardado", f"Regla recurrente para '{conc}' guardada con éxito.")
+
+        btn_box = tk.Frame(box, bg=t_mrec["bg_surface"])
+        btn_box.grid(row=7, column=0, columnspan=2, pady=(15, 0), sticky="ew")
+        crear_boton(btn_box, text="❌ Cancelar", command=m_rec.destroy, bg=t_mrec["btn_secondary_bg"], fg=t_mrec["btn_secondary_fg"]).pack(side="left")
+        crear_boton(btn_box, text="💾 Guardar Regla", command=guardar_r, bg=t_mrec["success"], fg="white").pack(side="right")
+
+    crear_boton(rec_top_inner, text="➕ Nueva Regla Recurrente", command=modal_nueva_recurrencia, bg=t["success"], fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=3).pack(side="right", padx=4)
+
+    def forzar_procesamiento():
+        n = procesar_gastos_recurrentes()
+        recargar_todo()
+        messagebox.showinfo("Procesador de Recurrentes", f"Se han generado {n} nuevas obligaciones pendientes.")
+
+    crear_boton(rec_top_inner, text="⚡ Generar Pendientes Ahora", command=forzar_procesamiento, bg="#D97706", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=3).pack(side="right", padx=4)
+
+    # TREEVIEW RECURRENTES
+    rec_frame = tk.Frame(tab_recurrentes, bg=t["bg_surface"], relief="solid", bd=1, highlightbackground=t["border"], highlightthickness=1)
+    rec_frame.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+
+    cols_rec = ("ID", "Concepto", "Valor", "Frecuencia", "Categoría", "Día Corte", "Proveedor", "Medio", "Último Periodo", "Estado")
+    tree_rec = ttk.Treeview(rec_frame, columns=cols_rec, show="headings", height=10)
+    w_rec = [40, 220, 110, 90, 120, 70, 140, 95, 110, 80]
+    for c, w in zip(cols_rec, w_rec):
+        tree_rec.heading(c, text=c)
+        tree_rec.column(c, width=w, anchor="center" if c not in ["Concepto", "Proveedor"] else "w")
+
+    tree_rec.pack(fill="both", expand=True)
+
+    rec_actions = tk.Frame(tab_recurrentes, bg=t["bg_app"])
+    rec_actions.pack(fill="x", padx=10, pady=4)
+
+    def toggle_recurrente():
+        item = tree_rec.focus()
+        if not item: return
+        vals = tree_rec.item(item)["values"]
+        id_r = vals[0]
+        est_txt = vals[9]
+        est_act = 1 if est_txt == "Activo" else 0
+        toggle_activo_recurrente_db(id_r, est_act)
+        recargar_tabla_recurrentes()
+
+    crear_boton(rec_actions, text="⏸️ Pausar / Activar Regla", command=toggle_recurrente, bg="#4B5563", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=3).pack(side="left", padx=4)
+
+    def recargar_tabla_recurrentes():
+        tree_rec.delete(*tree_rec.get_children())
+        recs = obtener_recurrentes_db()
+        for r in recs:
+            tree_rec.insert("", "end", values=(
+                r["id"],
+                r.get("concepto", ""),
+                f"${float(r.get('valor', 0.0)):,.0f}",
+                r.get("frecuencia", ""),
+                r.get("categoria", ""),
+                r.get("dia_corte", 1),
+                r.get("proveedor") or "-",
+                r.get("metodo_pago_defecto", "Efectivo"),
+                r.get("ultimo_periodo_generado") or "Nunca",
+                "Activo" if r.get("activo") == 1 else "Pausado"
+            ))
+
+    # ==========================================================================
+    # PESTAÑA 3: DASHBOARD Y VENCIMIENTOS
+    # ==========================================================================
+    dash_scroll = ScrollableContainer(tab_dashboard, bg=t["bg_app"])
+    dash_scroll.pack(fill="both", expand=True, padx=10, pady=10)
+    dash_content = dash_scroll.scrollable_frame
+
+    # TARJETAS KPI RESUMEN GASTOS
+    kpi_frame = tk.Frame(dash_content, bg=t["bg_app"])
+    kpi_frame.pack(fill="x", pady=(0, 10))
+
+    card_hoy = tk.Frame(kpi_frame, bg=t["bg_surface"], relief="solid", bd=1, highlightbackground=t["border"], highlightthickness=1)
+    card_hoy.pack(side="left", fill="both", expand=True, padx=(0, 8))
+    tk.Frame(card_hoy, bg="#10B981", height=4).pack(fill="x")
+    lbl_dash_hoy = tk.Label(card_hoy, text="$0", font=("Segoe UI", 16, "bold"), bg=t["bg_surface"], fg="#10B981")
+    tk.Label(card_hoy, text="Gastos Pagados Hoy", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_muted"]).pack(pady=(6, 2))
+    lbl_dash_hoy.pack(pady=(0, 8))
+
+    card_sem = tk.Frame(kpi_frame, bg=t["bg_surface"], relief="solid", bd=1, highlightbackground=t["border"], highlightthickness=1)
+    card_sem.pack(side="left", fill="both", expand=True, padx=4)
+    tk.Frame(card_sem, bg="#0284C7", height=4).pack(fill="x")
+    lbl_dash_sem = tk.Label(card_sem, text="$0", font=("Segoe UI", 16, "bold"), bg=t["bg_surface"], fg="#0284C7")
+    tk.Label(card_sem, text="Gastos Esta Semana", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_muted"]).pack(pady=(6, 2))
+    lbl_dash_sem.pack(pady=(0, 8))
+
+    card_mes = tk.Frame(kpi_frame, bg=t["bg_surface"], relief="solid", bd=1, highlightbackground=t["border"], highlightthickness=1)
+    card_mes.pack(side="left", fill="both", expand=True, padx=4)
+    tk.Frame(card_mes, bg="#8B5CF6", height=4).pack(fill="x")
+    lbl_dash_mes = tk.Label(card_mes, text="$0", font=("Segoe UI", 16, "bold"), bg=t["bg_surface"], fg="#8B5CF6")
+    tk.Label(card_mes, text="Gastos Este Mes", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_muted"]).pack(pady=(6, 2))
+    lbl_dash_mes.pack(pady=(0, 8))
+
+    card_pen = tk.Frame(kpi_frame, bg=t["bg_surface"], relief="solid", bd=1, highlightbackground=t["border"], highlightthickness=1)
+    card_pen.pack(side="left", fill="both", expand=True, padx=(8, 0))
+    tk.Frame(card_pen, bg="#EF4444", height=4).pack(fill="x")
+    lbl_dash_pen = tk.Label(card_pen, text="$0", font=("Segoe UI", 16, "bold"), bg=t["bg_surface"], fg="#EF4444")
+    tk.Label(card_pen, text="Obligaciones Pendientes", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_muted"]).pack(pady=(6, 2))
+    lbl_dash_pen.pack(pady=(0, 8))
+
+    # SECCIÓN DE GRÁFICO POR CATEGORÍA
+    chart_frame = tk.Frame(dash_content, bg=t["bg_surface"], relief="solid", bd=1, highlightbackground=t["border"], highlightthickness=1)
+    chart_frame.pack(fill="x", pady=8)
+    tk.Label(chart_frame, text="📊 Distribución de Gastos por Categoría (Mes Actual)", font=("Segoe UI", 11, "bold"), bg=t["bg_surface"], fg=t["primary"]).pack(anchor="w", padx=15, pady=(10, 4))
+    
+    canvas_cat = tk.Canvas(chart_frame, bg=t["bg_surface"], height=160, highlightthickness=0)
+    canvas_cat.pack(fill="x", padx=15, pady=(4, 15))
+
+    # LISTA DE OBLIGACIONES PENDIENTES Y PRÓXIMAS A VENCER
+    pen_frame = tk.Frame(dash_content, bg=t["bg_surface"], relief="solid", bd=1, highlightbackground=t["border"], highlightthickness=1)
+    pen_frame.pack(fill="x", pady=8)
+    tk.Label(pen_frame, text="🚨 Cuentas y Obligaciones Pendientes de Pago (Ordenadas por Vencimiento)", font=("Segoe UI", 11, "bold"), bg=t["bg_surface"], fg="#DC2626").pack(anchor="w", padx=15, pady=(10, 6))
+
+    cols_pen = ("ID", "Concepto", "Monto", "Categoría", "Vencimiento", "Proveedor", "Estado")
+    tree_pendientes = ttk.Treeview(pen_frame, columns=cols_pen, show="headings", height=6)
+    w_pen = [50, 240, 110, 130, 100, 160, 90]
+    for c, w in zip(cols_pen, w_pen):
+        tree_pendientes.heading(c, text=c)
+        tree_pendientes.column(c, width=w, anchor="center" if c not in ["Concepto", "Proveedor"] else "w")
+    tree_pendientes.pack(fill="x", padx=15, pady=(0, 15))
+    tree_pendientes.tag_configure("vencido", foreground="#DC2626", font=("Segoe UI", 9, "bold"))
+    tree_pendientes.tag_configure("pendiente", foreground="#D97706")
+
+    def recargar_dashboard():
+        conn = conectar_sqlite()
+        if not conn: return
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        hoy = datetime.now()
+        hoy_str = hoy.strftime("%Y-%m-%d")
+        ini_sem = (hoy - timedelta(days=hoy.weekday())).strftime("%Y-%m-%d")
+        ini_mes = hoy.strftime("%Y-%m-01")
+
+        # Hoy
+        cur.execute("SELECT COALESCE(SUM(valor), 0.0) FROM gastos WHERE fecha = ? AND estado != 'Anulado'", (hoy_str,))
+        g_hoy = float(cur.fetchone()[0] or 0.0)
+        lbl_dash_hoy.config(text=f"${g_hoy:,.0f}")
+
+        # Semana
+        cur.execute("SELECT COALESCE(SUM(valor), 0.0) FROM gastos WHERE fecha BETWEEN ? AND ? AND estado != 'Anulado'", (ini_sem, hoy_str))
+        g_sem = float(cur.fetchone()[0] or 0.0)
+        lbl_dash_sem.config(text=f"${g_sem:,.0f}")
+
+        # Mes
+        cur.execute("SELECT COALESCE(SUM(valor), 0.0) FROM gastos WHERE fecha BETWEEN ? AND ? AND estado != 'Anulado'", (ini_mes, hoy_str))
+        g_mes = float(cur.fetchone()[0] or 0.0)
+        lbl_dash_mes.config(text=f"${g_mes:,.0f}")
+
+        # Pendientes / Vencidos
+        cur.execute("SELECT COALESCE(SUM(valor), 0.0) FROM gastos WHERE estado IN ('Pendiente', 'Vencido')")
+        g_pen = float(cur.fetchone()[0] or 0.0)
+        lbl_dash_pen.config(text=f"${g_pen:,.0f}")
+
+        # Gráfico por categoría (Mes Actual)
+        cur.execute("""
+            SELECT COALESCE(categoria, clasificacion, 'Operativo diario') as cat, SUM(valor) as total
+            FROM gastos
+            WHERE fecha BETWEEN ? AND ? AND estado != 'Anulado'
+            GROUP BY cat
+        """, (ini_mes, hoy_str))
+        cat_map = {c: 0.0 for c in CATEGORIAS_GASTO}
+        for r in cur.fetchall():
+            c_name = r["cat"] or "Operativo diario"
+            matched = "Operativo diario"
+            for k in CATEGORIAS_GASTO:
+                if k.lower() in c_name.lower():
+                    matched = k; break
+            cat_map[matched] = cat_map.get(matched, 0.0) + float(r["total"] or 0.0)
+
+        # Dibujar Canvas Bars
+        canvas_cat.delete("all")
+        w_can = canvas_cat.winfo_width() or 600
+        total_cats = sum(cat_map.values())
+        y = 15
+        colores_bar = ["#10B981", "#3B82F6", "#F59E0B", "#EF4444"]
+        for i, cat in enumerate(CATEGORIAS_GASTO):
+            val = cat_map.get(cat, 0.0)
+            pct = (val / total_cats * 100.0) if total_cats > 0 else 0.0
+            canvas_cat.create_text(15, y, anchor="w", text=f"{cat}:", font=("Segoe UI", 9, "bold"), fill=t["text_primary"])
+            canvas_cat.create_text(180, y, anchor="w", text=f"${val:,.0f} ({pct:.1f}%)", font=("Segoe UI", 9), fill=t["text_muted"])
+            
+            # Barra
+            bar_start_x = 300
+            bar_max_w = max(50, w_can - bar_start_x - 30)
+            bar_w = (pct / 100.0) * bar_max_w if total_cats > 0 else 0
+            canvas_cat.create_rectangle(bar_start_x, y - 6, bar_start_x + bar_max_w, y + 6, fill="#E5E7EB", outline="")
+            if bar_w > 0:
+                canvas_cat.create_rectangle(bar_start_x, y - 6, bar_start_x + bar_w, y + 6, fill=colores_bar[i % len(colores_bar)], outline="")
+            y += 32
+
+        # Cargar tabla pendientes
+        tree_pendientes.delete(*tree_pendientes.get_children())
+        cur.execute("""
+            SELECT id_gasto, concepto, valor, COALESCE(categoria, 'Operativo'), fecha_vencimiento, proveedor, estado
+            FROM gastos
+            WHERE estado IN ('Pendiente', 'Vencido')
+            ORDER BY COALESCE(fecha_vencimiento, '9999-99-99') ASC
+        """)
+        for r in cur.fetchall():
+            venc = r[4] or "-"
+            est = "Vencido" if (venc != "-" and venc < hoy_str) else r[6]
+            tag = "vencido" if est == "Vencido" else "pendiente"
+            tree_pendientes.insert("", "end", values=(
+                r[0], r[1], f"${float(r[2]):,.0f}", r[3], venc, r[5] or "-", est
+            ), tags=(tag,))
+
+        conn.close()
+
+    def recargar_todo():
+        recargar_tabla_gastos()
+        recargar_tabla_recurrentes()
+        recargar_dashboard()
+
+    recargar_todo()
+
+    # Redibujar gráfico al cambiar tamaño de ventana
+    canvas_cat.bind("<Configure>", lambda e: recargar_dashboard())
+
+    # Footer
+    footer = tk.Frame(ventana, bg=t["primary"], height=28)
+    footer.pack(fill="x")
+    tk.Label(footer, text="💎 Control de Gastos • Contabilidad VmPOS 💎", font=("Segoe UI", 9), bg=t["primary"], fg=fg_h).pack(pady=4)
+
     ventana.mainloop()
 
-# Ejecutar si es llamado directamente
+
 if __name__ == "__main__":
-    iniciar_gastos()
+    import argparse
+    parser = argparse.ArgumentParser(description="Control de Gastos VmPOS")
+    parser.add_argument("--parent_pid", default="")
+    if "-h" in sys.argv or "--help" in sys.argv:
+        parser.print_help()
+        sys.exit(0)
+    args, _ = parser.parse_known_args()
+    parent_pid = args.parent_pid or os.environ.get("VMPOS_PARENT_PID", "")
+    iniciar_gastos(parent_pid=parent_pid)

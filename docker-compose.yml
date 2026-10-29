@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  vmpos-db:
+    image: postgres:16-alpine
+    container_name: vmpos_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: vmpos
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  vmpos-api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: vmpos_api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@vmpos-db:5432/vmpos
+      - SECRET_KEY=supersecretkey
+    volumes:
+      - ./server:/app/server
+    depends_on:
+      - vmpos-db
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
