@@ -234,17 +234,25 @@ login_header.pack_propagate(False)
 
 # Selector rápido de tema en cabecera
 def toggle_theme():
+    if sys.platform == "darwin":
+        try:
+            if tk.TkVersion < 8.6:
+                messagebox.showinfo("Tema", "En macOS con la versión del sistema de Tkinter, el modo visual está fijado en Modo Claro de alto contraste para garantizar la legibilidad del texto.")
+                return
+        except Exception:
+            pass
     nuevo = "claro" if theme_mgr.es_oscuro() else "oscuro"
     theme_mgr.cambiar_tema(nuevo)
     messagebox.showinfo("Tema", f"Tema cambiado a {nuevo.upper()}.\nReinicie la aplicación para reflejar todos los estilos.")
 
+fg_btn_h = "#0F172A" if sys.platform == "darwin" else FG_LOGIN
 btn_theme_login = tk.Button(login_header, text="🌙/☀️", command=toggle_theme,
-                            font=(FONT_FAMILY, 9, "bold"), bg=COLOR_LOGIN, fg=FG_LOGIN,
+                            font=(FONT_FAMILY, 9, "bold"), bg=COLOR_LOGIN, fg=fg_btn_h,
                             relief="flat", cursor="hand2", padx=6, pady=2)
 btn_theme_login.pack(side="right", padx=(4, 10), pady=10)
 
 btn_net_login = tk.Button(login_header, text="🌐 Red", command=abrir_configuracion_red,
-                          font=(FONT_FAMILY, 9, "bold"), bg=COLOR_LOGIN, fg=FG_LOGIN,
+                          font=(FONT_FAMILY, 9, "bold"), bg=COLOR_LOGIN, fg=fg_btn_h,
                           relief="flat", cursor="hand2", padx=6, pady=2)
 btn_net_login.pack(side="right", padx=(0, 4), pady=10)
 

@@ -361,6 +361,14 @@ class ThemeManager:
 
     def es_oscuro(self):
         """Determina si actualmente debe renderizarse en Modo Oscuro."""
+        if sys.platform == "darwin":
+            # Apple Tk 8.5 en macOS no soporta ventanas oscuras (fuerza fondo blanco).
+            # Para evitar texto blanco invisible sobre fondo blanco, se desactiva modo oscuro en Tk < 8.6.
+            try:
+                if tk.TkVersion < 8.6:
+                    return False
+            except Exception:
+                pass
         if self.modo_preferido == "oscuro":
             return True
         elif self.modo_preferido == "claro":
@@ -692,7 +700,12 @@ def crear_boton(parent, texto="", comando=None, tipo="primary", icono="",
 
     estado = "normal" if habilitado else "disabled"
     bg_actual = bg_normal if habilitado else t["btn_disabled_bg"]
-    fg_actual = fg_normal if habilitado else t["btn_disabled_fg"]
+    # En macOS Aqua, tk.Button no pinta el color de fondo personalizado (usa la cápsula Cocoa gris claro).
+    # Para que el texto nunca sea blanco sobre gris claro (invisible), forzamos texto oscuro de alto contraste en darwin.
+    if sys.platform == "darwin":
+        fg_actual = "#0F172A" if habilitado else t["btn_disabled_fg"]
+    else:
+        fg_actual = fg_normal if habilitado else t["btn_disabled_fg"]
     cursor_actual = "hand2" if habilitado else "arrow"
 
     btn_args = {
@@ -702,7 +715,7 @@ def crear_boton(parent, texto="", comando=None, tipo="primary", icono="",
         "bg": bg_actual,
         "fg": fg_actual,
         "activebackground": bg_active,
-        "activeforeground": fg_normal,
+        "activeforeground": "#0F172A" if sys.platform == "darwin" else fg_normal,
         "disabledforeground": t["btn_disabled_fg"],
         "relief": "flat",
         "bd": 0,
@@ -723,11 +736,11 @@ def crear_boton(parent, texto="", comando=None, tipo="primary", icono="",
 
     # Eventos de Hover solo para botones activos
     def on_enter(e):
-        if btn["state"] == "normal":
+        if btn["state"] == "normal" and sys.platform != "darwin":
             btn.configure(bg=bg_hover)
 
     def on_leave(e):
-        if btn["state"] == "normal":
+        if btn["state"] == "normal" and sys.platform != "darwin":
             btn.configure(bg=bg_normal)
 
     btn.bind("<Enter>", on_enter)
@@ -736,12 +749,12 @@ def crear_boton(parent, texto="", comando=None, tipo="primary", icono="",
     # Método dinámico para habilitar/deshabilitar conservando el contraste
     def set_habilitado(es_hab):
         if es_hab:
-            btn.configure(state="normal", bg=bg_normal, fg=fg_normal, cursor="hand2")
+            btn_fg = "#0F172A" if sys.platform == "darwin" else fg_normal
+            btn.configure(state="normal", bg=bg_normal, fg=btn_fg, cursor="hand2")
         else:
             btn.configure(state="disabled", bg=t["btn_disabled_bg"], fg=t["btn_disabled_fg"], cursor="arrow")
 
     btn.set_habilitado = set_habilitado
-
     return btn
 
 
