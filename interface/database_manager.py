@@ -601,6 +601,15 @@ def inicializar_base_datos(db_path=None):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_liq_prov_id ON liquidaciones_proveedores(proveedor_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_liq_prov_fecha ON liquidaciones_proveedores(fecha)")
 
+        # Índices de aceleración de consultas frecuentes (Ventas, Detalles, Productos y Clientes)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_fecha_estado ON ventas(fecha_venta, estado)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_fecha ON ventas(fecha_venta)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_detalle_id_venta ON detalle_ventas(id_venta)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_detalle_codigo ON detalle_ventas(codigo_producto)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_productos_codigo ON productos(codigo)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_clientes_cedula ON clientes(cedula)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pagos_venta_id ON pagos_venta(id_venta)")
+
         conn.commit()
         print("✅ Base de datos ventas.db inicializada correctamente.")
         return True

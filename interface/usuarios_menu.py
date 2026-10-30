@@ -368,12 +368,15 @@ def probar_login():
     except Exception as e:
         messagebox.showerror("Error", f"Error al probar login: {e}", parent=ventana_usuarios)
 
-def iniciar_usuarios(parent_pid=""):
+def iniciar_usuarios(parent_pid="", parent=None):
     """Inicializa la ventana de gestión de usuarios"""
     global tabla, entradas, ventana_usuarios, rol_var, estado_var, tipo_nomina_var, salario_diario_var
 
     try:
-        ventana_usuarios = tk.Tk()
+        if parent:
+            ventana_usuarios = tk.Toplevel(parent)
+        else:
+            ventana_usuarios = tk.Tk()
         parent_pid = parent_pid or os.environ.get("VMPOS_PARENT_PID", "")
         session_mgr.iniciar_vigilante_padre(ventana_usuarios, parent_pid=parent_pid)
         iniciar_observador_tema(ventana_usuarios)
@@ -531,7 +534,9 @@ def iniciar_usuarios(parent_pid=""):
         tk.Label(footer, text=f"{_bm_u.obtener_texto_ubicacion_contacto()}  |  {_bm_u.nombre}", font=("Segoe UI", 9), bg=t["btn_primary_bg"], fg=fg_h).pack(pady=6)
 
         actualizar_tabla()
-        ventana_usuarios.mainloop()
+        if not parent:
+            ventana_usuarios.mainloop()
+        return ventana_usuarios
     except Exception as e:
         import traceback
         err_trace = traceback.format_exc()

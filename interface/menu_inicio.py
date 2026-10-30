@@ -838,17 +838,18 @@ class VmPOSDashboard(tk.Tk):
         except Exception as e:
             print("Aviso verificando asistencia:", e)
 
-    def _actualizar_estadisticas(self):
-        """Actualiza todas las estadísticas del dashboard en tiempo real."""
+    def _aplicar_datos_dashboard(self, datos):
+        """Aplica los datos calculados a los widgets de la interfaz en el hilo principal."""
+        if not datos or not isinstance(datos, dict):
+            return
         try:
-            datos = self._obtener_datos_dashboard()
             widgets_updates = {
-                'ventas_hoy': self._formato_peso(datos["ventas_hoy"]),
-                'ganancias': self._formato_peso(datos["ganancias"]),
-                'pedidos': str(datos["pedidos"]),
-                'producto_top': str(datos["producto_top"]),
-                'clientes': str(datos["clientes"]),
-                'productos': str(datos["productos"])
+                'ventas_hoy': self._formato_peso(datos.get("ventas_hoy", 0.0)),
+                'ganancias': self._formato_peso(datos.get("ganancias", 0.0)),
+                'pedidos': str(datos.get("pedidos", 0)),
+                'producto_top': str(datos.get("producto_top", "Sin ventas")),
+                'clientes': str(datos.get("clientes", 0)),
+                'productos': str(datos.get("productos", 0))
             }
 
             sub_updates = {
@@ -863,21 +864,32 @@ class VmPOSDashboard(tk.Tk):
                 try:
                     if key in self.stats_widgets and self.stats_widgets[key] and self.stats_widgets[key].winfo_exists():
                         self.stats_widgets[key].config(text=value)
-                except tk.TclError:
+                except (tk.TclError, Exception):
                     pass
-                except Exception as e:
-                    print(f"Error actualizando widget {key}: {e}")
 
             for key, sub_val in sub_updates.items():
                 try:
                     if hasattr(self, 'stats_sub_widgets') and key in self.stats_sub_widgets and self.stats_sub_widgets[key] and self.stats_sub_widgets[key].winfo_exists():
                         self.stats_sub_widgets[key].config(text=sub_val)
-                except tk.TclError:
-                    pass
-                except Exception:
+                except (tk.TclError, Exception):
                     pass
         except Exception as e:
-            print(f"Error general al actualizar estadísticas: {e}")
+            print(f"Error aplicando datos al dashboard: {e}")
+
+    def _actualizar_estadisticas(self):
+        """Actualiza todas las estadísticas del dashboard en segundo plano sin congelar la interfaz."""
+        def _worker():
+            try:
+                datos = self._obtener_datos_dashboard()
+                try:
+                    if self.winfo_exists():
+                        self.after(0, lambda: self._aplicar_datos_dashboard(datos))
+                except (tk.TclError, Exception):
+                    pass
+            except Exception as e:
+                print(f"Error obteniendo estadísticas en segundo plano: {e}")
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _formato_peso(self, valor):
         """Formatea un valor numérico al formato peso colombiano."""
@@ -1764,26 +1776,57 @@ class VmPOSDashboard(tk.Tk):
             return None
 
     def _abrir_ventas(self):
-        """Abre el módulo de ventas."""
-        extra = []
-        uid = self.datos_usuario.get("id", "")
-        if uid:
-            extra.extend(["--user_id", str(uid)])
-        if self.rol_usuario:
-            extra.extend(["--rol", self.rol_usuario])
-        self._lanzar_modulo_subproceso("ventas_menu.py", "Nueva Venta", extra)
+        """Abre el módulo de ventas in-process para preservar sesión y evitar relanzar login."""
+        try:
+            from interface.ventas_menu import iniciar_ventas
+            uid = str(self.datos_usuario.get("id", ""))
+            app = iniciar_ventas(parent=self, user_id=uid, rol=self.rol_usuario)
+            if app and hasattr(app, "ventana"):
+                session_mgr.registrar_ventana(app.ventana)
+                return app.ventana
+        except Exception as e:
+            print("Aviso al abrir ventas in-process, intentando fallback:", e)
+            extra = []
+            uid = self.datos_usuario.get("id", "")
+            if uid: extra.extend(["--user_id", str(uid)])
+            if self.rol_usuario: extra.extend(["--rol", self.rol_usuario])
+            self._lanzar_modulo_subproceso("ventas_menu.py", "Nueva Venta", extra)
 
     def _abrir_inventario(self):
-        """Abre el módulo de inventario."""
-        self._lanzar_modulo_subproceso("inventario_menu.py", "Gestionar Inventario")
+        """Abre el módulo de inventario in-process."""
+        try:
+            from interface.inventario_menu import iniciar_inventario
+            w = iniciar_inventario(usuario_actual=self.usuario, parent=self)
+            if w:
+                session_mgr.registrar_ventana(w)
+                return w
+        except Exception as e:
+            print("Aviso al abrir inventario in-process:", e)
+            self._lanzar_modulo_subproceso("inventario_menu.py", "Gestionar Inventario")
 
     def _abrir_usuarios(self):
-        """Abre el módulo de gestión de usuarios."""
-        self._lanzar_modulo_subproceso("usuarios_menu.py", "Usuarios")
+        """Abre el módulo de gestión de usuarios in-process."""
+        try:
+            from interface.usuarios_menu import iniciar_usuarios
+            w = iniciar_usuarios(parent=self)
+            if w:
+                session_mgr.registrar_ventana(w)
+                return w
+        except Exception as e:
+            print("Aviso al abrir usuarios in-process:", e)
+            self._lanzar_modulo_subproceso("usuarios_menu.py", "Usuarios")
 
     def _abrir_clientes(self):
-        """Abre el módulo de clientes."""
-        self._lanzar_modulo_subproceso("clientes_menu.py", "Clientes")
+        """Abre el módulo de clientes in-process."""
+        try:
+            from interface.clientes_menu import iniciar_clientes
+            w = iniciar_clientes(parent=self)
+            if w:
+                session_mgr.registrar_ventana(w)
+                return w
+        except Exception as e:
+            print("Aviso al abrir clientes in-process:", e)
+            self._lanzar_modulo_subproceso("clientes_menu.py", "Clientes")
 
     def _abrir_generador_codigo_barras(self):
         """Abre el generador de códigos de barras."""
@@ -1800,8 +1843,16 @@ class VmPOSDashboard(tk.Tk):
             messagebox.showerror("❌ Error", f"No se pudo abrir el generador de códigos de barras:\n{e}")
 
     def _abrir_control_gastos(self):
-        """Abre el módulo de control de gastos."""
-        self._lanzar_modulo_subproceso("gastos_menu.py", "Control de Gastos")
+        """Abre el módulo de control de gastos in-process."""
+        try:
+            from interface.gastos_menu import iniciar_gastos
+            w = iniciar_gastos(parent=self)
+            if w:
+                session_mgr.registrar_ventana(w)
+                return w
+        except Exception as e:
+            print("Aviso al abrir gastos in-process:", e)
+            self._lanzar_modulo_subproceso("gastos_menu.py", "Control de Gastos")
 
     def _mostrar_ventana_gastos_temporal(self):
         """Muestra una ventana temporal para el control de gastos."""
@@ -2014,20 +2065,32 @@ class VmPOSDashboard(tk.Tk):
             messagebox.showerror("❌ Error", f"Error al abrir {nombre}:\n{str(e)}")
 
     def _abrir_contabilidad(self):
-        """Abre el módulo central de Contabilidad e Inteligencia Financiera."""
-        self._lanzar_modulo_subproceso("contabilidad_menu.py", "Contabilidad")
+        """Abre el módulo central de Contabilidad e Inteligencia Financiera in-process."""
+        try:
+            from interface.contabilidad_menu import iniciar_contabilidad
+            app = iniciar_contabilidad(parent=self)
+            if app and hasattr(app, "root"):
+                session_mgr.registrar_ventana(app.root)
+        except Exception as e:
+            print("Aviso al abrir contabilidad in-process:", e)
+            self._lanzar_modulo_subproceso("contabilidad_menu.py", "Contabilidad")
 
     def _abrir_caja(self):
-        """Abre el módulo de Control de Caja y Arqueo Físico."""
-        extra = []
-        if self.usuario:
-            extra.extend(["--usuario", str(self.usuario)])
-        if self.rol_usuario:
-            extra.extend(["--rol", str(self.rol_usuario)])
-        id_usuario = self.datos_usuario.get("id", "")
-        if id_usuario:
-            extra.extend(["--user_id", str(id_usuario)])
-        self._lanzar_modulo_subproceso("caja_menu.py", "Control de Caja", extra)
+        """Abre el módulo de Control de Caja y Arqueo Físico in-process."""
+        try:
+            from interface.caja_menu import iniciar_control_caja
+            w = iniciar_control_caja(usuario_actual=self.usuario, rol_actual=self.rol_usuario, parent=self)
+            if w:
+                session_mgr.registrar_ventana(w)
+                return w
+        except Exception as e:
+            print("Aviso al abrir caja in-process:", e)
+            extra = []
+            if self.usuario: extra.extend(["--usuario", str(self.usuario)])
+            if self.rol_usuario: extra.extend(["--rol", str(self.rol_usuario)])
+            id_usuario = self.datos_usuario.get("id", "")
+            if id_usuario: extra.extend(["--user_id", str(id_usuario)])
+            self._lanzar_modulo_subproceso("caja_menu.py", "Control de Caja", extra)
 
     def _abrir_gestion_ventas(self):
         """Abre la supervisión y control de ventas con anulación y auditoría."""
@@ -2042,20 +2105,39 @@ class VmPOSDashboard(tk.Tk):
             messagebox.showerror("❌ Error", f"No se pudo abrir la gestión de ventas:\n{e}")
 
     def _abrir_nomina(self):
-        """Abre el módulo de nómina y liquidación usando subprocess supervisado."""
-        self._lanzar_modulo_subproceso("nomina_menu.py", "Nómina y Proveedores")
+        """Abre el módulo de nómina y liquidación in-process."""
+        try:
+            from interface.nomina_menu import iniciar_nomina
+            w = iniciar_nomina(parent=self)
+            if w:
+                session_mgr.registrar_ventana(w)
+                return w
+        except Exception as e:
+            print("Aviso al abrir nómina in-process:", e)
+            self._lanzar_modulo_subproceso("nomina_menu.py", "Nómina y Proveedores")
 
     def _abrir_turnos(self):
-        """Abre el módulo de Control del Turno (Operarios / Administrador)."""
-        extra = []
-        id_usuario = self.datos_usuario.get("id", "")
-        if id_usuario:
-            extra.extend(["--user_id", str(id_usuario)])
-        if self.rol_usuario:
-            extra.extend(["--rol", self.rol_usuario])
-        if self.usuario:
-            extra.extend(["--nombre", str(self.usuario)])
-        self._lanzar_modulo_subproceso("turnos_menu.py", "Control del Turno", extra)
+        """Abre el módulo de Control del Turno in-process."""
+        try:
+            from interface.turnos_menu import iniciar_control_turnos
+            id_usuario = self.datos_usuario.get("id", None)
+            top, app = iniciar_control_turnos(
+                user_id=id_usuario,
+                rol=self.rol_usuario,
+                nombre_usuario=str(self.usuario),
+                ventana_padre=self
+            )
+            if top:
+                session_mgr.registrar_ventana(top)
+                return top
+        except Exception as e:
+            print("Aviso al abrir turnos in-process:", e)
+            extra = []
+            id_usuario = self.datos_usuario.get("id", "")
+            if id_usuario: extra.extend(["--user_id", str(id_usuario)])
+            if self.rol_usuario: extra.extend(["--rol", self.rol_usuario])
+            if self.usuario: extra.extend(["--nombre", str(self.usuario)])
+            self._lanzar_modulo_subproceso("turnos_menu.py", "Control del Turno", extra)
 
 # --- Punto de entrada desde el login ---
 def iniciar_dashboard(usuario, datos_usuario):

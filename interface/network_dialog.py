@@ -238,6 +238,7 @@ class NetworkDialog:
         # Muestra la IP local destacada
         ips = obtener_ips_locales()
         ip_destacada = ips[0] if ips else "127.0.0.1"
+        self.ip_destacada_var = tk.StringVar(master=self.dialog, value=ip_destacada)
 
         f_ip = tk.Frame(self.frame_servidor, bg=self.t["bg_card"])
         f_ip.pack(fill="x", pady=6)
@@ -253,14 +254,28 @@ class NetworkDialog:
         f_ip_box = tk.Frame(f_ip, bg="#E2E8F0", padx=8, pady=6, bd=1, relief="solid")
         f_ip_box.pack(fill="x", pady=4)
 
-        self.lbl_ip_valor = tk.Label(
-            f_ip_box,
-            text=ip_destacada,
-            font=("Segoe UI", 14, "bold"),
-            bg="#E2E8F0",
-            fg="#1E293B"
-        )
-        self.lbl_ip_valor.pack(side="left", padx=5)
+        if len(ips) > 1:
+            cb_ips = ttk.Combobox(
+                f_ip_box,
+                textvariable=self.ip_destacada_var,
+                values=ips,
+                state="readonly",
+                font=("Segoe UI", 12, "bold"),
+                width=18
+            )
+            cb_ips.pack(side="left", padx=5)
+            def _on_ip_change(e=None):
+                self.servidor_ip_var.set(self.ip_destacada_var.get())
+            cb_ips.bind("<<ComboboxSelected>>", _on_ip_change)
+        else:
+            self.lbl_ip_valor = tk.Label(
+                f_ip_box,
+                textvariable=self.ip_destacada_var,
+                font=("Segoe UI", 14, "bold"),
+                bg="#E2E8F0",
+                fg="#1E293B"
+            )
+            self.lbl_ip_valor.pack(side="left", padx=5)
 
         btn_copiar = tk.Button(
             f_ip_box,
@@ -268,7 +283,7 @@ class NetworkDialog:
             font=("Segoe UI", 9),
             bg="white",
             relief="groove",
-            command=lambda: self._copiar_al_portapapeles(ip_destacada)
+            command=lambda: self._copiar_al_portapapeles(self.ip_destacada_var.get())
         )
         btn_copiar.pack(side="right", padx=5)
 

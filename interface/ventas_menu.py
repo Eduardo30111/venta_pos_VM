@@ -2739,6 +2739,31 @@ class App:
         self.actualizar_indicadores_empleado_pos()
         self.entry_doc.focus()
 
+def iniciar_ventas(parent=None, user_id="", rol="", parent_pid=""):
+    """
+    Punto de entrada in-process para el módulo de ventas de VmPOS.
+    Permite abrir la ventana como Toplevel (sin relanzar login ni abrir subprocesos pesados)
+    o como Tk independiente.
+    """
+    if parent:
+        ventana = tk.Toplevel(parent)
+    else:
+        ventana = tk.Tk()
+
+    app = App(ventana, user_id=user_id, rol=rol, parent_pid=parent_pid)
+
+    def _al_cerrar():
+        try:
+            ventana.destroy()
+        except Exception:
+            pass
+
+    ventana.protocol("WM_DELETE_WINDOW", _al_cerrar)
+
+    if not parent:
+        ventana.mainloop()
+    return app
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description="Módulo de Ventas VmPOS")
@@ -2750,6 +2775,4 @@ if __name__ == '__main__':
         sys.exit(0)
     args, _ = parser.parse_known_args()
 
-    root = tk.Tk()
-    app = App(root, user_id=args.user_id, rol=args.rol, parent_pid=args.parent_pid)
-    root.mainloop()
+    iniciar_ventas(user_id=args.user_id, rol=args.rol, parent_pid=args.parent_pid)

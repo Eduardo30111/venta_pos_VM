@@ -1472,15 +1472,20 @@ class ContabilidadApp:
             messagebox.showerror("Error", "No se pudo generar el informe.")
 
 
-def iniciar_contabilidad(parent_pid=""):
+def iniciar_contabilidad(parent_pid="", parent=None):
     try:
         procesar_gastos_recurrentes()
     except Exception:
         pass
-    root = tk.Tk()
+    if parent:
+        root = tk.Toplevel(parent)
+    else:
+        root = tk.Tk()
     parent_pid = parent_pid or os.environ.get("VMPOS_PARENT_PID", "")
     app = ContabilidadApp(root, parent_pid=parent_pid)
-    root.mainloop()
+    if not parent:
+        root.mainloop()
+    return app
 
 
 if __name__ == "__main__":

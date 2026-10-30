@@ -27,37 +27,94 @@ NETWORK_CONFIG_USER = os.path.join(CONFIG_DIR_USER, "network_config.json")
 _PROCESO_SERVIDOR_LOCAL = None
 
 
+def _es_ip_valida_lan(ip: str) -> bool:
+    """Valida si una IP es una dirección LAN física útil para conectar cajas."""
+    if not ip or not isinstance(ip, str):
+        return False
+    ip = ip.strip()
+    if ip in ("127.0.0.1", "0.0.0.0", "255.255.255.255"):
+        return False
+    if ip.startswith("127.") or ip.startswith("169.254."):
+        return False
+    # Descartar rangos típicos de adaptadores virtuales Host-Only de VirtualBox
+    if ip.startswith("192.168.56."):
+        return False
+    return True
+
+
+def _prioridad_ip(ip: str) -> int:
+    """Asigna menor número a las IPs más probablemente conectadas a la red física principal."""
+    if ip.startswith("192.168.") and not ip.startswith("192.168.56."):
+        return 1  # Subred LAN comercial/hogar más común
+    if ip.startswith("10."):
+        return 2  # Subred corporativa Clase A
+    if ip.startswith("172."):
+        partes = ip.split(".")
+        if len(partes) == 4 and partes[1].isdigit():
+            seg = int(partes[1])
+            if 16 <= seg <= 31:
+                return 3  # Subred Clase B (o Hyper-V / Docker)
+    return 4
+
+
 def obtener_ips_locales() -> List[str]:
     """
     Detecta automáticamente las direcciones IP locales de la computadora
-    (WiFi o cable Ethernet), descartando 127.0.0.1 salvo como último recurso.
+    (WiFi o cable Ethernet), descartando adaptadores virtuales (WSL, Hyper-V, VirtualBox, APIPA),
+    y ordenando por prioridad de interfaz física activa conectada al router.
     """
-    ips = []
+    candidatos = []
 
-    # Método 1: Socket UDP hacia un destino externo sin enviar datos reales
-    # (El sistema operativo elige la interfaz de red activa de la ruta por defecto)
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(0.5)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        if ip and ip != "127.0.0.1" and not ip.startswith("127."):
-            ips.append(ip)
-        s.close()
-    except Exception:
-        pass
+    # Método 1: Socket UDP hacia un destino externo/gateway sin transmitir paquetes
+    # El kernel del SO resuelve la interfaz de ruta por defecto
+    for dest in [("8.8.8.8", 80), ("1.1.1.1", 80), ("192.168.1.1", 80), ("10.0.0.1", 80)]:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.3)
+            s.connect(dest)
+            ip = s.getsockname()[0]
+            s.close()
+            if _es_ip_valida_lan(ip) and ip not in candidatos:
+                candidatos.append(ip)
+                break
+        except Exception:
+            pass
 
-    # Método 2: socket.gethostbyname_ex del hostname local
+    # Método 2: En Windows, inspeccionar adaptadores con ipconfig para evitar adaptadores virtuales
+    if sys.platform == "win32":
+        try:
+            out = subprocess.check_output("ipconfig", stderr=subprocess.DEVNULL, text=True, shell=True)
+            bloque_virtual = False
+            for line in out.splitlines():
+                line_lower = line.lower()
+                # Detectar encabezado de adaptador
+                if ":" in line and not line.startswith(" "):
+                    # Descartar si el nombre del adaptador indica virtualización
+                    if any(v in line_lower for v in ("vEthernet", "virtual", "wsl", "vmware", "virtualbox", "host-only", "tap", "npcap", "bluetooth")):
+                        bloque_virtual = True
+                    else:
+                        bloque_virtual = False
+                elif ("ipv4" in line_lower or "dirección ipv4" in line_lower) and ":" in line:
+                    if not bloque_virtual:
+                        partes = line.split(":")
+                        if len(partes) > 1:
+                            c_ip = partes[1].replace("(Preferido)", "").strip()
+                            if _es_ip_valida_lan(c_ip) and c_ip not in candidatos:
+                                candidatos.append(c_ip)
+        except Exception:
+            pass
+
+    # Método 3: socket.gethostbyname_ex del hostname local
     try:
         hostname = socket.gethostname()
         for ip in socket.gethostbyname_ex(hostname)[2]:
-            if ip and ip != "127.0.0.1" and not ip.startswith("127.") and ip not in ips:
-                ips.append(ip)
+            if _es_ip_valida_lan(ip) and ip not in candidatos:
+                candidatos.append(ip)
     except Exception:
         pass
 
-    # Método 3: En macOS/Linux, fallback con ifconfig o ip addr
-    if not ips:
+    # Método 4: En macOS/Linux, fallback con ifconfig o ip addr
+    if not candidatos:
         try:
             cmd = ["ip", "-4", "addr", "show"] if sys.platform != "darwin" else ["ifconfig"]
             out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
@@ -68,15 +125,18 @@ def obtener_ips_locales() -> List[str]:
                     idx = parts.index("inet") + 1
                     if idx < len(parts):
                         c_ip = parts[idx].split("/")[0]
-                        if c_ip and c_ip != "127.0.0.1" and not c_ip.startswith("127.") and c_ip not in ips:
-                            ips.append(c_ip)
+                        if _es_ip_valida_lan(c_ip) and c_ip not in candidatos:
+                            candidatos.append(c_ip)
         except Exception:
             pass
 
-    if not ips:
-        ips.append("127.0.0.1")
+    # Ordenar candidatos según prioridad física LAN
+    candidatos.sort(key=_prioridad_ip)
 
-    return ips
+    if not candidatos:
+        candidatos.append("127.0.0.1")
+
+    return candidatos
 
 
 def verificar_puerto_abierto(host: str = "127.0.0.1", puerto: int = 8000, timeout: float = 1.0) -> bool:

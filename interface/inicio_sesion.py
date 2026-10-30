@@ -12,6 +12,40 @@ except Exception:
     pass
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# -----------------------------------------------------------------------------
+# Enrutador de submódulos para aplicaciones empaquetadas (PyInstaller / VmPOS.exe)
+# Si VmPOS es invocado con la ruta de un script como argumento, despachar
+# inmediatamente al submódulo correspondiente sin mostrar la ventana de login.
+# -----------------------------------------------------------------------------
+if len(sys.argv) > 1:
+    _arg1 = os.path.basename(sys.argv[1]).lower()
+    _mapeo_modulos = {
+        "ventas_menu.py": ("interface.ventas_menu", "iniciar_ventas"),
+        "inventario_menu.py": ("interface.inventario_menu", "iniciar_inventario"),
+        "caja_menu.py": ("interface.caja_menu", "iniciar_control_caja"),
+        "usuarios_menu.py": ("interface.usuarios_menu", "iniciar_usuarios"),
+        "clientes_menu.py": ("interface.clientes_menu", "iniciar_clientes"),
+        "gastos_menu.py": ("interface.gastos_menu", "iniciar_gastos"),
+        "contabilidad_menu.py": ("interface.contabilidad_menu", "iniciar_contabilidad"),
+        "nomina_menu.py": ("interface.nomina_menu", "iniciar_nomina"),
+        "turnos_menu.py": ("interface.turnos_menu", "iniciar_control_turnos"),
+        "generador_codigo_barras.py": ("interface.generador_codigo_barras", "iniciar_generador_codigo_barras"),
+        "ventas_admin_dialog.py": ("interface.ventas_admin_dialog", "abrir_gestion_ventas"),
+    }
+    if _arg1 in _mapeo_modulos:
+        _mod_str, _func_str = _mapeo_modulos[_arg1]
+        try:
+            import importlib
+            _mod = importlib.import_module(_mod_str)
+            if hasattr(_mod, _func_str):
+                sys.argv.pop(1)
+                _fn = getattr(_mod, _func_str)
+                _fn()
+                sys.exit(0)
+        except Exception as _e_dispatch:
+            print(f"Error despachando submódulo {_arg1}: {_e_dispatch}")
+
 from client.api_client import api
 from interface.theme_manager import (
     theme_mgr, aplicar_tema, calcular_geometria_segura,
@@ -89,10 +123,28 @@ def validar_usuario(event=None):
     if not success:
         msg_str = str(message or "")
         if "conexión" in msg_str.lower() or "servidor" in msg_str.lower() or "503" in msg_str:
+            # Fallback transparente a base de datos SQLite local de usuarios
+            try:
+                try:
+                    from interface.usuarios_db import obtener_usuario_por_credenciales
+                except ImportError:
+                    from usuarios_db import obtener_usuario_por_credenciales
+                
+                u_local = obtener_usuario_por_credenciales(usuario, clave)
+                if u_local:
+                    nom_comp = f"{u_local.get('nombre', '')} {u_local.get('apellidos', '')}".strip()
+                    usuario_actual = nom_comp if nom_comp else str(u_local.get('usuario', 'Usuario')).capitalize()
+                    mostrar_alerta_bonita("¡Bienvenida! ✨", f"Hola {usuario_actual}!\n\nAcceso concedido como {u_local.get('rol', 'Usuario')}\n(Modo Local)", "success")
+                    ventana.after(1000, lambda: _iniciar_flujo_principal(u_local, usuario_actual))
+                    return
+            except Exception as e_local:
+                print(f"Advertencia: no se pudo verificar localmente: {e_local}")
+
             abrir = messagebox.askyesno(
-                "Error de Conexión al Servidor",
+                "Servidor No Disponible",
                 f"{msg_str}\n\n"
                 f"URL actual: {api.base_url}\n\n"
+                "No se pudo conectar al servidor ni se encontraron credenciales locales válidas.\n"
                 "¿Deseas abrir la Configuración de Red para verificar la IP y Puerto del Servidor?"
             )
             if abrir:

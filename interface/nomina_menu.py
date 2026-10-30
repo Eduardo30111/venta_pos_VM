@@ -77,11 +77,14 @@ def _fmt_cop(valor):
         return "$0 COP"
 
 
-def iniciar_nomina(parent_pid=""):
+def iniciar_nomina(parent_pid="", parent=None):
     inicializar_tablas_nomina()
     inicializar_tablas_proveedores()
 
-    ventana = tk.Tk()
+    if parent:
+        ventana = tk.Toplevel(parent)
+    else:
+        ventana = tk.Tk()
     parent_pid = parent_pid or os.environ.get("VMPOS_PARENT_PID", "")
     session_mgr.iniciar_vigilante_padre(ventana, parent_pid=parent_pid)
     iniciar_observador_tema(ventana)
@@ -1783,7 +1786,9 @@ def iniciar_nomina(parent_pid=""):
     actualizar_combo_meses_prov()
     auto_refresco_nomina()
 
-    ventana.mainloop()
+    if not parent:
+        ventana.mainloop()
+    return ventana
 
 
 if __name__ == "__main__":

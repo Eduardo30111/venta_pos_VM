@@ -305,14 +305,17 @@ def toggle_activo_recurrente_db(id_rec, estado_actual):
 # INTERFAZ GRÁFICA PROFESIONAL
 # ==============================================================================
 
-def iniciar_gastos(parent_pid=""):
+def iniciar_gastos(parent_pid="", parent=None):
     # Procesar recurrentes pendientes al abrir
     try:
         nuevos_rec = procesar_gastos_recurrentes()
     except Exception:
         nuevos_rec = 0
 
-    ventana = tk.Tk()
+    if parent:
+        ventana = tk.Toplevel(parent)
+    else:
+        ventana = tk.Tk()
     parent_pid = parent_pid or os.environ.get("VMPOS_PARENT_PID", "")
     session_mgr.iniciar_vigilante_padre(ventana, parent_pid=parent_pid)
     iniciar_observador_tema(ventana)
@@ -939,7 +942,9 @@ def iniciar_gastos(parent_pid=""):
     footer.pack(fill="x")
     tk.Label(footer, text="💎 Control de Gastos • Contabilidad VmPOS 💎", font=("Segoe UI", 9), bg=t["primary"], fg=fg_h).pack(pady=4)
 
-    ventana.mainloop()
+    if not parent:
+        ventana.mainloop()
+    return ventana
 
 
 if __name__ == "__main__":

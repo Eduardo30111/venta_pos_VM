@@ -48,9 +48,12 @@ except ImportError:
     from interface.database_manager import conectar_db
 
 
-def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrador", parent_pid=""):
+def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrador", parent_pid="", parent=None):
     """Inicia la interfaz gráfica de Control de Caja y Arqueo Físico."""
-    ventana = tk.Tk()
+    if parent:
+        ventana = tk.Toplevel(parent)
+    else:
+        ventana = tk.Tk()
     try:
         from session_manager import session_mgr
     except ImportError:
@@ -768,7 +771,9 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         tk.Label(bot_f, text=f"Total de turnos cerrados consultados: {len(cierres)}", font=("Segoe UI", 9), bg=t_h["bg_surface"], fg=t_h["text_muted"]).pack(side="left")
 
     refrescar_vista()
-    ventana.mainloop()
+    if not parent:
+        ventana.mainloop()
+    return ventana
 
 
 if __name__ == "__main__":

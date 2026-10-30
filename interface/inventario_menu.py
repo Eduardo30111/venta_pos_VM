@@ -170,8 +170,11 @@ def modal_crear_proveedor_rapido(parent_win, combo_widget=None, var_widget=None)
 # APLICACIÓN PRINCIPAL DE INVENTARIO
 # ==============================================================================
 
-def iniciar_inventario(usuario_actual="Administrador", parent_pid=""):
-    ventana = tk.Tk()
+def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=None):
+    if parent:
+        ventana = tk.Toplevel(parent)
+    else:
+        ventana = tk.Tk()
     parent_pid = parent_pid or os.environ.get("VMPOS_PARENT_PID", "")
     session_mgr.iniciar_vigilante_padre(ventana, parent_pid=parent_pid)
     iniciar_observador_tema(ventana)
@@ -1555,7 +1558,9 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid=""):
     tk.Label(footer, text=business_mgr.obtener_texto_ubicacion_contacto(), font=("Segoe UI", 9), bg=t["bg_footer"], fg=t["text_header"]).pack(side="left")
     tk.Label(footer, text=f"✨ {business_mgr.nombre} • Inventario Centralizado Conectado a Caja y Ventas", font=("Segoe UI", 9), bg=t["bg_footer"], fg=t["text_header_sub"]).pack(side="right")
 
-    ventana.mainloop()
+    if not parent:
+        ventana.mainloop()
+    return ventana
 
 if __name__ == "__main__":
     import argparse

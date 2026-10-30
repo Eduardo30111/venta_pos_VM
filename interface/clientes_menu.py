@@ -37,8 +37,11 @@ try:
 except ImportError:
     from interface.caja_manager import registrar_movimiento_caja, registrar_abono_cartera
 
-def iniciar_clientes(parent_pid=""):
-    ventana = tk.Tk()
+def iniciar_clientes(parent_pid="", parent=None):
+    if parent:
+        ventana = tk.Toplevel(parent)
+    else:
+        ventana = tk.Tk()
     parent_pid = parent_pid or os.environ.get("VMPOS_PARENT_PID", "")
     session_mgr.iniciar_vigilante_padre(ventana, parent_pid=parent_pid)
     iniciar_observador_tema(ventana)
@@ -1230,7 +1233,9 @@ def iniciar_clientes(parent_pid=""):
     # Carga inicial (inicia siempre en HOY por defecto)
     cargar_datos_servidor()
 
-    ventana.mainloop()
+    if not parent:
+        ventana.mainloop()
+    return ventana
 
 if __name__ == "__main__":
     import argparse
