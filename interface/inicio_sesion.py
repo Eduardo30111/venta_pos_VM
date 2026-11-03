@@ -404,23 +404,7 @@ ventana.bind("<Return>", validar_usuario)
 ventana.bind("<Escape>", limpiar_campos)
 entry_user.focus()
 
-def forzar_repintado_mac():
-    try:
-        ventana.update_idletasks()
-        ventana.update()
-        w = ventana.winfo_width()
-        h = ventana.winfo_height()
-        if w > 10 and h > 10:
-            ventana.geometry(f"{w+1}x{h}")
-            ventana.update_idletasks()
-            ventana.geometry(f"{w}x{h}")
-        ventana.lift()
-        ventana.focus_force()
-    except Exception:
-        pass
-
 if __name__ == "__main__":
-    if sys.platform == "darwin":
-        ventana.after(50, forzar_repintado_mac)
-        ventana.after(200, forzar_repintado_mac)
+    ventana.lift()
+    ventana.focus_force()
     ventana.mainloop()

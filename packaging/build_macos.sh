@@ -13,7 +13,9 @@ echo "🚀 INICIANDO EMPAQUETADO DE VmPOS PARA macOS"
 echo "=================================================================="
 
 # 1. Asegurar entorno virtual y dependencias compatibles con macOS (Tk >= 9.0)
-if [ -x "$HOME/miniconda3/bin/python3" ]; then
+if [ -x "/Users/eduardosanchez/miniconda3/bin/python3" ]; then
+    PYTHON_BIN="/Users/eduardosanchez/miniconda3/bin/python3"
+elif [ -x "$HOME/miniconda3/bin/python3" ]; then
     PYTHON_BIN="$HOME/miniconda3/bin/python3"
 elif [ -x "/opt/homebrew/bin/python3" ]; then
     PYTHON_BIN="/opt/homebrew/bin/python3"
@@ -33,7 +35,7 @@ export MPLCONFIGDIR="$PROJECT_ROOT/build/matplotlib_cache"
 mkdir -p "$PYINSTALLER_CONFIG_DIR" "$MPLCONFIGDIR"
 
 echo "Verificando dependencias de compilación..."
-$PYTHON_BIN -m pip install --quiet pyinstaller pillow reportlab matplotlib pandas openpyxl httpx pydantic pydantic_settings python-barcode
+$PYTHON_BIN -m pip install --quiet pyinstaller pillow reportlab matplotlib pandas openpyxl httpx pydantic pydantic_settings python-barcode babel
 
 # 2. Generar archivo .icns si no existe
 ICNS_PATH="$PROJECT_ROOT/assets/Salome.icns"
@@ -111,6 +113,8 @@ $PYTHON_BIN -m PyInstaller \
     --hidden-import="barcode.codex" \
     --hidden-import="barcode.ean" \
     --hidden-import="barcode.writer" \
+    --hidden-import="babel" \
+    --hidden-import="babel.numbers" \
     interface/inicio_sesion.py
 
 # Ajustar Info.plist para alta resolución Retina y forzar apariencia Aqua (evita texto blanco invisible en Dark Mode)
