@@ -90,7 +90,9 @@ hidden_imports = [
     "barcode",
     "barcode.codex",
     "barcode.ean",
-    "barcode.writer"
+    "barcode.writer",
+    "babel",
+    "babel.numbers"
 ]
 
 if sys.platform.startswith("win"):
@@ -101,6 +103,7 @@ pyinstaller_args = [
     "--windowed",
     "--noconfirm",
     "--clean",
+    "--collect-all=escpos",
 ]
 
 icon_path = os.path.join(PROJECT_ROOT, "assets", "Salome.ico")
