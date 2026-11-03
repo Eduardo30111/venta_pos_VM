@@ -533,7 +533,7 @@ class PrinterManager:
             raise e
 
 class App:
-    def __init__(self, ventana, user_id="", rol="", parent_pid=""):
+    def __init__(self, ventana, user_id="", rol="", parent_pid="", usuario_nombre=""):
         self.ventana = ventana
         self.parent_pid = parent_pid or os.environ.get("VMPOS_PARENT_PID")
         try:
@@ -550,23 +550,27 @@ class App:
         business_mgr.recargar()
         self.user_id = user_id
         self.rol = rol
-        self.user_nombre = ""
+        self.user_nombre = usuario_nombre or ""
         
         # Obtener información del usuario desde la API si no vino completa
-        try:
-            me = api.get("/auth/me")
-            if me.status_code == 200:
-                me_data = me.json()
-                self.user_id = self.user_id or str(me_data.get("id", ""))
-                self.rol = self.rol or me_data.get("rol", "")
-                self.user_nombre = f"{me_data.get('nombre', '')} {me_data.get('apellidos', '')}".strip() or me_data.get("usuario", "")
-        except Exception as e:
-            print("DEBUG: Error obteniendo perfil:", e)
+        if not self.user_nombre or not self.rol:
+            try:
+                me = api.get("/auth/me")
+                if me.status_code == 200:
+                    me_data = me.json()
+                    self.user_id = self.user_id or str(me_data.get("id", ""))
+                    self.rol = self.rol or me_data.get("rol", "")
+                    self.user_nombre = self.user_nombre or f"{me_data.get('nombre', '')} {me_data.get('apellidos', '')}".strip() or me_data.get("usuario", "")
+            except Exception as e:
+                print("DEBUG: Error obteniendo perfil:", e)
 
         # Fallback local a usuarios.db si estamos offline o falta información
         if not self.user_nombre or not self.rol:
             try:
-                from usuarios_db import conectar_usuarios_db
+                try:
+                    from interface.usuarios_db import conectar_usuarios_db
+                except ImportError:
+                    from usuarios_db import conectar_usuarios_db
                 conn_u = conectar_usuarios_db()
                 if conn_u:
                     cur_u = conn_u.cursor()
@@ -1685,33 +1689,35 @@ class App:
             self._abrir_caja_menu_completo()
 
     def _abrir_caja_menu_completo(self):
-        """Abre el módulo independiente caja_menu.py pasando usuario y rol."""
+        """Abre el módulo caja_menu in-process pasando usuario y rol."""
         try:
-            caja_path = os.path.join(os.path.dirname(__file__), "caja_menu.py")
-            if os.path.exists(caja_path):
-                args = [sys.executable, caja_path]
-                if self.user_nombre:
-                    args.extend(["--usuario", str(self.user_nombre)])
-                if self.rol:
-                    args.extend(["--rol", str(self.rol)])
-                if self.user_id:
-                    args.extend(["--user_id", str(self.user_id)])
-                env = os.environ.copy()
-                if api.token:
-                    env["VMPOS_TOKEN"] = api.token
-                if self.user_nombre:
-                    env["VMPOS_USUARIO"] = str(self.user_nombre)
-                if self.rol:
-                    env["VMPOS_ROL"] = str(self.rol)
-                subprocess.Popen(args, env=env)
-            else:
+            try:
+                from interface.caja_menu import iniciar_control_caja
+            except ImportError:
+                from caja_menu import iniciar_control_caja
+            w = iniciar_control_caja(usuario_actual=self.user_nombre or "Vendedor", rol_actual=self.rol or "Vendedor", parent=self.ventana)
+            if w:
                 try:
-                    from caja_menu import iniciar_control_caja
-                    iniciar_control_caja(usuario_actual=self.user_nombre or "Vendedor", rol_actual=self.rol or "Vendedor")
-                except Exception:
-                    messagebox.showwarning("⚠️ Archivo no encontrado", f"No se encontró caja_menu.py en:\n{caja_path}", parent=self.ventana)
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo abrir el módulo de Control de Caja:\n{e}", parent=self.ventana)
+                    from interface.session_manager import session_mgr
+                except ImportError:
+                    from session_manager import session_mgr
+                session_mgr.registrar_ventana(w)
+                return
+        except Exception as e_inp:
+            print("Aviso abriendo caja in-process desde ventas:", e_inp)
+            if not getattr(sys, 'frozen', False):
+                try:
+                    caja_path = os.path.join(os.path.dirname(__file__), "caja_menu.py")
+                    if os.path.exists(caja_path):
+                        args = [sys.executable, caja_path]
+                        if self.user_nombre: args.extend(["--usuario", str(self.user_nombre)])
+                        if self.rol: args.extend(["--rol", str(self.rol)])
+                        if self.user_id: args.extend(["--user_id", str(self.user_id)])
+                        subprocess.Popen(args)
+                        return
+                except Exception as e_sub:
+                    print("Error abriendo subproceso caja:", e_sub)
+            messagebox.showerror("Error", f"No se pudo abrir el módulo de Control de Caja:\n{e_inp}", parent=self.ventana)
 
     # ====================================================================================
     #   FUNCIONES DE EMERGENCIA - NUEVAS
@@ -2746,7 +2752,7 @@ class App:
         self.actualizar_indicadores_empleado_pos()
         self.entry_doc.focus()
 
-def iniciar_ventas(parent=None, user_id="", rol="", parent_pid=""):
+def iniciar_ventas(parent=None, user_id="", rol="", parent_pid="", usuario_nombre=""):
     """
     Punto de entrada in-process para el módulo de ventas de VmPOS.
     Permite abrir la ventana como Toplevel (sin relanzar login ni abrir subprocesos pesados)
@@ -2757,7 +2763,7 @@ def iniciar_ventas(parent=None, user_id="", rol="", parent_pid=""):
     else:
         ventana = tk.Tk()
 
-    app = App(ventana, user_id=user_id, rol=rol, parent_pid=parent_pid)
+    app = App(ventana, user_id=user_id, rol=rol, parent_pid=parent_pid, usuario_nombre=usuario_nombre)
 
     def _al_cerrar():
         try:
@@ -2777,9 +2783,10 @@ if __name__ == '__main__':
     parser.add_argument("--user_id", default="")
     parser.add_argument("--rol", default="")
     parser.add_argument("--parent_pid", default="")
+    parser.add_argument("--usuario", default="")
     if "-h" in sys.argv or "--help" in sys.argv:
         parser.print_help()
         sys.exit(0)
     args, _ = parser.parse_known_args()
 
-    iniciar_ventas(user_id=args.user_id, rol=args.rol, parent_pid=args.parent_pid)
+    iniciar_ventas(user_id=args.user_id, rol=args.rol, parent_pid=args.parent_pid, usuario_nombre=args.usuario)

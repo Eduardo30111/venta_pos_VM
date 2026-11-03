@@ -63,29 +63,35 @@ except ImportError as e:
     MATPLOTLIB_DISPONIBLE = False
 
 # ⚠️ The path to the database
-# Configuración de rutas mejorada para PyInstaller
-if getattr(sys, 'frozen', False):
-    # Si está ejecutándose como ejecutable
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    # Si está ejecutándose como script de Python
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+try:
+    from config import USER_DATA_DIR, DATABASE_DIR, DB_VENTAS_PATH
+except ImportError:
+    from interface.config import USER_DATA_DIR, DATABASE_DIR, DB_VENTAS_PATH
 
-# Ruta de base de datos - siempre fuera del ejecutable para persistencia
-base_dir = BASE_DIR
-database_dir = os.path.join(base_dir, 'database')
-ruta_db = os.path.join(database_dir, 'ventas.db')
+base_dir = USER_DATA_DIR
+database_dir = DATABASE_DIR
+ruta_db = DB_VENTAS_PATH
 
-# Crear directorio si no existe
-if not os.path.exists(database_dir):
-    os.makedirs(database_dir, exist_ok=True)
-# ⚠️ The folder to save PDFs and Excel files
-pdf_dir = os.path.join(base_dir, '..', 'reports_pdf')
-excel_dir = os.path.join(base_dir, '..', 'reports_excel')
-if not os.path.exists(pdf_dir):
-    os.makedirs(pdf_dir)
-if not os.path.exists(excel_dir):
-    os.makedirs(excel_dir)
+# Crear directorio si no existe (protegido contra sistemas de archivos de solo lectura)
+try:
+    if not os.path.exists(database_dir):
+        os.makedirs(database_dir, exist_ok=True)
+except OSError:
+    pass
+
+# ⚠️ Carpeta para guardar PDFs y archivos Excel en directorio de usuario escribible
+pdf_dir = os.path.join(USER_DATA_DIR, 'reports_pdf')
+excel_dir = os.path.join(USER_DATA_DIR, 'reports_excel')
+try:
+    if not os.path.exists(pdf_dir):
+        os.makedirs(pdf_dir, exist_ok=True)
+except OSError:
+    pass
+try:
+    if not os.path.exists(excel_dir):
+        os.makedirs(excel_dir, exist_ok=True)
+except OSError:
+    pass
 
 # 🔌 Single database connection
 conn = None

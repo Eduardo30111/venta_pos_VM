@@ -108,7 +108,10 @@ def copy_database_to_app_dir():
     database_dir = os.path.join(app_dir, "database")
     
     # Crear directorio database si no existe
-    os.makedirs(database_dir, exist_ok=True)
+    try:
+        os.makedirs(database_dir, exist_ok=True)
+    except OSError:
+        return
     
     # Rutas de las bases de datos
     databases = [

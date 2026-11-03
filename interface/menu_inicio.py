@@ -22,6 +22,8 @@ import importlib.util
 import os
 import sys
 
+import threading
+
 # Agregar rutas base
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -50,15 +52,15 @@ try:
 except ImportError:
     from interface.session_manager import session_mgr
 
-# Configuración de rutas para PyInstaller
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Configuración de rutas centralizadas y seguras para macOS y Windows
+try:
+    from config import USER_DATA_DIR, DATABASE_DIR, DB_VENTAS_PATH
+except ImportError:
+    from interface.config import USER_DATA_DIR, DATABASE_DIR, DB_VENTAS_PATH
 
-base_dir = BASE_DIR
-database_dir = os.path.join(base_dir, 'database')
-ruta_db = os.path.join(database_dir, 'ventas.db')
+base_dir = USER_DATA_DIR
+database_dir = DATABASE_DIR
+ruta_db = DB_VENTAS_PATH
 
 # Intentar importar el generador de códigos de barras
 GENERADOR_DISPONIBLE = False
@@ -1784,6 +1786,11 @@ class VmPOSDashboard(tk.Tk):
     def _lanzar_modulo_subproceso(self, script_name, nombre_display, extra_args=None):
         """Lanza un módulo en subproceso supervisado por session_mgr con parent_pid."""
         try:
+            if getattr(sys, 'frozen', False):
+                print(f"Modo congelado: omitiendo subproceso directo con sys.executable para {nombre_display}")
+                messagebox.showwarning("Módulo no disponible", f"No se pudo abrir {nombre_display} de forma integrada.")
+                return None
+
             base_d = os.path.dirname(os.path.abspath(__file__))
             script_path = os.path.join(base_d, script_name)
             if not os.path.exists(script_path):
@@ -1815,81 +1822,123 @@ class VmPOSDashboard(tk.Tk):
     def _abrir_ventas(self):
         """Abre el módulo de ventas in-process para preservar sesión y evitar relanzar login."""
         try:
-            from interface.ventas_menu import iniciar_ventas
+            try:
+                from interface.ventas_menu import iniciar_ventas
+            except ImportError:
+                from ventas_menu import iniciar_ventas
             uid = str(self.datos_usuario.get("id", ""))
-            app = iniciar_ventas(parent=self, user_id=uid, rol=self.rol_usuario)
+            app = iniciar_ventas(parent=self, user_id=uid, rol=self.rol_usuario, usuario_nombre=str(self.usuario))
             if app and hasattr(app, "ventana"):
                 session_mgr.registrar_ventana(app.ventana)
                 return app.ventana
         except Exception as e:
-            print("Aviso al abrir ventas in-process, intentando fallback:", e)
-            extra = []
-            uid = self.datos_usuario.get("id", "")
-            if uid: extra.extend(["--user_id", str(uid)])
-            if self.rol_usuario: extra.extend(["--rol", self.rol_usuario])
-            self._lanzar_modulo_subproceso("ventas_menu.py", "Nueva Venta", extra)
+            import traceback
+            traceback.print_exc()
+            print("Error al abrir ventas in-process:", e)
+            if not getattr(sys, 'frozen', False):
+                extra = []
+                uid = self.datos_usuario.get("id", "")
+                if uid: extra.extend(["--user_id", str(uid)])
+                if self.rol_usuario: extra.extend(["--rol", self.rol_usuario])
+                self._lanzar_modulo_subproceso("ventas_menu.py", "Nueva Venta", extra)
+            else:
+                messagebox.showerror("❌ Error al abrir Ventas", f"No se pudo abrir el módulo de ventas:\n{e}")
 
     def _abrir_inventario(self):
         """Abre el módulo de inventario in-process."""
         try:
-            from interface.inventario_menu import iniciar_inventario
+            try:
+                from interface.inventario_menu import iniciar_inventario
+            except ImportError:
+                from inventario_menu import iniciar_inventario
             w = iniciar_inventario(usuario_actual=self.usuario, parent=self)
             if w:
                 session_mgr.registrar_ventana(w)
                 return w
         except Exception as e:
-            print("Aviso al abrir inventario in-process:", e)
-            self._lanzar_modulo_subproceso("inventario_menu.py", "Gestionar Inventario")
+            import traceback
+            traceback.print_exc()
+            print("Error al abrir inventario in-process:", e)
+            if not getattr(sys, 'frozen', False):
+                self._lanzar_modulo_subproceso("inventario_menu.py", "Gestionar Inventario")
+            else:
+                messagebox.showerror("❌ Error al abrir Inventario", f"No se pudo abrir inventario:\n{e}")
 
     def _abrir_usuarios(self):
         """Abre el módulo de gestión de usuarios in-process."""
         try:
-            from interface.usuarios_menu import iniciar_usuarios
+            try:
+                from interface.usuarios_menu import iniciar_usuarios
+            except ImportError:
+                from usuarios_menu import iniciar_usuarios
             w = iniciar_usuarios(parent=self)
             if w:
                 session_mgr.registrar_ventana(w)
                 return w
         except Exception as e:
-            print("Aviso al abrir usuarios in-process:", e)
-            self._lanzar_modulo_subproceso("usuarios_menu.py", "Usuarios")
+            import traceback
+            traceback.print_exc()
+            print("Error al abrir usuarios in-process:", e)
+            if not getattr(sys, 'frozen', False):
+                self._lanzar_modulo_subproceso("usuarios_menu.py", "Usuarios")
+            else:
+                messagebox.showerror("❌ Error al abrir Usuarios", f"No se pudo abrir usuarios:\n{e}")
 
     def _abrir_clientes(self):
         """Abre el módulo de clientes in-process."""
         try:
-            from interface.clientes_menu import iniciar_clientes
+            try:
+                from interface.clientes_menu import iniciar_clientes
+            except ImportError:
+                from clientes_menu import iniciar_clientes
             w = iniciar_clientes(parent=self)
             if w:
                 session_mgr.registrar_ventana(w)
                 return w
         except Exception as e:
-            print("Aviso al abrir clientes in-process:", e)
-            self._lanzar_modulo_subproceso("clientes_menu.py", "Clientes")
+            import traceback
+            traceback.print_exc()
+            print("Error al abrir clientes in-process:", e)
+            if not getattr(sys, 'frozen', False):
+                self._lanzar_modulo_subproceso("clientes_menu.py", "Clientes")
+            else:
+                messagebox.showerror("❌ Error al abrir Clientes", f"No se pudo abrir clientes:\n{e}")
 
     def _abrir_generador_codigo_barras(self):
-        """Abre el generador de códigos de barras."""
+        """Abre el generador de códigos de barras in-process."""
         try:
-            if GENERADOR_DISPONIBLE and iniciar_generador_barras:
+            gen = None
+            try:
+                from interface.generador_codigo_barras import iniciar_generador_barras
                 gen = iniciar_generador_barras(parent=self)
-                if gen and hasattr(gen, "ventana"):
-                    session_mgr.registrar_ventana(gen.ventana)
-                elif gen and isinstance(gen, (tk.Toplevel, tk.Tk)):
-                    session_mgr.registrar_ventana(gen)
-            else:
-                self._lanzar_modulo_subproceso("generador_codigo_barras.py", "Códigos de Barras")
+            except Exception:
+                if GENERADOR_DISPONIBLE and iniciar_generador_barras:
+                    gen = iniciar_generador_barras(parent=self)
+            if gen and hasattr(gen, "ventana"):
+                session_mgr.registrar_ventana(gen.ventana)
+            elif gen and isinstance(gen, (tk.Toplevel, tk.Tk)):
+                session_mgr.registrar_ventana(gen)
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             messagebox.showerror("❌ Error", f"No se pudo abrir el generador de códigos de barras:\n{e}")
 
     def _abrir_control_gastos(self):
         """Abre el módulo de control de gastos in-process."""
         try:
-            from interface.gastos_menu import iniciar_gastos
+            try:
+                from interface.gastos_menu import iniciar_gastos
+            except ImportError:
+                from gastos_menu import iniciar_gastos
             w = iniciar_gastos(parent=self)
             if w:
                 session_mgr.registrar_ventana(w)
                 return w
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print("Aviso al abrir gastos in-process:", e)
-            self._lanzar_modulo_subproceso("gastos_menu.py", "Control de Gastos")
+            self._mostrar_ventana_gastos_temporal()
 
     def _mostrar_ventana_gastos_temporal(self):
         """Muestra una ventana temporal para el control de gastos."""
@@ -1964,7 +2013,10 @@ class VmPOSDashboard(tk.Tk):
                 
                 # Crear directorio de base de datos si no existe
                 if not os.path.exists(os.path.dirname(ruta_db)):
-                    os.makedirs(os.path.dirname(ruta_db), exist_ok=True)
+                    try:
+                        os.makedirs(os.path.dirname(ruta_db), exist_ok=True)
+                    except OSError:
+                        pass
                 
                 # Conectar a la base de datos y crear tabla si no existe
                 conn = _conectar_db()
@@ -2104,30 +2156,46 @@ class VmPOSDashboard(tk.Tk):
     def _abrir_contabilidad(self):
         """Abre el módulo central de Contabilidad e Inteligencia Financiera in-process."""
         try:
-            from interface.contabilidad_menu import iniciar_contabilidad
+            try:
+                from interface.contabilidad_menu import iniciar_contabilidad
+            except ImportError:
+                from contabilidad_menu import iniciar_contabilidad
             app = iniciar_contabilidad(parent=self)
             if app and hasattr(app, "root"):
                 session_mgr.registrar_ventana(app.root)
         except Exception as e:
-            print("Aviso al abrir contabilidad in-process:", e)
-            self._lanzar_modulo_subproceso("contabilidad_menu.py", "Contabilidad")
+            import traceback
+            traceback.print_exc()
+            print("Error al abrir contabilidad in-process:", e)
+            if not getattr(sys, 'frozen', False):
+                self._lanzar_modulo_subproceso("contabilidad_menu.py", "Contabilidad")
+            else:
+                messagebox.showerror("❌ Error al abrir Contabilidad", f"No se pudo abrir contabilidad:\n{e}")
 
     def _abrir_caja(self):
         """Abre el módulo de Control de Caja y Arqueo Físico in-process."""
         try:
-            from interface.caja_menu import iniciar_control_caja
+            try:
+                from interface.caja_menu import iniciar_control_caja
+            except ImportError:
+                from caja_menu import iniciar_control_caja
             w = iniciar_control_caja(usuario_actual=self.usuario, rol_actual=self.rol_usuario, parent=self)
             if w:
                 session_mgr.registrar_ventana(w)
                 return w
         except Exception as e:
-            print("Aviso al abrir caja in-process:", e)
-            extra = []
-            if self.usuario: extra.extend(["--usuario", str(self.usuario)])
-            if self.rol_usuario: extra.extend(["--rol", str(self.rol_usuario)])
-            id_usuario = self.datos_usuario.get("id", "")
-            if id_usuario: extra.extend(["--user_id", str(id_usuario)])
-            self._lanzar_modulo_subproceso("caja_menu.py", "Control de Caja", extra)
+            import traceback
+            traceback.print_exc()
+            print("Error al abrir caja in-process:", e)
+            if not getattr(sys, 'frozen', False):
+                extra = []
+                if self.usuario: extra.extend(["--usuario", str(self.usuario)])
+                if self.rol_usuario: extra.extend(["--rol", str(self.rol_usuario)])
+                id_usuario = self.datos_usuario.get("id", "")
+                if id_usuario: extra.extend(["--user_id", str(id_usuario)])
+                self._lanzar_modulo_subproceso("caja_menu.py", "Control de Caja", extra)
+            else:
+                messagebox.showerror("❌ Error al abrir Caja", f"No se pudo abrir el control de caja:\n{e}")
 
     def _abrir_gestion_ventas(self):
         """Abre la supervisión y control de ventas con anulación y auditoría."""
@@ -2136,27 +2204,42 @@ class VmPOSDashboard(tk.Tk):
                 dlg = abrir_gestion_ventas(parent=self, usuario_actual=self.usuario)
                 if dlg:
                     session_mgr.registrar_ventana(dlg)
-            else:
+            elif not getattr(sys, 'frozen', False):
                 self._lanzar_modulo_subproceso("ventas_admin_dialog.py", "Gestión de Ventas")
+            else:
+                messagebox.showwarning("⚠️ Módulo no disponible", "La gestión de ventas no está disponible.")
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             messagebox.showerror("❌ Error", f"No se pudo abrir la gestión de ventas:\n{e}")
 
     def _abrir_nomina(self):
         """Abre el módulo de nómina y liquidación in-process."""
         try:
-            from interface.nomina_menu import iniciar_nomina
+            try:
+                from interface.nomina_menu import iniciar_nomina
+            except ImportError:
+                from nomina_menu import iniciar_nomina
             w = iniciar_nomina(parent=self)
             if w:
                 session_mgr.registrar_ventana(w)
                 return w
         except Exception as e:
-            print("Aviso al abrir nómina in-process:", e)
-            self._lanzar_modulo_subproceso("nomina_menu.py", "Nómina y Proveedores")
+            import traceback
+            traceback.print_exc()
+            print("Error al abrir nómina in-process:", e)
+            if not getattr(sys, 'frozen', False):
+                self._lanzar_modulo_subproceso("nomina_menu.py", "Nómina y Proveedores")
+            else:
+                messagebox.showerror("❌ Error al abrir Nómina", f"No se pudo abrir nómina:\n{e}")
 
     def _abrir_turnos(self):
         """Abre el módulo de Control del Turno in-process."""
         try:
-            from interface.turnos_menu import iniciar_control_turnos
+            try:
+                from interface.turnos_menu import iniciar_control_turnos
+            except ImportError:
+                from turnos_menu import iniciar_control_turnos
             id_usuario = self.datos_usuario.get("id", None)
             top, app = iniciar_control_turnos(
                 user_id=id_usuario,
@@ -2168,13 +2251,18 @@ class VmPOSDashboard(tk.Tk):
                 session_mgr.registrar_ventana(top)
                 return top
         except Exception as e:
-            print("Aviso al abrir turnos in-process:", e)
-            extra = []
-            id_usuario = self.datos_usuario.get("id", "")
-            if id_usuario: extra.extend(["--user_id", str(id_usuario)])
-            if self.rol_usuario: extra.extend(["--rol", self.rol_usuario])
-            if self.usuario: extra.extend(["--nombre", str(self.usuario)])
-            self._lanzar_modulo_subproceso("turnos_menu.py", "Control del Turno", extra)
+            import traceback
+            traceback.print_exc()
+            print("Error al abrir turnos in-process:", e)
+            if not getattr(sys, 'frozen', False):
+                extra = []
+                id_usuario = self.datos_usuario.get("id", "")
+                if id_usuario: extra.extend(["--user_id", str(id_usuario)])
+                if self.rol_usuario: extra.extend(["--rol", self.rol_usuario])
+                if self.usuario: extra.extend(["--nombre", str(self.usuario)])
+                self._lanzar_modulo_subproceso("turnos_menu.py", "Control del Turno", extra)
+            else:
+                messagebox.showerror("❌ Error al abrir Turnos", f"No se pudo abrir control de turnos:\n{e}")
 
 # --- Punto de entrada desde el login ---
 def iniciar_dashboard(usuario, datos_usuario):

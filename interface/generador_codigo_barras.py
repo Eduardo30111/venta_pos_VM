@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from __future__ import annotations
 """
 Generador y Diseñador Profesional de Códigos de Barras y Etiquetas - VmPOS
 Archivo: interface/generador_codigo_barras.py
@@ -18,6 +19,7 @@ import shutil
 import tempfile
 import subprocess
 from datetime import datetime
+from typing import Any
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
@@ -63,6 +65,10 @@ try:
     PIL_DISPONIBLE = True
 except ImportError:
     PIL_DISPONIBLE = False
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+    ImageTk = None
 
 # python-barcode
 try:
@@ -190,7 +196,7 @@ class BarcodeEngine:
         return True, "", cod
 
     @classmethod
-    def generar_imagen_barcode(cls, formato: str, codigo: str, ancho_px: int = 400, alto_px: int = 150) -> Image.Image:
+    def generar_imagen_barcode(cls, formato: str, codigo: str, ancho_px: int = 400, alto_px: int = 150):
         """
         Genera una imagen PIL en blanco y negro del código de barras real.
         Utiliza python-barcode o fallback nativo.
@@ -243,7 +249,7 @@ class BarcodeEngine:
         return cls._render_fallback_barcode(cod_norm, ancho_px, alto_px)
 
     @classmethod
-    def _render_fallback_barcode(cls, texto: str, ancho: int, alto: int) -> Image.Image:
+    def _render_fallback_barcode(cls, texto: str, ancho: int, alto: int) -> Any:
         """Generador nativo de barras monocromáticas en caso de ausencia de python-barcode."""
         img = Image.new("RGB", (ancho, alto), color="white")
         draw = ImageDraw.Draw(img)
@@ -426,7 +432,7 @@ class LabelDesignEngine:
         ancho_mm: float,
         alto_mm: float,
         dpi: int = 300
-    ) -> Image.Image:
+    ) -> Any:
         """
         Renderiza una etiqueta individual en alta resolución PIL.Image.
         """
@@ -621,7 +627,7 @@ class SheetAndThermalLayoutEngine:
         }
 
     @classmethod
-    def renderizar_hoja_preview(cls, producto: dict, cfg: dict, max_preview_px: int = 700) -> Image.Image:
+    def renderizar_hoja_preview(cls, producto: dict, cfg: dict, max_preview_px: int = 700) -> Any:
         """
         Genera una imagen fidedigna en baja/mediana resolución de la primera página completa.
         """

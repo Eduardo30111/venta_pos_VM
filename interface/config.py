@@ -9,6 +9,8 @@ Maneja las rutas absolutas para evitar el problema de bases de datos duplicadas.
 import os
 import sys
 
+import tempfile
+
 # Determinar directorios según si se ejecuta desde PyInstaller o como script de desarrollo
 if getattr(sys, 'frozen', False):
     _base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.executable)))
@@ -22,6 +24,8 @@ if getattr(sys, 'frozen', False):
     candidatos_dir = [
         os.path.expanduser("~/Library/Application Support/VmPOS") if sys.platform == "darwin" else os.path.join(os.environ.get("APPDATA", ""), "VmPOS"),
         os.path.expanduser("~/.vmpos"),
+        os.path.join(os.path.expanduser("~"), "VmPOS_Data"),
+        os.path.join(tempfile.gettempdir(), "VmPOS"),
     ]
     USER_DATA_DIR = None
     for cand in candidatos_dir:
@@ -38,7 +42,13 @@ if getattr(sys, 'frozen', False):
         except Exception:
             continue
     if not USER_DATA_DIR:
-        USER_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "data_usuario"))
+        try:
+            cand_fallback = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "data_usuario"))
+            os.makedirs(cand_fallback, exist_ok=True)
+            USER_DATA_DIR = cand_fallback
+        except Exception:
+            USER_DATA_DIR = os.path.join(tempfile.gettempdir(), "VmPOS_Fallback")
+            os.makedirs(USER_DATA_DIR, exist_ok=True)
 else:
     _current_dir = os.path.dirname(os.path.abspath(__file__))
     BUNDLE_DIR = os.path.abspath(os.path.join(_current_dir, '..'))

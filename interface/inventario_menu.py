@@ -350,6 +350,7 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     def abrir_modal_articulo(articulo_existente=None, on_creado_callback=None, ubicacion_destino=None):
         modal = tk.Toplevel(ventana)
         es_edicion = articulo_existente is not None
+        art = articulo_existente if (es_edicion and isinstance(articulo_existente, dict)) else {}
         if es_edicion:
             tit_win = "Editar Artículo"
             tit_head = "✏️ Editar Artículo"
@@ -387,14 +388,14 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         row_idx = 0
         # Tipo
         tk.Label(f_fields, text="Tipo de Artículo:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_main"]).grid(row=row_idx, column=0, sticky="w", pady=4)
-        var_tipo = tk.StringVar(value=articulo_existente["tipo_producto"] if es_edicion else "Fisico")
+        var_tipo = tk.StringVar(value=art.get("tipo_producto", "Fisico") if es_edicion else "Fisico")
         cb_tipo = ttk.Combobox(f_fields, textvariable=var_tipo, values=["Fisico", "Servicio"], state="disabled" if es_edicion else "readonly", width=30)
         cb_tipo.grid(row=row_idx, column=1, sticky="w", pady=4, padx=5)
 
         row_idx += 1
         # Código
         tk.Label(f_fields, text="Código SKU:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_main"]).grid(row=row_idx, column=0, sticky="w", pady=4)
-        cod_sug = articulo_existente["codigo"] if es_edicion else sugerir_proximo_codigo(var_tipo.get())
+        cod_sug = art.get("codigo", "") if es_edicion else sugerir_proximo_codigo(var_tipo.get())
         e_cod = tk.Entry(f_fields, font=("Segoe UI", 10), width=32, bg=t_mod["input_bg"], fg=t_mod["input_fg"], insertbackground=t_mod["input_insert"])
         e_cod.insert(0, cod_sug)
         if es_edicion:
@@ -405,8 +406,8 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         # Código de barras
         tk.Label(f_fields, text="Código de Barras (opcional):", font=("Segoe UI", 9), bg=t_mod["bg_surface"], fg=t_mod["text_main"]).grid(row=row_idx, column=0, sticky="w", pady=4)
         e_bar = tk.Entry(f_fields, font=("Segoe UI", 10), width=32, bg=t_mod["input_bg"], fg=t_mod["input_fg"], insertbackground=t_mod["input_insert"])
-        if es_edicion and articulo_existente.get("codigo_barras"):
-            e_bar.insert(0, str(articulo_existente.get("codigo_barras", "")))
+        if es_edicion and art.get("codigo_barras"):
+            e_bar.insert(0, str(art.get("codigo_barras", "")))
         e_bar.grid(row=row_idx, column=1, sticky="w", pady=4, padx=5)
 
         row_idx += 1
@@ -414,33 +415,33 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         tk.Label(f_fields, text="Nombre del Artículo:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_main"]).grid(row=row_idx, column=0, sticky="w", pady=4)
         e_nom = tk.Entry(f_fields, font=("Segoe UI", 10), width=32, bg=t_mod["input_bg"], fg=t_mod["input_fg"], insertbackground=t_mod["input_insert"])
         if es_edicion:
-            e_nom.insert(0, str(articulo_existente.get("nombre", "")))
+            e_nom.insert(0, str(art.get("nombre", "")))
         e_nom.grid(row=row_idx, column=1, sticky="w", pady=4, padx=5)
 
         row_idx += 1
         # Categoría
         tk.Label(f_fields, text="Categoría:", font=("Segoe UI", 9), bg=t_mod["bg_surface"], fg=t_mod["text_main"]).grid(row=row_idx, column=0, sticky="w", pady=4)
-        var_cat = tk.StringVar(value=articulo_existente.get("categoria", "General") if es_edicion else "General")
+        var_cat = tk.StringVar(value=art.get("categoria", "General") if es_edicion else "General")
         e_cat = tk.Entry(f_fields, textvariable=var_cat, font=("Segoe UI", 10), width=32, bg=t_mod["input_bg"], fg=t_mod["input_fg"], insertbackground=t_mod["input_insert"])
         e_cat.grid(row=row_idx, column=1, sticky="w", pady=4, padx=5)
 
         row_idx += 1
         # Unidad de medida
         tk.Label(f_fields, text="Unidad de Medida Base:", font=("Segoe UI", 9), bg=t_mod["bg_surface"], fg=t_mod["text_main"]).grid(row=row_idx, column=0, sticky="w", pady=4)
-        var_u = tk.StringVar(value=articulo_existente.get("unidad_medida", "Unidad") if es_edicion else "Unidad")
+        var_u = tk.StringVar(value=art.get("unidad_medida", "Unidad") if es_edicion else "Unidad")
         cb_u = ttk.Combobox(f_fields, textvariable=var_u, values=TODAS_LAS_UNIDADES, state="readonly", width=30)
         cb_u.grid(row=row_idx, column=1, sticky="w", pady=4, padx=5)
 
         row_idx += 1
         # Precio de Venta
         tk.Label(f_fields, text="Precio de Venta:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_main"]).grid(row=row_idx, column=0, sticky="w", pady=4)
-        e_precio = CurrencyEntry(f_fields, initial_value=articulo_existente.get("precio", 0.0) if es_edicion else 0.0,
+        e_precio = CurrencyEntry(f_fields, initial_value=art.get("precio", 0.0) if es_edicion else 0.0,
                                  show_symbol=True, width=32, font=("Segoe UI", 10), bg=t_mod["input_bg"], fg=t_mod["input_fg"], insertbackground=t_mod["input_insert"])
         e_precio.grid(row=row_idx, column=1, sticky="w", pady=4, padx=5)
 
         row_idx += 1
         # Casilla «Precios varios» (dinámico en venta para servicios / recargas)
-        var_precios_varios = tk.BooleanVar(value=bool(articulo_existente.get("precio_variable", False)) if es_edicion and articulo_existente else False)
+        var_precios_varios = tk.BooleanVar(value=bool(art.get("precio_variable", False)) if es_edicion else False)
         chk_precios_varios = tk.Checkbutton(
             f_fields,
             text="Precios varios (Permitir ingresar precio al vender en caja, ej: recargas)",
@@ -468,9 +469,9 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         provs = obtener_proveedores_locales()
         lista_prov = ["Ninguno"] + [f"{p[0]} - {p[1]}" for p in provs]
         prov_actual = "Ninguno"
-        if es_edicion and articulo_existente.get("proveedor_id"):
+        if es_edicion and art.get("proveedor_id"):
             for p in provs:
-                if p[0] == articulo_existente["proveedor_id"]:
+                if p[0] == art.get("proveedor_id"):
                     prov_actual = f"{p[0]} - {p[1]}"
                     break
         var_prov = tk.StringVar(value=prov_actual)
@@ -484,7 +485,7 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         lbl_comision = tk.Label(f_fields, text="Comisión Acordada (%):", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_main"])
         lbl_comision.grid(row=row_idx, column=0, sticky="w", pady=4)
 
-        com_init = float(articulo_existente.get("porcentaje_comision", 0.0) or 0.0) if es_edicion else 0.0
+        com_init = float(art.get("porcentaje_comision", 0.0) or 0.0) if es_edicion else 0.0
         var_comision = tk.StringVar(value=f"{com_init:g}" if com_init > 0 else "")
         f_comision_box = tk.Frame(f_fields, bg=t_mod["bg_surface"])
         f_comision_box.grid(row=row_idx, column=1, sticky="w", pady=4, padx=5)
@@ -501,7 +502,7 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         lbl_sb = tk.Label(f_fields, text="Stock Inicial Bodega:", font=("Segoe UI", 9), bg=t_mod["bg_surface"], fg=t_mod["text_main"])
         lbl_sb.grid(row=row_idx, column=0, sticky="w", pady=4)
         e_sb = tk.Entry(f_fields, font=("Segoe UI", 10), width=32, bg=t_mod["input_bg"], fg=t_mod["input_fg"], insertbackground=t_mod["input_insert"])
-        e_sb.insert(0, str(int(articulo_existente.get("stock_bodega", 0))) if es_edicion else "0")
+        e_sb.insert(0, str(int(art.get("stock_bodega", 0))) if es_edicion else "0")
         if es_edicion:
             e_sb.config(state="readonly")
         e_sb.grid(row=row_idx, column=1, sticky="w", pady=4, padx=5)
@@ -510,7 +511,7 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         lbl_sv = tk.Label(f_fields, text="Stock Inicial Vitrina:", font=("Segoe UI", 9), bg=t_mod["bg_surface"], fg=t_mod["text_main"])
         lbl_sv.grid(row=row_idx, column=0, sticky="w", pady=4)
         e_sv = tk.Entry(f_fields, font=("Segoe UI", 10), width=32, bg=t_mod["input_bg"], fg=t_mod["input_fg"], insertbackground=t_mod["input_insert"])
-        e_sv.insert(0, str(int(articulo_existente.get("stock_vitrina", 0))) if es_edicion else "0")
+        e_sv.insert(0, str(int(art.get("stock_vitrina", 0))) if es_edicion else "0")
         if es_edicion:
             e_sv.config(state="readonly")
         e_sv.grid(row=row_idx, column=1, sticky="w", pady=4, padx=5)
@@ -519,14 +520,14 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         lbl_smb = tk.Label(f_fields, text="Stock Mínimo Bodega:", font=("Segoe UI", 9), bg=t_mod["bg_surface"], fg=t_mod["text_main"])
         lbl_smb.grid(row=row_idx, column=0, sticky="w", pady=4)
         e_smb = tk.Entry(f_fields, font=("Segoe UI", 10), width=32, bg=t_mod["input_bg"], fg=t_mod["input_fg"], insertbackground=t_mod["input_insert"])
-        e_smb.insert(0, str(int(articulo_existente.get("stock_minimo_bodega", 5))) if es_edicion else "5")
+        e_smb.insert(0, str(int(art.get("stock_minimo_bodega", 5))) if es_edicion else "5")
         e_smb.grid(row=row_idx, column=1, sticky="w", pady=4, padx=5)
 
         row_idx += 1
         lbl_smv = tk.Label(f_fields, text="Stock Mínimo Vitrina:", font=("Segoe UI", 9), bg=t_mod["bg_surface"], fg=t_mod["text_main"])
         lbl_smv.grid(row=row_idx, column=0, sticky="w", pady=4)
         e_smv = tk.Entry(f_fields, font=("Segoe UI", 10), width=32, bg=t_mod["input_bg"], fg=t_mod["input_fg"], insertbackground=t_mod["input_insert"])
-        e_smv.insert(0, str(int(articulo_existente.get("stock_minimo_vitrina", 3))) if es_edicion else "3")
+        e_smv.insert(0, str(int(art.get("stock_minimo_vitrina", 3))) if es_edicion else "3")
         e_smv.grid(row=row_idx, column=1, sticky="w", pady=4, padx=5)
 
         def actualizar_campos_segun_tipo(*a):
