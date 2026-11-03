@@ -49,7 +49,8 @@ if len(sys.argv) > 1:
 from client.api_client import api
 from interface.theme_manager import (
     theme_mgr, aplicar_tema, calcular_geometria_segura,
-    crear_boton, calcular_color_texto_optimo, iniciar_observador_tema
+    crear_boton, calcular_color_texto_optimo, iniciar_observador_tema,
+    ModernCardButton
 )
 from interface.business_manager import business_mgr
 try:
@@ -190,18 +191,22 @@ ventana.resizable(True, True)
 ventana.configure(bg=t["bg_app"])
 
 def crear_etiqueta(parent, text="", font=None, bg=None, fg=None, **kwargs):
-    """Crea una etiqueta ttk.Label nativa, inmune al bug de texto invisible en macOS."""
+    """Crea una etiqueta tk.Label con colores explícitos para garantizar contraste en macOS y Windows."""
     kw = {"text": text}
     if font:
         kw["font"] = font
-    if fg:
-        kw["foreground"] = fg
-    if bg:
-        kw["background"] = bg
+    color_bg = bg
+    if color_bg is None:
+        try:
+            color_bg = parent.cget("bg")
+        except Exception:
+            color_bg = t["bg_surface"]
+    kw["bg"] = color_bg
+    kw["fg"] = fg if fg is not None else t["text_primary"]
     for k in ["anchor", "justify", "wraplength", "image"]:
         if k in kwargs:
             kw[k] = kwargs[k]
-    return ttk.Label(parent, **kw)
+    return tk.Label(parent, **kw)
 
 # Color de acento / identidad corporativa configurada
 COLOR_LOGIN = business_mgr.color_login or t["accent"]
@@ -297,14 +302,17 @@ def toggle_theme():
     theme_mgr.cambiar_tema(nuevo)
     messagebox.showinfo("Tema", f"Tema cambiado a {nuevo.upper()}.\nReinicie la aplicación para reflejar todos los estilos.")
 
-fg_btn_h = "#0F172A" if sys.platform == "darwin" else FG_LOGIN
 btn_theme_login = tk.Button(login_header, text="🌙/☀️", command=toggle_theme,
-                            font=(FONT_FAMILY, 9, "bold"), bg=COLOR_LOGIN, fg=fg_btn_h,
+                            font=(FONT_FAMILY, 9, "bold"), bg=COLOR_LOGIN, fg=FG_LOGIN,
+                            activebackground=COLOR_LOGIN, activeforeground=FG_LOGIN,
+                            highlightbackground=COLOR_LOGIN,
                             relief="flat", cursor="hand2", padx=6, pady=2)
 btn_theme_login.pack(side="right", padx=(4, 10), pady=10)
 
 btn_net_login = tk.Button(login_header, text="🌐 Red", command=abrir_configuracion_red,
-                          font=(FONT_FAMILY, 9, "bold"), bg=COLOR_LOGIN, fg=fg_btn_h,
+                          font=(FONT_FAMILY, 9, "bold"), bg=COLOR_LOGIN, fg=FG_LOGIN,
+                          activebackground=COLOR_LOGIN, activeforeground=FG_LOGIN,
+                          highlightbackground=COLOR_LOGIN,
                           relief="flat", cursor="hand2", padx=6, pady=2)
 btn_net_login.pack(side="right", padx=(0, 4), pady=10)
 
@@ -323,19 +331,58 @@ usuario_var = tk.StringVar()
 pass_var = tk.StringVar()
 
 crear_etiqueta(login_content, text="👤 USUARIO", font=(FONT_FAMILY, 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"], anchor="w").pack(fill="x", pady=(0, 3))
-entry_user = ttk.Entry(login_content, textvariable=usuario_var, font=(FONT_FAMILY, 11))
-entry_user.pack(fill="x", ipady=3, pady=(0, 12))
+entry_user = tk.Entry(
+    login_content,
+    textvariable=usuario_var,
+    font=(FONT_FAMILY, 11),
+    bg=t["input_bg"],
+    fg=t["input_fg"],
+    insertbackground=t["input_insert"],
+    relief="solid",
+    bd=1,
+    highlightthickness=1,
+    highlightcolor=COLOR_LOGIN,
+    highlightbackground=t["border"]
+)
+entry_user.pack(fill="x", ipady=4, pady=(0, 12))
 
 crear_etiqueta(login_content, text="🔒 CONTRASEÑA", font=(FONT_FAMILY, 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"], anchor="w").pack(fill="x", pady=(0, 3))
-entry_pass = ttk.Entry(login_content, textvariable=pass_var, font=(FONT_FAMILY, 11), show="*")
-entry_pass.pack(fill="x", ipady=3, pady=(0, 16))
+entry_pass = tk.Entry(
+    login_content,
+    textvariable=pass_var,
+    font=(FONT_FAMILY, 11),
+    show="*",
+    bg=t["input_bg"],
+    fg=t["input_fg"],
+    insertbackground=t["input_insert"],
+    relief="solid",
+    bd=1,
+    highlightthickness=1,
+    highlightcolor=COLOR_LOGIN,
+    highlightbackground=t["border"]
+)
+entry_pass.pack(fill="x", ipady=4, pady=(0, 16))
 
-btn_login = crear_boton(login_content, "🚀 INICIAR SESIÓN", comando=validar_usuario,
-                        tam_fuente=11, negrita=True, bg_color=COLOR_LOGIN, fg_color=FG_LOGIN)
+btn_login = ModernCardButton(
+    login_content,
+    texto="INICIAR SESIÓN",
+    subtexto="Ingresar al sistema VmPOS",
+    icono="🚀",
+    color_acento=COLOR_LOGIN,
+    comando=validar_usuario,
+    tipo="compact"
+)
 btn_login.pack(fill="x", pady=(0, 8))
 
-btn_clear = crear_boton(login_content, "🧹 LIMPIAR", comando=limpiar_campos,
-                        tam_fuente=10, negrita=True, bg_color=t["btn_secondary_bg"], fg_color=t["btn_secondary_fg"])
+btn_clear = ModernCardButton(
+    login_content,
+    texto="LIMPIAR CAMPOS",
+    subtexto="Borrar usuario y contraseña",
+    icono="🧹",
+    color_acento=t["secondary"],
+    comando=limpiar_campos,
+    tipo="compact"
+)
 btn_clear.pack(fill="x", pady=(0, 8))
 
 btn_red_link = tk.Button(
@@ -344,9 +391,11 @@ btn_red_link = tk.Button(
     font=(FONT_FAMILY, 9, "underline"),
     bg=t["bg_surface"],
     fg=COLOR_LOGIN if COLOR_LOGIN != "#FFFFFF" else t["accent"],
+    activebackground=t["bg_surface"],
+    activeforeground=COLOR_LOGIN,
+    highlightbackground=t["bg_surface"],
     bd=0,
     cursor="hand2",
-    activebackground=t["bg_surface"],
     command=abrir_configuracion_red
 )
 btn_red_link.pack(fill="x", pady=(4, 0))

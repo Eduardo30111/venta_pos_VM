@@ -964,6 +964,7 @@ class ModernCardButton(tk.Frame):
         # Texto Principal
         font_titulo = (FONT_FAMILY, 10 if tipo == "compact" else 11, "bold")
         anchor_val = "w" if tipo == "compact" else "center"
+        justify_val = "left" if tipo == "compact" else "center"
         self.lbl_texto = tk.Label(
             self.inner_frame,
             text=texto,
@@ -971,7 +972,7 @@ class ModernCardButton(tk.Frame):
             bg=self.bg_normal,
             fg=self.fg_main,
             anchor=anchor_val,
-            justify=anchor_val
+            justify=justify_val
         )
         self.lbl_texto.pack(fill="x", pady=(4, 1))
 
@@ -986,7 +987,7 @@ class ModernCardButton(tk.Frame):
                 bg=self.bg_normal,
                 fg=self.fg_sub,
                 anchor=anchor_val,
-                justify=anchor_val
+                justify=justify_val
             )
             self.lbl_subtexto.pack(fill="x")
 

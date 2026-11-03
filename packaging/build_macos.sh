@@ -113,9 +113,10 @@ $PYTHON_BIN -m PyInstaller \
     --hidden-import="barcode.writer" \
     interface/inicio_sesion.py
 
-# Ajustar Info.plist para alta resolución Retina
+# Ajustar Info.plist para alta resolución Retina y forzar apariencia Aqua (evita texto blanco invisible en Dark Mode)
 if [ -f "dist/VmPOS.app/Contents/Info.plist" ] && command -v plutil > /dev/null 2>&1; then
     plutil -replace NSHighResolutionCapable -bool true "dist/VmPOS.app/Contents/Info.plist" 2>/dev/null || true
+    plutil -replace NSRequiresAquaSystemAppearance -bool true "dist/VmPOS.app/Contents/Info.plist" 2>/dev/null || true
 fi
 
 echo "✅ Aplicación VmPOS.app generada en dist/VmPOS.app"
