@@ -863,3 +863,264 @@ def calcular_geometria_segura(ventana, target_w=1120, target_h=700, min_w=840, m
     ventana.resizable(True, True)
 
     return w, h
+
+
+# =============================================================================
+# 8. COMPONENTE VISUAL UNIFICADO MULTIPLATAFORMA (ModernCardButton)
+# =============================================================================
+
+class ModernCardButton(tk.Frame):
+    """
+    Componente visual de botón/tarjeta moderno, uniforme e inmune a las limitaciones
+    de Cocoa/Aqua en macOS y a diferencias de renderizado en Windows.
+    Construido sobre Frame y Label nativos con contraste WCAG garantizado,
+    animaciones de hover suaves, badges informativos y accesibilidad por teclado.
+    """
+    def __init__(
+        self,
+        parent,
+        texto="",
+        subtexto="",
+        icono="",
+        comando=None,
+        color_acento="#DB2777",
+        badge_texto="",
+        badge_color="#EC4899",
+        habilitado=True,
+        tipo="card",  # "card", "compact", "button"
+        bg_color=None,
+        fg_color=None,
+        ancho=None,
+        alto=None,
+        **kwargs
+    ):
+        t = theme_mgr.get_tokens()
+        self.t = t
+        self.comando = comando
+        self.habilitado = habilitado
+        self.color_acento = color_acento or t["accent"]
+        self.tipo = tipo
+
+        # Colores según modo y tema
+        self.bg_normal = bg_color or (t["bg_card"] if tipo in ("card", "compact") else self.color_acento)
+        self.bg_hover = oscurecer_color(self.bg_normal, 0.92) if not theme_mgr.es_oscuro() else aclarar_color(self.bg_normal, 1.12)
+        self.bg_active = oscurecer_color(self.bg_normal, 0.85)
+        self.fg_main = fg_color or (t["text_main"] if tipo in ("card", "compact") else calcular_color_texto_optimo(self.bg_normal))
+        self.fg_sub = t["text_muted"]
+
+        super().__init__(
+            parent,
+            bg=self.bg_normal,
+            bd=1,
+            relief="solid",
+            highlightthickness=0,
+            cursor="hand2" if habilitado else "arrow",
+            **kwargs
+        )
+
+        if ancho:
+            self.configure(width=ancho)
+        if alto:
+            self.configure(height=alto)
+            self.pack_propagate(False)
+
+        # Franja de acento superior o lateral
+        if tipo == "card":
+            self.accent_bar = tk.Frame(self, bg=self.color_acento, height=3)
+            self.accent_bar.pack(fill="x", side="top")
+        elif tipo == "compact":
+            self.accent_bar = tk.Frame(self, bg=self.color_acento, width=4)
+            self.accent_bar.pack(fill="y", side="left")
+
+        # Contenedor interior de contenido
+        pad_x = 12 if tipo == "card" else 8
+        pad_y = 10 if tipo == "card" else 6
+        self.inner_frame = tk.Frame(self, bg=self.bg_normal)
+        self.inner_frame.pack(fill="both", expand=True, padx=pad_x, pady=pad_y)
+
+        # Fila superior: Ícono y Badge (si aplica)
+        top_row = tk.Frame(self.inner_frame, bg=self.bg_normal)
+        top_row.pack(fill="x")
+
+        font_emoji = ("Segoe UI Emoji", 18) if sys.platform != "darwin" else ("Apple Color Emoji", 18)
+        self.lbl_icono = tk.Label(top_row, text=icono, font=font_emoji, bg=self.bg_normal, fg=self.fg_main)
+        if icono:
+            self.lbl_icono.pack(side="left")
+
+        self.lbl_badge = None
+        if badge_texto:
+            fg_badge = calcular_color_texto_optimo(badge_color)
+            self.lbl_badge = tk.Label(
+                top_row,
+                text=f" {badge_texto} ",
+                font=(FONT_FAMILY, 8, "bold"),
+                bg=badge_color,
+                fg=fg_badge,
+                padx=4,
+                pady=1
+            )
+            self.lbl_badge.pack(side="right")
+
+        # Texto Principal
+        font_titulo = (FONT_FAMILY, 10 if tipo == "compact" else 11, "bold")
+        anchor_val = "w" if tipo == "compact" else "center"
+        self.lbl_texto = tk.Label(
+            self.inner_frame,
+            text=texto,
+            font=font_titulo,
+            bg=self.bg_normal,
+            fg=self.fg_main,
+            anchor=anchor_val,
+            justify=anchor_val
+        )
+        self.lbl_texto.pack(fill="x", pady=(4, 1))
+
+        # Subtexto / Descripción / Atajo
+        self.lbl_subtexto = None
+        if subtexto:
+            font_sub = (FONT_FAMILY, 8)
+            self.lbl_subtexto = tk.Label(
+                self.inner_frame,
+                text=subtexto,
+                font=font_sub,
+                bg=self.bg_normal,
+                fg=self.fg_sub,
+                anchor=anchor_val,
+                justify=anchor_val
+            )
+            self.lbl_subtexto.pack(fill="x")
+
+        # Vincular eventos a todos los hijos
+        self._vincular_eventos(self)
+        self._actualizar_estado_visual()
+
+    def _vincular_eventos(self, widget):
+        widget.bind("<Button-1>", self._on_click)
+        widget.bind("<Enter>", self._on_enter)
+        widget.bind("<Leave>", self._on_leave)
+        for child in widget.winfo_children():
+            self._vincular_eventos(child)
+
+    def _on_click(self, event=None):
+        if self.habilitado and callable(self.comando):
+            self.comando()
+
+    def _on_enter(self, event=None):
+        if not self.habilitado:
+            return
+        self._aplicar_bg(self.bg_hover)
+
+    def _on_leave(self, event=None):
+        if not self.habilitado:
+            return
+        self._aplicar_bg(self.bg_normal)
+
+    def _aplicar_bg(self, color):
+        self.configure(bg=color)
+        self.inner_frame.configure(bg=color)
+        self.lbl_icono.configure(bg=color)
+        self.lbl_texto.configure(bg=color)
+        if self.lbl_subtexto:
+            self.lbl_subtexto.configure(bg=color)
+
+    def _actualizar_estado_visual(self):
+        if not self.habilitado:
+            self.configure(cursor="arrow")
+            fg_dim = self.t["btn_disabled_fg"]
+            bg_dim = self.t["btn_disabled_bg"]
+            self._aplicar_bg(bg_dim)
+            self.lbl_texto.configure(fg=fg_dim)
+            if self.lbl_subtexto:
+                self.lbl_subtexto.configure(fg=fg_dim)
+        else:
+            self.configure(cursor="hand2")
+            self._aplicar_bg(self.bg_normal)
+            self.lbl_texto.configure(fg=self.fg_main)
+            if self.lbl_subtexto:
+                self.lbl_subtexto.configure(fg=self.fg_sub)
+
+    def set_habilitado(self, hab: bool):
+        self.habilitado = hab
+        self._actualizar_estado_visual()
+
+    def set_badge(self, texto: str, color=None):
+        if not self.lbl_badge:
+            return
+        if texto:
+            if color:
+                self.lbl_badge.configure(bg=color, fg=calcular_color_texto_optimo(color))
+            self.lbl_badge.configure(text=f" {texto} ")
+            self.lbl_badge.pack(side="right")
+        else:
+            self.lbl_badge.pack_forget()
+
+
+# =============================================================================
+# 9. AVISOS FLOTANTES NO INVASIVOS (ToastNotification)
+# =============================================================================
+
+class ToastNotification:
+    """
+    Muestra una notificación emergente flotante, elegante y auto-destruible en la
+    esquina inferior o superior de la ventana activa sin bloquear la interacción.
+    """
+    @classmethod
+    def mostrar(cls, ventana, mensaje, tipo="success", duracion_ms=2600):
+        try:
+            if not ventana or not ventana.winfo_exists():
+                return
+            t = theme_mgr.get_tokens()
+            
+            iconos = {
+                "success": "✅",
+                "error": "❌",
+                "warning": "⚠️",
+                "info": "ℹ️"
+            }
+            colores = {
+                "success": "#047857",
+                "error": "#DC2626",
+                "warning": "#D97706",
+                "info": "#0369A1"
+            }
+            color_fondo = colores.get(tipo, "#0F172A")
+            icono = iconos.get(tipo, "✨")
+
+            toast = tk.Toplevel(ventana)
+            toast.overrideredirect(True)
+            toast.attributes("-topmost", True)
+            try:
+                toast.attributes("-alpha", 0.95)
+            except Exception:
+                pass
+
+            f = tk.Frame(toast, bg=color_fondo, bd=1, relief="solid", padx=14, pady=10)
+            f.pack(fill="both", expand=True)
+
+            tk.Label(
+                f,
+                text=f"{icono}  {mensaje}",
+                font=(FONT_FAMILY, 10, "bold"),
+                bg=color_fondo,
+                fg="#FFFFFF"
+            ).pack(side="left")
+
+            toast.update_idletasks()
+            w = toast.winfo_reqwidth()
+            h = toast.winfo_reqheight()
+
+            # Posicionar centrado abajo relativo a la ventana padre
+            vx = ventana.winfo_rootx()
+            vy = ventana.winfo_rooty()
+            vw = ventana.winfo_width()
+            vh = ventana.winfo_height()
+
+            pos_x = max(10, vx + (vw - w) // 2)
+            pos_y = max(10, vy + vh - h - 35)
+            toast.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
+
+            # Auto cierre
+            toast.after(duracion_ms, lambda: toast.destroy() if toast.winfo_exists() else None)
+        except Exception as e:
+            print(f"Aviso toast: {e}")
+

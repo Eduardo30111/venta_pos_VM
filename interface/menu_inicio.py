@@ -28,9 +28,17 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from client.api_client import api
 
 try:
-    from theme_manager import theme_mgr, aplicar_tema, calcular_geometria_segura, calcular_color_texto_optimo, crear_boton, oscurecer_color, aclarar_color, ScrollableContainer
+    from theme_manager import (
+        theme_mgr, aplicar_tema, calcular_geometria_segura, calcular_color_texto_optimo,
+        crear_boton, oscurecer_color, aclarar_color, ScrollableContainer,
+        ModernCardButton, ToastNotification, FONT_FAMILY
+    )
 except ImportError:
-    from interface.theme_manager import theme_mgr, aplicar_tema, calcular_geometria_segura, calcular_color_texto_optimo, crear_boton, oscurecer_color, aclarar_color, ScrollableContainer
+    from interface.theme_manager import (
+        theme_mgr, aplicar_tema, calcular_geometria_segura, calcular_color_texto_optimo,
+        crear_boton, oscurecer_color, aclarar_color, ScrollableContainer,
+        ModernCardButton, ToastNotification, FONT_FAMILY
+    )
 
 try:
     from business_manager import business_mgr
@@ -391,68 +399,89 @@ class VmPOSDashboard(tk.Tk):
             self.user_strip.pack(anchor="e", pady=(6, 2))
 
             emoji_rol = "👑" if self.rol_usuario in ["admin", "administrador"] else "👨‍🔧" if self.rol_usuario == "empleado" else "👩‍💼"
-            self.lbl_user_role = tk.Label(self.user_strip, text=f"👤 {self.usuario} ({emoji_rol} {self.rol_usuario_display})", font=("Segoe UI", 11, "bold"), bg=bg_h, fg=fg_h)
+            self.lbl_user_role = tk.Label(self.user_strip, text=f"👤 {self.usuario} ({emoji_rol} {self.rol_usuario_display})", font=(FONT_FAMILY, 10, "bold"), bg=bg_h, fg=fg_h)
             self.lbl_user_role.pack(side="left", padx=(0, 10))
 
+            # Indicador de estado de Red interactivo
+            self.lbl_estado_red = tk.Label(
+                self.user_strip,
+                text="📡 Comprobando red...",
+                font=(FONT_FAMILY, 8, "bold"),
+                bg="#E0F2FE",
+                fg="#0369A1",
+                padx=7,
+                pady=2,
+                cursor="hand2"
+            )
+            self.lbl_estado_red.pack(side="left", padx=(0, 6))
+            self.lbl_estado_red.bind("<Button-1>", lambda e: self._abrir_dialogo_red())
+
             # Botón de alternar tema rápido
-            txt_btn_tema = "🌙 Modo Oscuro" if not theme_mgr.es_oscuro() else "☀️ Modo Claro"
-            btn_tema = tk.Button(self.user_strip, text=txt_btn_tema, font=("Segoe UI", 9, "bold"), 
-                                 bg=self.t["btn_secondary_bg"], fg=self.t["btn_secondary_fg"], 
-                                 activebackground=self.t["btn_secondary_hover"],
-                                 activeforeground=self.t["btn_secondary_fg"],
-                                 relief="flat", cursor="hand2", padx=8, pady=3, command=self._toggle_tema)
+            txt_btn_tema = "🌙 Oscuro" if not theme_mgr.es_oscuro() else "☀️ Claro"
+            btn_tema = crear_boton(self.user_strip, text=txt_btn_tema, tipo="secondary", tam_fuente=8, padx=8, pady=2, command=self._toggle_tema)
             btn_tema.pack(side="left", padx=(0, 6))
 
-            btn_cerrar_sesion = tk.Button(self.user_strip, text="🚪 Cerrar Sesión", font=("Segoe UI", 9, "bold"), 
-                                          bg=self.t["btn_danger_bg"], fg=self.t["btn_danger_fg"],
-                                          activebackground=self.t["btn_danger_hover"],
-                                          activeforeground=self.t["btn_danger_fg"],
-                                          relief="flat", cursor="hand2", 
-                                          padx=8, pady=3, command=self._cerrar_sesion)
+            btn_cerrar_sesion = crear_boton(self.user_strip, text="🚪 Salir", tipo="danger", tam_fuente=8, padx=8, pady=2, command=self._cerrar_sesion)
             btn_cerrar_sesion.pack(side="left")
             
             # Fecha y hora en tiempo real + alerta admin o comision en una fila compacta
             self.info_strip = tk.Frame(self.header_right, bg=bg_h)
             self.info_strip.pack(anchor="e", pady=(0, 6))
 
-            self.lbl_fecha_hora = tk.Label(self.info_strip, text="", font=("Segoe UI", 9), bg=bg_h, fg=fg_sub)
+            self.lbl_fecha_hora = tk.Label(self.info_strip, text="", font=(FONT_FAMILY, 9), bg=bg_h, fg=fg_sub)
             self.lbl_fecha_hora.pack(side="left", padx=(0, 10))
             
             if self.rol_usuario in ["empleado", "vendedor", "operario"]:
-                self.lbl_comision = tk.Label(self.info_strip, text="💰 Recaudado Hoy: $0 COP", font=("Segoe UI", 10, "bold"), bg=bg_h, fg=fg_h)
+                self.lbl_comision = tk.Label(self.info_strip, text="💰 Recaudado Hoy: $0 COP", font=(FONT_FAMILY, 9, "bold"), bg=bg_h, fg=fg_h)
                 self.lbl_comision.pack(side="left", padx=(0, 8))
                 
-                btn_pedir = tk.Button(self.info_strip, text="📤 Pedir Liquidación", font=("Segoe UI", 9, "bold"), 
-                                      bg=self.t["btn_warning_bg"], fg=self.t["btn_warning_fg"], 
-                                      activebackground=self.t["btn_warning_hover"],
-                                      activeforeground=self.t["btn_warning_fg"],
-                                      relief="flat", cursor="hand2", padx=8, pady=3, command=self._pedir_liquidacion)
+                btn_pedir = crear_boton(self.info_strip, text="📤 Pedir Liquidación", tipo="warning", tam_fuente=8, padx=8, pady=2, command=self._pedir_liquidacion)
                 btn_pedir.pack(side="left")
                 
                 self._actualizar_comision_empleado()
             else:
                 # Perfil Administrador: Alerta de solicitudes de liquidación en tiempo real
-                self.btn_notif_liq = tk.Button(
+                self.btn_notif_liq = crear_boton(
                     self.info_strip,
                     text="✅ Sin solicitudes pendientes",
-                    font=("Segoe UI", 9, "bold"),
-                    bg=self.t["btn_secondary_bg"],
-                    fg=self.t["btn_secondary_fg"],
-                    activebackground=self.t["btn_secondary_hover"],
-                    activeforeground=self.t["btn_secondary_fg"],
-                    relief="flat",
-                    cursor="hand2",
+                    tipo="secondary",
+                    tam_fuente=8,
                     padx=8,
-                    pady=3,
+                    pady=2,
                     command=self._abrir_nomina
                 )
                 self.btn_notif_liq.pack(side="left")
                 self._actualizar_notificaciones_admin()
 
-            # Actualizar fecha y hora
+            # Actualizar fecha y hora y estado de red
             self._actualizar_fecha_hora()
+            self._actualizar_estado_red()
         except Exception as e:
             print(f"Error creando header: {e}")
+
+    def _abrir_dialogo_red(self):
+        """Abre la ventana interactiva de configuración de red y servidor."""
+        try:
+            from interface.network_dialog import abrir_dialogo_red
+        except ImportError:
+            from network_dialog import abrir_dialogo_red
+        abrir_dialogo_red(parent=self, on_saved=self._actualizar_estado_red)
+
+    def _actualizar_estado_red(self):
+        """Monitorea el estado de conectividad con el servidor y actualiza la píldora superior."""
+        try:
+            if hasattr(self, 'lbl_estado_red') and self.lbl_estado_red.winfo_exists():
+                is_online = getattr(api, "servidor_disponible", False)
+                if is_online:
+                    url_clean = str(getattr(api, "base_url", "8000")).replace("http://", "").replace("https://", "").rstrip("/")
+                    self.lbl_estado_red.config(text=f"🟢 En Línea [{url_clean}]", fg="#047857", bg="#D1FAE5")
+                else:
+                    self.lbl_estado_red.config(text="🟡 Modo Local (Sin Servidor)", fg="#92400E", bg="#FEF3C7")
+        except Exception:
+            pass
+        finally:
+            if self.winfo_exists() and session_mgr.sesion_activa:
+                self.after(10000, self._actualizar_estado_red)
 
     def _actualizar_notificaciones_admin(self):
         try:
@@ -1507,99 +1536,114 @@ class VmPOSDashboard(tk.Tk):
                 card_header.pack(fill="x")
                 card_content = tk.Frame(stat_card, bg=bg_card)
                 card_content.pack(fill="both", expand=True, padx=8, pady=8)
-                tk.Label(card_content, text=icono, font=("Segoe UI Emoji", 18), bg=bg_card, fg=fg_main).pack()
-                tk.Label(card_content, text=titulo, font=("Segoe UI", 9, "bold"), bg=bg_card, fg=fg_muted).pack()
+                font_emoji = ("Segoe UI Emoji", 18) if sys.platform != "darwin" else ("Apple Color Emoji", 18)
+                tk.Label(card_content, text=icono, font=font_emoji, bg=bg_card, fg=fg_main).pack()
+                tk.Label(card_content, text=titulo, font=(FONT_FAMILY, 9, "bold"), bg=bg_card, fg=fg_muted).pack()
                 
                 # Crear widget de valor y guardarlo en el diccionario
                 valor_inicial = "$0 COP" if "ventas" in key or "ganancias" in key else ("Sin ventas" if key == "producto_top" else "0")
                 font_tam = 10 if key == "producto_top" else 13
-                valor_widget = tk.Label(card_content, text=valor_inicial, font=("Segoe UI", font_tam, "bold"),
+                valor_widget = tk.Label(card_content, text=valor_inicial, font=(FONT_FAMILY, font_tam, "bold"),
                                         bg=bg_card, fg=fg_main, wraplength=190, justify="center")
                 valor_widget.pack(pady=(2, 0))
                 self.stats_widgets[key] = valor_widget
 
                 # Subtítulo informativo
-                sub_widget = tk.Label(card_content, text="", font=("Segoe UI", 8), bg=bg_card, fg=fg_muted)
+                sub_widget = tk.Label(card_content, text="", font=(FONT_FAMILY, 8), bg=bg_card, fg=fg_muted)
                 sub_widget.pack(pady=(1, 2))
                 self.stats_sub_widgets[key] = sub_widget
         except Exception as e:
             print(f"Error creando panel de estadísticas: {e}")
 
     def _create_buttons_panel(self, parent):
-        """Crea el panel principal con botones de operación, gestión y configuración."""
+        """Crea el panel principal equilibrado con tarjetas modernas y simétricas (4 por columna)."""
         try:
             bg_app = self.t["bg_app"]
             bg_panel = self.t["bg_surface"]
             fg_title = self.t["bg_header"]
 
             buttons_container = tk.Frame(parent, bg=bg_app)
-            buttons_container.pack(fill="both", expand=True)
+            buttons_container.pack(fill="both", expand=True, pady=(2, 6))
 
+            # Columna 1: Operaciones Comerciales (4 módulos)
             left_panel = tk.Frame(buttons_container, bg=bg_panel, bd=1, relief="solid")
-            left_panel.pack(side="left", fill="both", expand=True, padx=(0, 8))
-            tk.Label(left_panel, text="✨ OPERACIONES", font=("Segoe UI", 12, "bold"), bg=bg_panel, fg=fg_title).pack(pady=10)
-            self._crear_boton_moderno(left_panel, "Nueva Venta", "💖", "#EC4899", lambda: self._accion("Ventas"), "Ventas")
-            self._crear_boton_moderno(left_panel, "Control de Caja", "💵", "#059669", lambda: self._accion("Caja"), "Caja")
-            self._crear_boton_moderno(left_panel, "Control del Turno", "⏱️", "#0284C7", lambda: self._accion("Turnos"), "Turnos")
-            self._crear_boton_moderno(left_panel, "Clientes", "💎", "#10B981", lambda: self._accion("Clientes"), "Clientes")
+            left_panel.pack(side="left", fill="both", expand=True, padx=(0, 6))
+            tk.Label(left_panel, text="✨ OPERACIONES COMERCIALES", font=(FONT_FAMILY, 11, "bold"), bg=bg_panel, fg=fg_title).pack(pady=(10, 6))
+            self._crear_boton_moderno(left_panel, "Nueva Venta", "💖", "#EC4899", lambda: self._accion("Ventas"), "Ventas", subtexto="Facturación rápida en mostrador", badge="F1 / F12")
+            self._crear_boton_moderno(left_panel, "Control de Caja", "💵", "#059669", lambda: self._accion("Caja"), "Caja", subtexto="Arqueo físico, ingresos y egresos", badge="Caja")
+            self._crear_boton_moderno(left_panel, "Control del Turno", "⏱️", "#0284C7", lambda: self._accion("Turnos"), "Turnos", subtexto="Horarios, pausas y asistencia", badge="Turnos")
+            self._crear_boton_moderno(left_panel, "Clientes y Fiado", "💎", "#10B981", lambda: self._accion("Clientes"), "Clientes", subtexto="Cartera y cuentas por cobrar", badge="Clientes")
             
+            # Columna 2: Gestión de Negocio (4 módulos)
             center_panel = tk.Frame(buttons_container, bg=bg_panel, bd=1, relief="solid")
             center_panel.pack(side="left", fill="both", expand=True, padx=4)
-            tk.Label(center_panel, text="💫 GESTIÓN", font=("Segoe UI", 12, "bold"), bg=bg_panel, fg=fg_title).pack(pady=10)
-            self._crear_boton_moderno(center_panel, "Gestionar Inventario", "🎀", "#0EA5E9", lambda: self._accion("Inventario"), "Inventario")
-            self._crear_boton_moderno(center_panel, "Contabilidad", "🏛️", "#D97706", lambda: self._accion("Contabilidad"), "Contabilidad")
-            self._crear_boton_moderno(center_panel, "Control de Gastos", "🌸", "#DC2626", lambda: self._accion("Gastos"), "Gastos")
-            self._crear_boton_moderno(center_panel, "Gestión de Ventas", "🛡️", "#6366F1", lambda: self._accion("Gestión Ventas"), "Gestión Ventas")
-            self._crear_boton_moderno(center_panel, "Nómina y Proveedores", "💸", "#0D9488", lambda: self._accion("Nómina"), "Usuarios")
+            tk.Label(center_panel, text="💫 GESTIÓN DE NEGOCIO", font=(FONT_FAMILY, 11, "bold"), bg=bg_panel, fg=fg_title).pack(pady=(10, 6))
+            self._crear_boton_moderno(center_panel, "Gestionar Inventario", "📦", "#0EA5E9", lambda: self._accion("Inventario"), "Inventario", subtexto="Catálogo, stock y existencias", badge="Stock")
+            self._crear_boton_moderno(center_panel, "Gestión de Ventas", "🛡️", "#6366F1", lambda: self._accion("Gestión Ventas"), "Gestión Ventas", subtexto="Historial de facturas y auditoría", badge="Auditoría")
+            self._crear_boton_moderno(center_panel, "Códigos de Barras", "🔢", "#EA580C", lambda: self._accion("Códigos de Barras"), "Códigos de Barras", subtexto="Generación e impresión de etiquetas", badge="Barcodes")
             if self.rol_usuario in ["empleado", "vendedor", "operario"]:
-                self._crear_boton_moderno(center_panel, "Mi Nómina (Historial)", "🧾", "#8B5CF6", self._mostrar_nomina_empleado)
-            self._crear_boton_moderno(center_panel, "Códigos de Barras", "🔢", "#EA580C", lambda: self._accion("Códigos de Barras"), "Códigos de Barras")
+                self._crear_boton_moderno(center_panel, "Mi Nómina (Historial)", "🧾", "#8B5CF6", self._mostrar_nomina_empleado, subtexto="Liquidaciones y comisiones acumuladas", badge="Mi Nómina")
+            else:
+                self._crear_boton_moderno(center_panel, "Usuarios y Accesos", "👥", "#DB2777", lambda: self._accion("Usuarios"), "Usuarios", subtexto="Cuentas, permisos y contraseñas", badge="Seguridad")
 
+            # Columna 3: Finanzas y Sistema (4 módulos)
             right_panel = tk.Frame(buttons_container, bg=bg_panel, bd=1, relief="solid")
-            right_panel.pack(side="right", fill="both", expand=True, padx=(8, 0))
-            tk.Label(right_panel, text="🎨 CONFIGURACIÓN", font=("Segoe UI", 12, "bold"), bg=bg_panel, fg=fg_title).pack(pady=10)
-            self._crear_boton_moderno(right_panel, "Configuración", "✨", "#8B5CF6", lambda: self._accion("Configuración"), "Configuración")
-            self._crear_boton_moderno(right_panel, "Usuarios", "👸", "#DB2777", lambda: self._accion("Usuarios"), "Usuarios")
+            right_panel.pack(side="right", fill="both", expand=True, padx=(6, 0))
+            tk.Label(right_panel, text="🏛️ FINANZAS Y SISTEMA", font=(FONT_FAMILY, 11, "bold"), bg=bg_panel, fg=fg_title).pack(pady=(10, 6))
+            self._crear_boton_moderno(right_panel, "Contabilidad Central", "🏛️", "#D97706", lambda: self._accion("Contabilidad"), "Contabilidad", subtexto="Libro mayor y balance general", badge="Finanzas")
+            self._crear_boton_moderno(right_panel, "Control de Gastos", "🌸", "#DC2626", lambda: self._accion("Gastos"), "Gastos", subtexto="Egresos y gastos recurrentes", badge="Gastos")
+            self._crear_boton_moderno(right_panel, "Nómina y Proveedores", "💸", "#0D9488", lambda: self._accion("Nómina"), "Usuarios", subtexto="Liquidaciones y cuentas por pagar", badge="Nómina")
+            self._crear_boton_moderno(right_panel, "Configuración del Sistema", "⚙️", "#8B5CF6", lambda: self._accion("Configuración"), "Configuración", subtexto="Identidad del negocio y red", badge="Ajustes")
         except Exception as e:
             print(f"Error creando panel de botones: {e}")
 
     def _create_quick_access_panel(self, parent):
-        """Crea el panel de acceso rápido en la parte inferior del área de contenido principal."""
+        """Crea el panel de accesos rápidos inferior con teclas de función (F1-F5)."""
         try:
-            bg_bar = self.t["bg_header"]
-            fg_bar = self.t["text_header"]
+            bg_bar = self.t["bg_surface"]
+            fg_title = self.t["text_main"]
 
-            quick_access = tk.Frame(parent, bg=bg_bar)
-            quick_access.pack(fill="x", pady=(10, 0))
+            quick_access = tk.Frame(parent, bg=bg_bar, bd=1, relief="solid")
+            quick_access.pack(fill="x", pady=(6, 0))
 
-            tk.Label(quick_access, text="💫 ACCESO RÁPIDO", font=("Segoe UI", 11, "bold"), bg=bg_bar, fg=fg_bar).pack(side="left", padx=15, pady=12)
+            tk.Label(
+                quick_access,
+                text="⚡ ATAJOS DE TECLADO:",
+                font=(FONT_FAMILY, 9, "bold"),
+                bg=bg_bar,
+                fg=fg_title
+            ).pack(side="left", padx=12, pady=6)
+
             quick_frame = tk.Frame(quick_access, bg=bg_bar)
-            quick_frame.pack(side="right", padx=15, pady=8)
+            quick_frame.pack(side="right", padx=10, pady=4)
 
             quick_buttons = [
-                ("🌟", "Nueva Factura", "#EC4899", "Ventas", lambda: self._accion("Ventas")),
-                ("💎", "Consultar Stock", "#0284C7", "Inventario", lambda: self._accion("Inventario")),
-                ("🔢", "Generar Código", "#EA580C", "Códigos de Barras", lambda: self._accion("Códigos de Barras")),
-                ("🎀", "Backup", "#10B981", "Configuración", lambda: self._accion("Configuración")),
-                ("✨", "Sincronizar", "#D97706", "Configuración", lambda: self._actualizar_estadisticas())
+                ("💖", "Ventas [F1]", "#EC4899", "Ventas", lambda: self._accion("Ventas")),
+                ("📦", "Stock [F2]", "#0284C7", "Inventario", lambda: self._accion("Inventario")),
+                ("💵", "Caja [F3]", "#059669", "Caja", lambda: self._accion("Caja")),
+                ("🔢", "Barras [F4]", "#EA580C", "Códigos de Barras", lambda: self._accion("Códigos de Barras")),
+                ("🔄", "Actualizar [F5]", "#D97706", "Configuración", lambda: (self._actualizar_estadisticas(), ToastNotification.mostrar(self, "Estadísticas actualizadas", "success")))
             ]
             
             for icono, texto, color, modulo, comando in quick_buttons:
-                tiene_permiso = self.permisos.get(modulo, 0) == 1 if modulo != "Configuración" or texto != "Sincronizar" else True
+                tiene_permiso = self.permisos.get(modulo, 0) == 1 if modulo != "Configuración" or "Actualizar" in texto else True
                 color_final = color if tiene_permiso else self.t["btn_disabled_bg"]
-                cursor_final = "hand2" if tiene_permiso else "arrow"
-                fg_final = calcular_color_texto_optimo(color_final) if tiene_permiso else self.t["btn_disabled_fg"]
 
-                def _on_click(cmd, has_perm):
+                def _make_cmd(cmd, has_perm):
                     return lambda: cmd() if has_perm else self._mostrar_alerta_sin_permisos()
 
-                quick_btn = tk.Button(quick_frame, text=f"{icono}\n{texto}",
-                                     font=("Segoe UI", 8, "bold"), bg=color_final, fg=fg_final,
-                                     activebackground=color_final, activeforeground=fg_final,
-                                     disabledforeground=self.t["btn_disabled_fg"],
-                                     bd=0, cursor=cursor_final, relief="flat", width=11, height=2,
-                                     command=_on_click(comando, tiene_permiso))
-                quick_btn.pack(side="left", padx=4)
+                btn = ModernCardButton(
+                    quick_frame,
+                    texto=texto,
+                    icono=icono,
+                    comando=_make_cmd(comando, tiene_permiso),
+                    color_acento=color_final,
+                    habilitado=tiene_permiso,
+                    tipo="compact",
+                    bg_color=self.t["bg_app"],
+                    alto=32
+                )
+                btn.pack(side="left", padx=3, pady=2)
         except Exception as e:
             print(f"Error creando panel de acceso rápido: {e}")
 
@@ -1618,7 +1662,7 @@ class VmPOSDashboard(tk.Tk):
             self.lbl_footer_ubicacion = tk.Label(
                 footer_left,
                 text=business_mgr.obtener_texto_ubicacion_contacto(),
-                font=("Segoe UI", 9),
+                font=(FONT_FAMILY, 9),
                 bg=bg_f,
                 fg=fg_f
             )
@@ -1628,8 +1672,8 @@ class VmPOSDashboard(tk.Tk):
             footer_right.pack(side="right", padx=20, pady=6)
             self.lbl_footer_marca = tk.Label(
                 footer_right,
-                text=f"✨ {business_mgr.nombre} • Sistema Activo 💖",
-                font=("Segoe UI", 9),
+                text=f"✨ {business_mgr.nombre} • Sistema Comercial Activo 💖",
+                font=(FONT_FAMILY, 9),
                 bg=bg_f,
                 fg=fg_sub
             )
@@ -1646,10 +1690,22 @@ class VmPOSDashboard(tk.Tk):
             print(f"Error vinculando shortcuts: {e}")
 
     def _shortcuts(self, event):
-        """Maneja los atajos de teclado."""
+        """Maneja los atajos de teclado globales del Dashboard."""
         try:
             key = event.keysym.lower()
-            if event.state & 4:  # Verifica si Ctrl está presionado
+            # Teclas directas de función (F1 - F5)
+            if key == 'f1' and self.permisos.get("Ventas", 0) == 1:
+                self._accion("Ventas")
+            elif key == 'f2' and self.permisos.get("Inventario", 0) == 1:
+                self._accion("Inventario")
+            elif key == 'f3' and self.permisos.get("Caja", 0) == 1:
+                self._accion("Caja")
+            elif key == 'f4' and self.permisos.get("Códigos de Barras", 0) == 1:
+                self._accion("Códigos de Barras")
+            elif key == 'f5':
+                self._actualizar_estadisticas()
+                ToastNotification.mostrar(self, "Estadísticas actualizadas", "success")
+            elif event.state & 4:  # Atajos con Ctrl
                 if key == 'v' and self.permisos.get("Ventas", 0) == 1:
                     self._accion("Ventas")
                 elif key == 'i' and self.permisos.get("Inventario", 0) == 1:
@@ -1660,8 +1716,6 @@ class VmPOSDashboard(tk.Tk):
                     self._accion("Contabilidad")
                 elif key == 'b' and self.permisos.get("Códigos de Barras", 0) == 1:
                     self._accion("Códigos de Barras")
-            elif key == 'f5':  # F5 para actualizar estadísticas
-                self._actualizar_estadisticas()
         except Exception as e:
             print(f"Error en shortcuts: {e}")
 
@@ -1700,49 +1754,32 @@ class VmPOSDashboard(tk.Tk):
         except Exception as e:
             print(f"Error mostrando alerta de permisos: {e}")
 
-    def _crear_boton_moderno(self, parent, texto, icono, color, comando, modulo=None):
+    def _crear_boton_moderno(self, parent, texto, icono, color, comando, modulo=None, subtexto="", badge=""):
         """
-        Crea un botón con estilo con verificación de permisos, cálculo estricto de contraste WCAG y hover.
+        Crea un botón/tarjeta moderno con verificación de permisos, contraste WCAG,
+        hover interactivo y renderizado 100% idéntico en Windows y macOS.
         """
         try:
             tiene_permiso = self.permisos.get(modulo, 0) == 1 if modulo else True
-            btn_frame = tk.Frame(parent, bg=self.t["bg_surface"])
-            btn_frame.pack(fill="x", padx=12, pady=4)
-            
-            if not tiene_permiso:
-                color_final = self.t["btn_disabled_bg"]
-                texto_final = f"🔒   {texto}"
-                cursor_final = "arrow"
-                fg_final = self.t["btn_disabled_fg"]
-            else:
-                color_final = color
-                texto_final = f"{icono}   {texto}"
-                cursor_final = "hand2"
-                fg_final = calcular_color_texto_optimo(color_final)
-
-            btn = tk.Button(btn_frame, text=texto_final,
-                            font=("Segoe UI", 10, "bold"), bg=color_final, fg=fg_final,
-                            activebackground=color_final, activeforeground=fg_final,
-                            disabledforeground=self.t["btn_disabled_fg"],
-                            bd=0, pady=10, cursor=cursor_final,
-                            command=lambda: comando() if tiene_permiso else self._mostrar_alerta_sin_permisos(),
-                            relief="flat", anchor="w", padx=15)
-            btn.pack(fill="x")
-
-            # Efectos de hover con recálculo dinámico de contraste
-            if tiene_permiso:
-                color_hover = oscurecer_color(color_final, 0.88) if not theme_mgr.es_oscuro() else aclarar_color(color_final, 1.15)
-                fg_hover = calcular_color_texto_optimo(color_hover)
-
-                def on_enter(e):
-                    btn.config(bg=color_hover, fg=fg_hover)
-                def on_leave(e):
-                    btn.config(bg=color_final, fg=fg_final)
-
-                btn.bind("<Enter>", on_enter)
-                btn.bind("<Leave>", on_leave)
+            card = ModernCardButton(
+                parent,
+                texto=texto,
+                subtexto=subtexto if tiene_permiso else "Acceso restringido por rol",
+                icono=icono,
+                comando=lambda: comando() if tiene_permiso else self._mostrar_alerta_sin_permisos(),
+                color_acento=color,
+                badge_texto=badge if tiene_permiso else "Bloqueado",
+                badge_color=color if tiene_permiso else self.t["btn_disabled_fg"],
+                habilitado=tiene_permiso,
+                tipo="compact",
+                bg_color=self.t["bg_card"],
+                fg_color=self.t["text_main"] if tiene_permiso else self.t["btn_disabled_fg"]
+            )
+            card.pack(fill="x", padx=10, pady=4)
+            return card
         except Exception as e:
             print(f"Error creando botón moderno: {e}")
+            return None
 
     def _lanzar_modulo_subproceso(self, script_name, nombre_display, extra_args=None):
         """Lanza un módulo en subproceso supervisado por session_mgr con parent_pid."""

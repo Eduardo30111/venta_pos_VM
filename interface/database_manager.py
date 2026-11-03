@@ -22,13 +22,19 @@ except ImportError:
 
 def conectar_db(db_path=None):
     """
-    Establece conexión con la base de datos especificada.
-    Por defecto conecta a ventas.db o a la ruta configurada en VMPOS_DB_VENTAS.
+    Establece conexión optimizada con la base de datos especificada.
+    Configura WAL (Write-Ahead Logging), busy_timeout de 5s y sincronización NORMAL
+    para máxima velocidad y evitar bloqueos 'database is locked'.
     """
     if db_path is None:
         db_path = os.environ.get("VMPOS_DB_VENTAS") or DB_VENTAS_PATH
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        # Optimizaciones de rendimiento de SQLite
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
     except Exception as e:
         print(f"Error conectando a la base de datos {db_path}: {e}")

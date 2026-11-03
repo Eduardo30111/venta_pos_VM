@@ -414,5 +414,12 @@ def conectar_usuarios_db():
     except ImportError:
         from config import DB_USUARIOS_PATH
     ruta = os.environ.get("VMPOS_DB_USUARIOS") or DB_USUARIOS_PATH
-    return sqlite3.connect(ruta)
+    conn = sqlite3.connect(ruta, timeout=10.0)
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+    except Exception:
+        pass
+    return conn
 

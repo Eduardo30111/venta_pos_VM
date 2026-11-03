@@ -887,8 +887,15 @@ class App:
         tk.Label(cat_busq_frame, text="🔍", font=("Segoe UI", 9), bg=bg_panel, fg=fg_main).pack(side="left", padx=(0, 4))
         self.entry_busq_cat = tk.Entry(cat_busq_frame, textvariable=self.busqueda_catalogo, font=("Segoe UI", 9), bd=1, relief="solid", 
                                        bg=self.t["input_bg"], fg=self.t["input_fg"], insertbackground=self.t["input_insert"])
-        self.entry_busq_cat.pack(side="left", fill="x", expand=True)
-        self.busqueda_catalogo.trace_add("write", lambda *args: self.actualizar_catalogo_live())
+        self._debounce_cat_live = None
+        def _on_cat_search(*args):
+            if self._debounce_cat_live:
+                try:
+                    self.ventana.after_cancel(self._debounce_cat_live)
+                except Exception:
+                    pass
+            self._debounce_cat_live = self.ventana.after(150, self.actualizar_catalogo_live)
+        self.busqueda_catalogo.trace_add("write", _on_cat_search)
 
         # Tabla catálogo
         cat_table_frame = tk.Frame(catalogo_panel, bg=bg_panel, bd=1, relief="solid")

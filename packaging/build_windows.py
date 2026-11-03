@@ -116,7 +116,13 @@ for h in hidden_imports:
 pyinstaller_args.append(os.path.join("interface", "inicio_sesion.py"))
 
 print("Ejecutando PyInstaller con argumentos configurados...")
-import PyInstaller.__main__
+try:
+    import PyInstaller.__main__
+except ImportError:
+    print("\n❌ Error: PyInstaller no se pudo importar.")
+    print(f"Por favor instala PyInstaller ejecutando: {sys.executable} -m pip install pyinstaller")
+    sys.exit(1)
+
 try:
     PyInstaller.__main__.run(pyinstaller_args)
 except SystemExit as e:

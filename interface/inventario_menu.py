@@ -334,7 +334,16 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
             ))
         refrescar_kpis()
 
-    var_filtro_cat.trace_add("write", lambda *a: cargar_tabla_catalogo())
+    _debounce_cat = [None]
+    def _on_filtro_cat_change(*a):
+        if _debounce_cat[0]:
+            try:
+                ventana.after_cancel(_debounce_cat[0])
+            except Exception:
+                pass
+        _debounce_cat[0] = ventana.after(200, cargar_tabla_catalogo)
+
+    var_filtro_cat.trace_add("write", _on_filtro_cat_change)
     cb_tipo_cat.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_catalogo())
 
     # Botones Catálogo

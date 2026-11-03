@@ -28,6 +28,10 @@ trace_output.log
 scratch/
 .system_generated/
 
+# Base de datos temporales WAL
+*.db-wal
+*.db-shm
+
 # Sistema operativo
 .DS_Store
 Thumbs.db
