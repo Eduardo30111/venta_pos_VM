@@ -23,9 +23,9 @@ import os
 import sys
 
 try:
-    from theme_manager import theme_mgr, aplicar_tema, calcular_geometria_segura, crear_boton, ScrollableContainer
+    from theme_manager import theme_mgr, aplicar_tema, calcular_geometria_segura, crear_boton, ScrollableContainer, calcular_color_texto_optimo
 except ImportError:
-    from interface.theme_manager import theme_mgr, aplicar_tema, calcular_geometria_segura, crear_boton, ScrollableContainer
+    from interface.theme_manager import theme_mgr, aplicar_tema, calcular_geometria_segura, crear_boton, ScrollableContainer, calcular_color_texto_optimo
 
 try:
     from components.currency_entry import CurrencyEntry, formatear_cop

@@ -26,7 +26,9 @@ try:
     import usb.core
     import usb.util
     IMPRESION_DISPONIBLE = True
-except ImportError:
+except Exception:
+    Usb = None
+    Win32Raw = None
     IMPRESION_DISPONIBLE = False
 
 try:

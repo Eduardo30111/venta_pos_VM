@@ -1,12 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+datas = [('assets', 'assets'), ('config', 'config'), ('database', 'database'), ('interface', 'interface'), ('client', 'client'), ('network_config.json', '.')]
+binaries = []
+hiddenimports = ['reportlab', 'reportlab.lib', 'reportlab.platypus', 'reportlab.pdfgen', 'matplotlib', 'matplotlib.backends.backend_tkagg', 'pandas', 'openpyxl', 'PIL', 'PIL.Image', 'PIL.ImageTk', 'sqlite3', 'escpos', 'usb', 'httpx', 'pydantic', 'pydantic_settings', 'barcode', 'barcode.codex', 'barcode.ean', 'barcode.writer', 'babel', 'babel.numbers']
+tmp_ret = collect_all('escpos')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
     ['interface/inicio_sesion.py'],
     pathex=[],
-    binaries=[],
-    datas=[('assets', 'assets'), ('config', 'config'), ('database', 'database'), ('interface', 'interface'), ('client', 'client'), ('network_config.json', '.')],
-    hiddenimports=['reportlab', 'reportlab.lib', 'reportlab.platypus', 'reportlab.pdfgen', 'matplotlib', 'matplotlib.backends.backend_tkagg', 'pandas', 'openpyxl', 'PIL', 'PIL.Image', 'PIL.ImageTk', 'sqlite3', 'escpos', 'usb', 'httpx', 'pydantic', 'pydantic_settings', 'barcode', 'barcode.codex', 'barcode.ean', 'barcode.writer', 'babel', 'babel.numbers'],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -35,7 +35,7 @@ export MPLCONFIGDIR="$PROJECT_ROOT/build/matplotlib_cache"
 mkdir -p "$PYINSTALLER_CONFIG_DIR" "$MPLCONFIGDIR"
 
 echo "Verificando dependencias de compilación..."
-$PYTHON_BIN -m pip install --quiet pyinstaller pillow reportlab matplotlib pandas openpyxl httpx pydantic pydantic_settings python-barcode babel
+$PYTHON_BIN -m pip install --quiet pyinstaller pillow reportlab matplotlib pandas openpyxl httpx pydantic pydantic_settings python-barcode babel python-escpos pyusb
 
 # 2. Generar archivo .icns si no existe
 ICNS_PATH="$PROJECT_ROOT/assets/Salome.icns"
@@ -92,6 +92,7 @@ $PYTHON_BIN -m PyInstaller \
     --add-data="interface:interface" \
     --add-data="client:client" \
     $NETWORK_DATA_FLAG \
+    --collect-all="escpos" \
     --hidden-import="reportlab" \
     --hidden-import="reportlab.lib" \
     --hidden-import="reportlab.platypus" \
