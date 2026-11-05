@@ -32,8 +32,23 @@ jobs:
           choco install innosetup --no-progress
 
       - name: Compilar VmPOS.exe e Instalador Setup
+        shell: bash
         run: |
-          python packaging/build_windows.py
+          python packaging/build_windows.py 2>&1 | tee build.log
+
+      - name: Diagnostico en caso de error
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== ULTIMAS 100 LINEAS DEL LOG DE COMPILACION ==="
+          tail -n 100 build.log
+
+      - name: Subir log de compilacion
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-log
+          path: build.log
 
       - name: Comprimir versión portable Windows
         shell: pwsh
