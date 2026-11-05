@@ -60,6 +60,15 @@ if os.path.exists(vmpos_dist):
     except Exception as e:
         print(f"  ⚠️ Aviso dist/VmPOS: {e}")
 
+# Eliminar spec previo para evitar conflictos de rutas entre macOS y Windows
+old_spec = os.path.join(PROJECT_ROOT, "VmPOS.spec")
+if os.path.exists(old_spec):
+    try:
+        os.remove(old_spec)
+        print("  ✓ Eliminado archivo de especificación anterior: VmPOS.spec")
+    except Exception as e:
+        print(f"  ⚠️ Aviso spec: {e}")
+
 # 3. Compilación con PyInstaller
 print("\n[3/4] Compilando VmPOS.exe con PyInstaller...")
 
@@ -125,20 +134,14 @@ for h in hidden_imports:
 
 pyinstaller_args.append(os.path.join("interface", "inicio_sesion.py"))
 
-print("Ejecutando PyInstaller con argumentos configurados...")
-try:
-    import PyInstaller.__main__
-except ImportError:
-    print("\n❌ Error: PyInstaller no se pudo importar.")
-    print(f"Por favor instala PyInstaller ejecutando: {sys.executable} -m pip install pyinstaller")
-    sys.exit(1)
+pyinstaller_cmd = [sys.executable, "-m", "PyInstaller"] + pyinstaller_args
 
+print("Ejecutando PyInstaller...")
 try:
-    PyInstaller.__main__.run(pyinstaller_args)
-except SystemExit as e:
-    if e.code != 0:
-        print(f"\n❌ Error fatal en PyInstaller (código de salida: {e.code})")
-        sys.exit(1)
+    subprocess.run(pyinstaller_cmd, check=True)
+except subprocess.CalledProcessError as e:
+    print(f"\n❌ Error fatal en PyInstaller (código de salida: {e.returncode})")
+    sys.exit(e.returncode)
 except Exception as e:
     print(f"\n❌ Excepción durante PyInstaller: {e}")
     sys.exit(1)
@@ -167,7 +170,11 @@ iscc_candidates = [
     r"C:\Program Files\Inno Setup 6\ISCC.exe",
     r"C:\Program Files (x86)\Inno Setup 5\ISCC.exe",
     r"C:\Program Files\Inno Setup 5\ISCC.exe",
-    shutil.which("ISCC") or ""
+    r"C:\tools\InnoSetup\ISCC.exe",
+    r"C:\ProgramData\chocolatey\bin\iscc.exe",
+    r"C:\ProgramData\chocolatey\lib\innosetup\tools\ISCC.exe",
+    shutil.which("ISCC") or "",
+    shutil.which("iscc") or "",
 ]
 
 iscc_bin = next((p for p in iscc_candidates if p and os.path.exists(p)), None)

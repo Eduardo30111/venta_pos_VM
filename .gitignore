@@ -14,6 +14,7 @@ ENV/
 
 # PyInstaller / Compilación
 build/
+*.spec
 *.spec.bak
 
 # Archivos pesados de distribución (se descargan o generan con build_windows / build_macos)
