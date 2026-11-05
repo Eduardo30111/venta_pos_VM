@@ -283,6 +283,29 @@ def iniciar_clientes(parent_pid="", parent=None):
             if resp.status_code == 200:
                 clientes_cache = resp.json()
                 filtrar_tabla_local()
+                # Sincronizar resiliente con SQLite local
+                try:
+                    conn_sync = conectar_db()
+                    if conn_sync:
+                        cur_sync = conn_sync.cursor()
+                        for c in clientes_cache:
+                            c_doc = str(c.get("documento") or c.get("cedula") or "").strip()
+                            if c_doc:
+                                cur_sync.execute("SELECT id FROM clientes WHERE cedula = ?", (c_doc,))
+                                if cur_sync.fetchone():
+                                    cur_sync.execute("""
+                                        UPDATE clientes SET nombre=?, telefono=?, direccion=?, limite_credito=?, saldo_pendiente=?, permite_fiado=?, estado=?
+                                        WHERE cedula=?
+                                    """, (c.get("nombre"), c.get("telefono") or "", c.get("direccion") or "", float(c.get("limite_credito") or 0.0), float(c.get("saldo_pendiente") or 0.0), 1 if c.get("permite_fiado") else 0, c.get("estado") or "Activo", c_doc))
+                                else:
+                                    cur_sync.execute("""
+                                        INSERT INTO clientes (cedula, nombre, telefono, direccion, limite_credito, permite_fiado, saldo_pendiente, estado, fecha_registro)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                                    """, (c_doc, c.get("nombre"), c.get("telefono") or "", c.get("direccion") or "", float(c.get("limite_credito") or 0.0), 1 if c.get("permite_fiado") else 0, float(c.get("saldo_pendiente") or 0.0), c.get("estado") or "Activo"))
+                        conn_sync.commit()
+                        conn_sync.close()
+                except Exception as e_sync:
+                    print(f"Aviso sync SQLite: {e_sync}")
                 return
         except Exception as e:
             print(f"Aviso consultando clientes API: {e}")
@@ -646,6 +669,10 @@ def iniciar_clientes(parent_pid="", parent=None):
                 resp = api.delete(f"/clientes/{cid}", params={"permanente": True, "forzar": True})
                 if resp.status_code == 200:
                     msg_api = resp.json().get("message")
+                elif resp.status_code not in (404, 503):
+                    detail = resp.json().get("detail", "Error al procesar la solicitud en el servidor.")
+                    messagebox.showerror("Error", f"No se pudo eliminar: {detail}", parent=dlg_f)
+                    return
             except Exception as e_api:
                 print(f"Aviso API al eliminar: {e_api}")
 
@@ -1397,6 +1424,10 @@ def iniciar_clientes(parent_pid="", parent=None):
             if resp.status_code == 200:
                 data = resp.json()
                 msg_api = data.get("message")
+            elif resp.status_code not in (404, 503):
+                detail = resp.json().get("detail", "Error al procesar la solicitud en el servidor.")
+                messagebox.showerror("Error", f"No se pudo eliminar: {detail}", parent=ventana)
+                return
         except Exception as e:
             print(f"Aviso API al eliminar: {e}")
 

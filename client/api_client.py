@@ -163,12 +163,12 @@ class APIClient:
         except Exception as e:
             return DummyResponse(503, {"detail": str(e)})
             
-    def delete(self, endpoint):
+    def delete(self, endpoint, params=None):
         if not HTTPX_DISPONIBLE or self.servidor_disponible is False:
             return DummyResponse(503)
         try:
             client = self._client or httpx.Client(timeout=self.timeout)
-            resp = client.delete(f"{self.base_url}{endpoint}", headers=self._get_headers())
+            resp = client.delete(f"{self.base_url}{endpoint}", headers=self._get_headers(), params=params)
             self.servidor_disponible = True
             if resp.status_code == 401 and self.token:
                 self.clear_token()

@@ -579,16 +579,22 @@ async def delete_cliente(
     doc_respaldo = cliente.documento
     nom_respaldo = cliente.nombre
 
-    # 1. Limpiar abonos de cuentas asociadas al cliente
+    # 1. Limpiar movimientos contables de cuenta corriente de este cliente (evita FK en abonos)
+    cxc_subquery = select(CuentaPorCobrar.id).where(CuentaPorCobrar.cliente_id == id)
     await db.execute(
-        delete(Abono).where(
-            Abono.cuenta_id.in_(
-                select(CuentaPorCobrar.id).where(CuentaPorCobrar.cliente_id == id)
+        delete(MovimientoCuentaCliente).where(
+            or_(
+                MovimientoCuentaCliente.cliente_id == id,
+                MovimientoCuentaCliente.cuenta_id.in_(cxc_subquery)
             )
         )
     )
-    # 2. Limpiar movimientos contables de cuenta corriente de este cliente
-    await db.execute(delete(MovimientoCuentaCliente).where(MovimientoCuentaCliente.cliente_id == id))
+    # 2. Limpiar abonos de cuentas asociadas al cliente
+    await db.execute(
+        delete(Abono).where(
+            Abono.cuenta_id.in_(cxc_subquery)
+        )
+    )
     # 3. Limpiar cuentas por cobrar asociadas a este cliente
     await db.execute(delete(CuentaPorCobrar).where(CuentaPorCobrar.cliente_id == id))
     # 4. Desvincular de ventas para que el historial de facturas no se corrompa ni viole FK
