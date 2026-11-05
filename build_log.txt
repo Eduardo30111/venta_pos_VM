@@ -1,0 +1,203 @@
+Requirement already satisfied: pyinstaller in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (6.22.3)
+Requirement already satisfied: httpx in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (0.28.1)
+Requirement already satisfied: reportlab in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (5.1.0)
+Requirement already satisfied: matplotlib in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (3.11.2)
+Requirement already satisfied: pandas in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (3.1.1)
+Requirement already satisfied: openpyxl in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (3.1.5)
+Requirement already satisfied: pillow in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (13.0.0)
+Requirement already satisfied: pydantic in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (2.14.3)
+Requirement already satisfied: pydantic-settings in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (2.16.2)
+Requirement already satisfied: python-barcode in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (0.16.1)
+Requirement already satisfied: python-escpos in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (3.1)
+Requirement already satisfied: altgraph in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from pyinstaller) (0.17.5)
+Requirement already satisfied: packaging>=22.0 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from pyinstaller) (26.3)
+Requirement already satisfied: pefile>=2022.5.30 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from pyinstaller) (2024.8.26)
+Requirement already satisfied: pyinstaller-hooks-contrib>=2026.7 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from pyinstaller) (2026.9)
+Requirement already satisfied: pywin32-ctypes>=0.2.1 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from pyinstaller) (0.2.3)
+Requirement already satisfied: setuptools>=42.0.0 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from pyinstaller) (65.5.0)
+Requirement already satisfied: anyio in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from httpx) (4.16.0)
+Requirement already satisfied: certifi in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from httpx) (2026.10.23)
+Requirement already satisfied: httpcore==1.* in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from httpx) (1.0.9)
+Requirement already satisfied: idna in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from httpx) (3.20)
+Requirement already satisfied: h11>=0.16 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from httpcore==1.*->httpx) (0.16.0)
+Requirement already satisfied: charset-normalizer in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from reportlab) (3.5.2)
+Requirement already satisfied: contourpy>=1.0.1 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from matplotlib) (1.3.3)
+Requirement already satisfied: cycler>=0.10 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from matplotlib) (0.12.1)
+Requirement already satisfied: fonttools>=4.28.2 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from matplotlib) (4.68.0)
+Requirement already satisfied: kiwisolver>=1.3.1 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from matplotlib) (1.5.1)
+Requirement already satisfied: numpy>=1.25 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from matplotlib) (2.4.6)
+Requirement already satisfied: pyparsing>=3 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from matplotlib) (3.3.3)
+Requirement already satisfied: python-dateutil>=2.7 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from matplotlib) (4.0.0)
+Requirement already satisfied: tzdata in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from pandas) (2026.6)
+Requirement already satisfied: et-xmlfile in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from openpyxl) (2.0.0)
+Requirement already satisfied: annotated-types>=0.6.0 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from pydantic) (0.8.0)
+Requirement already satisfied: pydantic-core==2.50.4 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from pydantic) (2.50.4)
+Requirement already satisfied: typing-extensions>=4.16.0 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from pydantic) (4.16.0)
+Requirement already satisfied: typing-inspection>=0.4.4 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from pydantic) (0.4.5)
+Requirement already satisfied: python-dotenv>=1.2.2 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from pydantic-settings) (1.2.4)
+Requirement already satisfied: PyYAML in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from python-escpos) (6.0.3)
+Requirement already satisfied: appdirs in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from python-escpos) (1.4.4)
+Requirement already satisfied: argcomplete in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from python-escpos) (3.7.2)
+Requirement already satisfied: importlib-resources in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from python-escpos) (7.1.0)
+Requirement already satisfied: qrcode>=4.0 in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from python-escpos) (8.2)
+Requirement already satisfied: six in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from python-escpos) (1.17.0)
+Requirement already satisfied: colorama in C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages (from qrcode>=4.0->python-escpos) (0.4.6)
+178 INFO: PyInstaller: 6.22.3, contrib hooks: 2026.9
+178 INFO: Python: 3.11.9
+186 INFO: Platform: Windows-10-10.0.26100-SP0
+186 INFO: Python environment: C:\hostedtoolcache\windows\Python\3.11.9\x64
+188 INFO: wrote D:\a\venta_pos_VM\venta_pos_VM\VmPOS.spec
+194 INFO: Removing temporary files and cleaning cache in C:\Users\runneradmin\AppData\Local\pyinstaller
+849 INFO: Module search paths (PYTHONPATH):
+['D:\\a\\venta_pos_VM\\venta_pos_VM',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python311.zip',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\DLLs',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\win32',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\win32\\lib',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\pythonwin',
+ 'D:\\a\\venta_pos_VM\\venta_pos_VM\\interface']
+1146 INFO: Appending 'datas' from .spec
+1154 INFO: checking Analysis
+1154 INFO: Building Analysis because Analysis-00.toc is non existent
+1154 INFO: Looking for Python shared library...
+1154 INFO: Using Python shared library: C:\hostedtoolcache\windows\Python\3.11.9\x64\python311.dll
+1154 INFO: Running Analysis Analysis-00.toc
+1154 INFO: Target bytecode optimization level: 0
+1154 INFO: Initializing module dependency graph...
+1156 INFO: Initializing module graph hook caches...
+1174 INFO: Analyzing modules for base_library.zip ...
+2004 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+2113 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+3585 INFO: Processing standard module hook 'hook-math.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+3706 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+5376 INFO: Caching module dependency graph...
+5416 INFO: Analyzing D:\a\venta_pos_VM\venta_pos_VM\interface\inicio_sesion.py
+5434 INFO: Processing pre-find-module-path hook 'hook-tkinter.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_find_module_path'
+5434 INFO: TclTkInfo: initializing cached Tcl/Tk info...
+6431 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+7192 INFO: Processing standard module hook 'hook-certifi.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+7398 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+7508 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+7750 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+8191 INFO: Processing standard module hook 'hook-anyio.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+8493 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+8495 INFO: SetuptoolsInfo: initializing cached setuptools info...
+10394 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+10432 INFO: Processing standard module hook 'hook-sqlite3.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+10714 INFO: Processing standard module hook 'hook-PIL.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+10822 INFO: Processing standard module hook 'hook-PIL.Image.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+11079 INFO: Processing standard module hook 'hook-numpy.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+11600 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+12026 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+12532 INFO: Processing standard module hook 'hook-webbrowser.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+13887 INFO: Processing standard module hook 'hook-charset_normalizer.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+14297 INFO: Processing standard module hook 'hook-xml.etree.cElementTree.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+14489 INFO: Processing standard module hook 'hook-PIL.ImageFilter.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+15188 INFO: Processing standard module hook 'hook-reportlab.lib.utils.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+15323 INFO: Processing standard module hook 'hook-reportlab.pdfbase._fontdata.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+17255 INFO: Processing standard module hook 'hook-xml.dom.domreg.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+17379 INFO: Processing standard module hook 'hook-usb.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+17401 WARNING: No backend available
+18341 INFO: Processing standard module hook 'hook-openpyxl.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+19529 INFO: Processing standard module hook 'hook-pandas.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+20828 INFO: Processing standard module hook 'hook-zoneinfo.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+22319 INFO: Processing standard module hook 'hook-pandas.io.formats.style.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+25210 INFO: Processing standard module hook 'hook-pandas.plotting.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+25256 INFO: Processing standard module hook 'hook-matplotlib.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+25577 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+26121 INFO: Processing standard module hook 'hook-matplotlib.backend_bases.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+27040 INFO: Processing standard module hook 'hook-matplotlib.backends.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+27118 INFO: Processing standard module hook 'hook-matplotlib.pyplot.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+27241 INFO: Processing standard module hook 'hook-matplotlib.figure.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+28128 INFO: Processing standard module hook 'hook-dateutil.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+29829 INFO: Processing pre-safe-import-module hook 'hook-gi.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+31861 INFO: Processing standard module hook 'hook-pandas.io.clipboard.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+32816 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+32818 INFO: Processing standard module hook 'hook-importlib_resources.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+32846 INFO: Processing pre-safe-import-module hook 'hook-zipp.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+32902 INFO: Processing standard module hook 'hook-pywintypes.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+33812 INFO: Analyzing hidden import 'pydantic'
+33820 INFO: Processing standard module hook 'hook-pydantic.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+35456 INFO: Analyzing hidden import 'pydantic_settings'
+35718 INFO: Analyzing hidden import 'babel'
+35720 INFO: Processing standard module hook 'hook-babel.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+36021 INFO: Analyzing hidden import 'babel.numbers'
+36045 INFO: Analyzing hidden import 'escpos.cli'
+36113 INFO: Processing standard module hook 'hook-appdirs.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+36115 INFO: Analyzing hidden import 'escpos.katakana'
+36117 INFO: Processing module hooks (post-graph stage)...
+36406 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+36517 WARNING: Hidden import "importlib_resources.trees" not found!
+36517 INFO: Processing standard module hook 'hook-matplotlib.backends.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+36517 INFO: Matplotlib backend selection method: automatic discovery of used backends
+36866 INFO: Trying determine the default backend as first importable candidate from the list: ['QtAgg', 'Qt5Agg', 'Gtk4Agg', 'Gtk3Agg', 'TkAgg', 'WxAgg']
+42355 INFO: Selected matplotlib backends: ['TkAgg']
+42355 INFO: Extra dists for selected matplotlib backends: []
+42834 INFO: Processing standard module hook 'hook-PIL.SpiderImagePlugin.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+42875 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+42875 INFO: Processing standard module hook 'hook-tzdata.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+43446 INFO: Performing binary vs. data reclassification (2915 entries)
+44266 INFO: Looking for ctypes DLLs
+44426 INFO: Analyzing run-time hooks ...
+44436 INFO: Including run-time hook 'pyi_rth_pywintypes.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\rthooks'
+44436 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+44438 INFO: Including run-time hook 'pyi_rth_usb.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\rthooks'
+44442 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+44444 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+44446 INFO: Including run-time hook 'pyi_rth_mplconfig.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+44446 INFO: Processing pre-find-module-path hook 'hook-_pyi_rth_utils.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_find_module_path'
+44448 INFO: Processing standard module hook 'hook-_pyi_rth_utils.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+44456 INFO: Including run-time hook 'pyi_rth__tkinter.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+44547 INFO: Creating base_library.zip...
+44567 INFO: Looking for dynamic libraries
+46487 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\numpy.libs', 'C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\Lib\\site-packages\\pandas.libs']
+46487 INFO: Extra DLL search directories (PATH): []
+48391 INFO: Warnings written to D:\a\venta_pos_VM\venta_pos_VM\build\VmPOS\warn-VmPOS.txt
+48594 INFO: Graph cross-reference written to D:\a\venta_pos_VM\venta_pos_VM\build\VmPOS\xref-VmPOS.html
+48697 INFO: checking PYZ
+48697 INFO: Building PYZ because PYZ-00.toc is non existent
+48697 INFO: Building PYZ (ZlibArchive) D:\a\venta_pos_VM\venta_pos_VM\build\VmPOS\PYZ-00.pyz
+50644 INFO: Building PYZ (ZlibArchive) D:\a\venta_pos_VM\venta_pos_VM\build\VmPOS\PYZ-00.pyz completed successfully.
+50685 INFO: checking PKG
+50685 INFO: Building PKG because PKG-00.toc is non existent
+50685 INFO: Building PKG (CArchive) VmPOS.pkg
+50721 INFO: Building PKG (CArchive) VmPOS.pkg completed successfully.
+50723 INFO: Bootloader C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+50723 INFO: checking EXE
+50723 INFO: Building EXE because EXE-00.toc is non existent
+50723 INFO: Building EXE from EXE-00.toc
+50723 INFO: Copying bootloader EXE to D:\a\venta_pos_VM\venta_pos_VM\build\VmPOS\VmPOS.exe
+50725 INFO: Copying icon to EXE
+50727 INFO: Copying 0 resources to EXE
+50727 INFO: Embedding manifest in EXE
+50729 INFO: Appending PKG archive to EXE
+50740 INFO: Fixing EXE headers
+50894 INFO: Building EXE from EXE-00.toc completed successfully.
+50917 INFO: checking COLLECT
+50917 INFO: Building COLLECT because COLLECT-00.toc is non existent
+50919 INFO: Building COLLECT COLLECT-00.toc
+53197 INFO: Building COLLECT COLLECT-00.toc completed successfully.
+53264 INFO: Build complete! The results are available in: D:\a\venta_pos_VM\venta_pos_VM\dist
+======================================================================
+  COMPILADOR AUTOMÁTICO DE VmPOS PARA WINDOWS
+======================================================================
+Directorio del proyecto: D:\a\venta_pos_VM\venta_pos_VM
+Intérprete Python: C:\hostedtoolcache\windows\Python\3.11.9\x64\python.exe (3.11.9)
+----------------------------------------------------------------------
+
+[1/4] Verificando e instalando dependencias necesarias...
+
+[2/4] Limpiando carpetas build/ y ejecutables previos...
+
+[3/4] Compilando VmPOS.exe con PyInstaller...
+Ejecutando PyInstaller...
+Traceback (most recent call last):
+  File "D:\a\venta_pos_VM\venta_pos_VM\packaging\build_windows.py", line 152, in <module>
+    print("\n\u2713 ¡Ejecutable generado con éxito!")
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2713' in position 2: character maps to <undefined>
