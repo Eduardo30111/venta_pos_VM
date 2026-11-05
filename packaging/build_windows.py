@@ -42,16 +42,23 @@ except Exception as e:
     print(f"⚠️ Aviso al instalar dependencias con pip: {e}")
     print("Continuando con la compilación...")
 
-# 2. Limpiar carpetas anteriores
-print("\n[2/4] Limpiando carpetas build/ y dist/...")
-for folder in ["build", "dist"]:
-    folder_path = os.path.join(PROJECT_ROOT, folder)
-    if os.path.exists(folder_path):
-        try:
-            shutil.rmtree(folder_path)
-            print(f"  ✓ Eliminada carpeta previa: {folder}")
-        except Exception as e:
-            print(f"  ⚠️ No se pudo eliminar completamente {folder}: {e}")
+# 2. Limpiar carpetas y ejecutables anteriores sin borrar instaladores DMG/ZIP de macOS
+print("\n[2/4] Limpiando carpetas build/ y ejecutables previos...")
+build_dir = os.path.join(PROJECT_ROOT, "build")
+if os.path.exists(build_dir):
+    try:
+        shutil.rmtree(build_dir)
+        print("  ✓ Eliminada carpeta previa: build")
+    except Exception as e:
+        print(f"  ⚠️ Aviso build: {e}")
+
+vmpos_dist = os.path.join(PROJECT_ROOT, "dist", "VmPOS")
+if os.path.exists(vmpos_dist):
+    try:
+        shutil.rmtree(vmpos_dist)
+        print("  ✓ Eliminada carpeta previa: dist/VmPOS")
+    except Exception as e:
+        print(f"  ⚠️ Aviso dist/VmPOS: {e}")
 
 # 3. Compilación con PyInstaller
 print("\n[3/4] Compilando VmPOS.exe con PyInstaller...")
@@ -167,9 +174,9 @@ iscc_bin = next((p for p in iscc_candidates if p and os.path.exists(p)), None)
 iss_script = os.path.join(PROJECT_ROOT, "packaging", "installer_windows.iss")
 
 if iscc_bin and os.path.exists(iss_script):
-    print("\nCompilando instalador Setup con Inno Setup...")
+    print(f"\nCompilando instalador Setup con Inno Setup ({iscc_bin})...")
     try:
-        subprocess.run([iscc_bin, iss_script], check=True)
+        subprocess.run(f'"{iscc_bin}" "{iss_script}"', shell=True, check=True)
         setup_exe = os.path.join(PROJECT_ROOT, "dist", "VmPOS_Setup_v4.0.exe")
         print(f"✓ ¡Instalador Setup generado con éxito en: {setup_exe}!")
     except Exception as e:

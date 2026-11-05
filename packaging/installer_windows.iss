@@ -19,7 +19,6 @@ AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DisableProgramGroupPage=yes
-LicenseFile=
 OutputDir=..\dist
 OutputBaseFilename=VmPOS_Setup_v4.0
 SetupIconFile=..\assets\Salome.ico
