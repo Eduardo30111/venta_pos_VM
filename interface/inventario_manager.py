@@ -652,6 +652,237 @@ def ejecutar_traslado(codigo_o_id, origen, destino, cantidad, usuario="Administr
 # 5. COMPRAS Y ENTRADAS DE MERCANCÍA (CONVERSIÓN DE PRESENTACIONES)
 # ==============================================================================
 
+def _generar_numero_compra(cur):
+    """
+    Genera un número correlativo único de compra (CMP-00001).
+    No reutiliza números aunque se eliminen compras (evita choques con la
+    restricción UNIQUE y con las referencias históricas del Kárdex).
+    """
+    base = 0
+    try:
+        cur.execute("SELECT seq FROM sqlite_sequence WHERE name = 'compras_inventario'")
+        r = cur.fetchone()
+        if r and r[0]:
+            base = int(r[0])
+    except Exception:
+        pass
+    try:
+        cur.execute("SELECT COUNT(*) FROM compras_inventario")
+        base = max(base, int(cur.fetchone()[0] or 0))
+    except Exception:
+        pass
+    try:
+        cur.execute("SELECT referencia FROM movimientos_inventario WHERE referencia LIKE 'CMP-%'")
+        for (ref,) in cur.fetchall():
+            try:
+                base = max(base, int(str(ref).split("-")[1]))
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    n = base + 1
+    while True:
+        num = f"CMP-{n:05d}"
+        cur.execute("SELECT 1 FROM compras_inventario WHERE numero_compra = ?", (num,))
+        if not cur.fetchone():
+            return num
+        n += 1
+
+
+def _aplicar_items_compra(cur, compra_id, num_compra, items, ubicacion_destino, usuario,
+                          fecha_str, hora_str, etiqueta="Entrada por compra"):
+    """
+    Inserta el detalle de la compra, suma existencias en la ubicación destino,
+    recalcula el costo promedio ponderado y registra el movimiento en Kárdex.
+    Retorna el total de la compra.
+    """
+    total_compra = 0.0
+    for item in items:
+        codigo = str(item.get("codigo", "")).strip()
+        cur.execute("""
+            SELECT id, codigo, nombre, tipo_producto, unidad_medida, costo,
+                   COALESCE(stock_bodega, 0.0) as stock_bodega,
+                   COALESCE(stock_vitrina, 0.0) as stock_vitrina,
+                   COALESCE(stock, 0.0) as stock
+            FROM productos WHERE codigo = ? OR id = ?
+        """, (codigo, item.get("producto_id")))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Artículo con código '{codigo}' no encontrado en el catálogo.")
+
+        prod_id = row[0]
+        prod_cod = row[1]
+        prod_nom = row[2]
+        tipo_p = row[3]
+        unidad_base = row[4] or "Unidad"
+        costo_ant = float(row[5] or 0.0)
+        sb_ant = float(row[6])
+        sv_ant = float(row[7])
+        stock_total_ant = sb_ant + sv_ant
+
+        if tipo_p == "Servicio":
+            raise ValueError(f"El ítem '{prod_nom}' es un servicio y no puede recibir inventario físico.")
+
+        unidad_compra = str(item.get("unidad_compra", unidad_base)).strip()
+        factor_conv = float(item.get("factor_conversion", 1.0))
+        if factor_conv <= 0:
+            factor_conv = 1.0
+
+        cant_comprada = float(item.get("cantidad_comprada", 1.0))
+        costo_presentacion = float(item.get("costo_unidad_compra", 0.0))
+        if cant_comprada <= 0 or costo_presentacion <= 0:
+            raise ValueError(f"La cantidad y el costo de '{prod_nom}' deben ser mayores a cero.")
+
+        # Conversión matemática exacta
+        unidades_reales = cant_comprada * factor_conv
+        costo_unitario_convertido = costo_presentacion / factor_conv if factor_conv > 0 else costo_presentacion
+        subtotal_item = cant_comprada * costo_presentacion
+        total_compra += subtotal_item
+
+        # a) Detalle
+        cur.execute("""
+            INSERT INTO detalle_compras (
+                compra_id, producto_id, codigo_producto, nombre_producto,
+                unidad_compra, factor_conversion, cantidad_comprada,
+                cantidad_unidades, costo_unidad_compra, costo_unitario_convertido,
+                subtotal
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            compra_id, prod_id, prod_cod, prod_nom, unidad_compra,
+            factor_conv, cant_comprada, unidades_reales,
+            costo_presentacion, costo_unitario_convertido, subtotal_item
+        ))
+
+        # b) Existencias en la ubicación destino
+        if ubicacion_destino == "BODEGA":
+            sb_des = sb_ant + unidades_reales
+            sv_des = sv_ant
+            st_dest_ant, st_dest_des = sb_ant, sb_des
+        else:
+            sb_des = sb_ant
+            sv_des = sv_ant + unidades_reales
+            st_dest_ant, st_dest_des = sv_ant, sv_des
+
+        nuevo_stock_total = sb_des + sv_des
+
+        # Costo promedio ponderado
+        if nuevo_stock_total > 0 and costo_unitario_convertido > 0:
+            costo_ponderado = (
+                (stock_total_ant * costo_ant) + (unidades_reales * costo_unitario_convertido)
+            ) / nuevo_stock_total
+        else:
+            costo_ponderado = costo_unitario_convertido or costo_ant
+
+        cur.execute("""
+            UPDATE productos
+            SET stock_bodega = ?, stock_vitrina = ?, stock = ?, costo = ?, fecha_modificacion = ?
+            WHERE id = ?
+        """, (sb_des, sv_des, nuevo_stock_total, costo_ponderado, f"{fecha_str} {hora_str}", prod_id))
+
+        # c) Kárdex
+        cur.execute("""
+            INSERT INTO movimientos_inventario (
+                fecha, hora, producto_id, codigo_producto, nombre_producto,
+                tipo_movimiento, cantidad, unidad_medida, ubicacion_origen,
+                ubicacion_destino, stock_origen_ant, stock_origen_des,
+                stock_destino_ant, stock_destino_des, costo_unitario, valor_total,
+                referencia, usuario, observaciones, estado
+            ) VALUES (?, ?, ?, ?, ?, 'ENTRADA_COMPRA', ?, ?, 'PROVEEDOR', ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, 'Completado')
+        """, (
+            fecha_str, hora_str, prod_id, prod_cod, prod_nom,
+            unidades_reales, unidad_base, ubicacion_destino,
+            st_dest_ant, st_dest_des,
+            costo_unitario_convertido, subtotal_item, num_compra, usuario,
+            f"{etiqueta} {num_compra} ({cant_comprada:g} {unidad_compra} x {factor_conv:g} = {unidades_reales:g} {unidad_base})"
+        ))
+    return total_compra
+
+
+def _revertir_items_compra(cur, compra_id, num_compra, ubicacion_destino, usuario,
+                           fecha_str, hora_str, motivo="Reversión de compra"):
+    """
+    Deshace el efecto de una compra en el inventario: resta las unidades que
+    ingresaron, revierte el costo promedio ponderado y deja trazabilidad en el
+    Kárdex (movimiento REVERSION_COMPRA). Valida que haya existencias
+    suficientes (si la mercancía ya se vendió o trasladó no se puede revertir).
+    """
+    cur.execute("""
+        SELECT producto_id, codigo_producto, nombre_producto, cantidad_unidades,
+               costo_unitario_convertido, subtotal
+        FROM detalle_compras WHERE compra_id = ?
+    """, (compra_id,))
+    detalles = cur.fetchall()
+
+    for det in detalles:
+        prod_id, cod, nom = det[0], det[1], det[2]
+        unidades = float(det[3] or 0.0)
+        costo_u_compra = float(det[4] or 0.0)
+        subtotal = float(det[5] or 0.0)
+
+        cur.execute("""
+            SELECT unidad_medida, costo,
+                   COALESCE(stock_bodega, 0.0), COALESCE(stock_vitrina, 0.0)
+            FROM productos WHERE id = ?
+        """, (prod_id,))
+        p = cur.fetchone()
+        if not p:
+            # El artículo ya no existe en catálogo: no hay stock que revertir
+            continue
+
+        unidad_base = p[0] or "Unidad"
+        costo_act = float(p[1] or 0.0)
+        sb_ant = float(p[2])
+        sv_ant = float(p[3])
+        stock_total_ant = sb_ant + sv_ant
+
+        disponible = sb_ant if ubicacion_destino == "BODEGA" else sv_ant
+        if disponible + 1e-6 < unidades:
+            raise ValueError(
+                f"No se puede modificar/eliminar la compra {num_compra}: el artículo '{nom}' "
+                f"solo tiene {disponible:g} {unidad_base} en {ubicacion_destino} y la compra ingresó "
+                f"{unidades:g}. Parte de la mercancía ya fue vendida o trasladada."
+            )
+
+        if ubicacion_destino == "BODEGA":
+            sb_des, sv_des = sb_ant - unidades, sv_ant
+            st_ant, st_des = sb_ant, sb_des
+        else:
+            sb_des, sv_des = sb_ant, sv_ant - unidades
+            st_ant, st_des = sv_ant, sv_des
+
+        nuevo_total = sb_des + sv_des
+        # Reversión del costo promedio ponderado
+        if nuevo_total > 1e-9:
+            costo_rev = ((stock_total_ant * costo_act) - (unidades * costo_u_compra)) / nuevo_total
+            if costo_rev <= 0:
+                costo_rev = costo_act
+        else:
+            costo_rev = costo_act
+
+        cur.execute("""
+            UPDATE productos
+            SET stock_bodega = ?, stock_vitrina = ?, stock = ?, costo = ?, fecha_modificacion = ?
+            WHERE id = ?
+        """, (sb_des, sv_des, nuevo_total, costo_rev, f"{fecha_str} {hora_str}", prod_id))
+
+        cur.execute("""
+            INSERT INTO movimientos_inventario (
+                fecha, hora, producto_id, codigo_producto, nombre_producto,
+                tipo_movimiento, cantidad, unidad_medida, ubicacion_origen,
+                ubicacion_destino, stock_origen_ant, stock_origen_des,
+                stock_destino_ant, stock_destino_des, costo_unitario, valor_total,
+                referencia, usuario, observaciones, estado
+            ) VALUES (?, ?, ?, ?, ?, 'REVERSION_COMPRA', ?, ?, ?, 'PROVEEDOR', ?, ?, 0, 0, ?, ?, ?, ?, ?, 'Completado')
+        """, (
+            fecha_str, hora_str, prod_id, cod, nom,
+            unidades, unidad_base, ubicacion_destino,
+            st_ant, st_des,
+            costo_u_compra, subtotal, num_compra, usuario,
+            f"{motivo} {num_compra} (-{unidades:g} {unidad_base} de {ubicacion_destino})"
+        ))
+
+
 def registrar_compra_entrada(proveedor_id, proveedor_nombre, doc_referencia, items,
                              ubicacion_destino="BODEGA", usuario="Administrador", observaciones="", conn=None):
     """
@@ -674,19 +905,14 @@ def registrar_compra_entrada(proveedor_id, proveedor_nombre, doc_referencia, ite
             ubicacion_destino = "BODEGA"
 
         cur = conn.cursor()
-
-        # Generar número correlativo de compra
-        cur.execute("SELECT COUNT(*) FROM compras_inventario")
-        total_compras = cur.fetchone()[0]
-        num_compra = f"CMP-{total_compras + 1:05d}"
+        num_compra = _generar_numero_compra(cur)
 
         ahora = datetime.now()
         fecha_str = ahora.strftime("%Y-%m-%d")
         hora_str = ahora.strftime("%H:%M:%S")
 
-        total_compra = sum(float(it.get("subtotal", 0.0)) for it in items)
+        total_estimado = sum(float(it.get("subtotal", 0.0)) for it in items)
 
-        # 1. Cabecera de compra
         cur.execute("""
             INSERT INTO compras_inventario (
                 numero_compra, fecha, hora, proveedor_id, proveedor_nombre,
@@ -695,116 +921,140 @@ def registrar_compra_entrada(proveedor_id, proveedor_nombre, doc_referencia, ite
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Recibida')
         """, (
             num_compra, fecha_str, hora_str, proveedor_id, proveedor_nombre,
-            doc_referencia, ubicacion_destino, total_compra, usuario, observaciones
+            doc_referencia, ubicacion_destino, total_estimado, usuario, observaciones
         ))
         compra_id = cur.lastrowid
 
-        # 2. Detalle y afectación de inventario
-        for item in items:
-            codigo = str(item.get("codigo", "")).strip()
-            # Buscar producto
-            cur.execute("""
-                SELECT id, codigo, nombre, tipo_producto, unidad_medida, costo,
-                       COALESCE(stock_bodega, 0.0) as stock_bodega,
-                       COALESCE(stock_vitrina, 0.0) as stock_vitrina,
-                       COALESCE(stock, 0.0) as stock
-                FROM productos WHERE codigo = ? OR id = ?
-            """, (codigo, item.get("producto_id")))
-            row = cur.fetchone()
-            if not row:
-                raise ValueError(f"Artículo con código '{codigo}' no encontrado en el catálogo.")
-
-            prod_id = row[0]
-            prod_cod = row[1]
-            prod_nom = row[2]
-            tipo_p = row[3]
-            unidad_base = row[4] or "Unidad"
-            costo_ant = float(row[5] or 0.0)
-            sb_ant = float(row[6])
-            sv_ant = float(row[7])
-
-            if tipo_p == "Servicio":
-                raise ValueError(f"El ítem '{prod_nom}' es un servicio y no puede recibir inventario físico.")
-
-            unidad_compra = str(item.get("unidad_compra", unidad_base)).strip()
-            factor_conv = float(item.get("factor_conversion", 1.0))
-            if factor_conv <= 0:
-                factor_conv = 1.0
-
-            cant_comprada = float(item.get("cantidad_comprada", 1.0))
-            costo_presentacion = float(item.get("costo_unidad_compra", 0.0))
-
-            # Conversión matemática exacta
-            unidades_reales = cant_comprada * factor_conv
-            costo_unitario_convertido = costo_presentacion / factor_conv if factor_conv > 0 else costo_presentacion
-            subtotal_item = cant_comprada * costo_presentacion
-
-            # 2.a Guardar en detalle_compras
-            cur.execute("""
-                INSERT INTO detalle_compras (
-                    compra_id, producto_id, codigo_producto, nombre_producto,
-                    unidad_compra, factor_conversion, cantidad_comprada,
-                    cantidad_unidades, costo_unidad_compra, costo_unitario_convertido,
-                    subtotal
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                compra_id, prod_id, prod_cod, prod_nom, unidad_compra,
-                factor_conv, cant_comprada, unidades_reales,
-                costo_presentacion, costo_unitario_convertido, subtotal_item
-            ))
-
-            # 2.b Actualizar existencias en la ubicación destino
-            if ubicacion_destino == "BODEGA":
-                sb_des = sb_ant + unidades_reales
-                sv_des = sv_ant
-                st_orig_ant = 0.0
-                st_orig_des = 0.0
-                st_dest_ant = sb_ant
-                st_dest_des = sb_des
-            else:
-                sb_des = sb_ant
-                sv_des = sv_ant + unidades_reales
-                st_orig_ant = 0.0
-                st_orig_des = 0.0
-                st_dest_ant = sv_ant
-                st_dest_des = sv_des
-
-            nuevo_stock_total = sb_des + sv_des
-
-            # Actualización de costo en catálogo: si ya había existencias, costo promedio ponderado
-            # Nuevo costo = ((stock_anterior * costo_anterior) + (unidades_nuevas * costo_nuevo)) / nuevo_stock_total
-            if nuevo_stock_total > 0 and costo_unitario_convertido > 0:
-                costo_ponderado = (
-                    (row[8] * costo_ant) + (unidades_reales * costo_unitario_convertido)
-                ) / nuevo_stock_total
-            else:
-                costo_ponderado = costo_unitario_convertido or costo_ant
-
-            cur.execute("""
-                UPDATE productos
-                SET stock_bodega = ?, stock_vitrina = ?, stock = ?, costo = ?, fecha_modificacion = ?
-                WHERE id = ?
-            """, (sb_des, sv_des, nuevo_stock_total, costo_ponderado, f"{fecha_str} {hora_str}", prod_id))
-
-            # 2.c Registrar en movimientos_inventario (Kárdex)
-            cur.execute("""
-                INSERT INTO movimientos_inventario (
-                    fecha, hora, producto_id, codigo_producto, nombre_producto,
-                    tipo_movimiento, cantidad, unidad_medida, ubicacion_origen,
-                    ubicacion_destino, stock_origen_ant, stock_origen_des,
-                    stock_destino_ant, stock_destino_des, costo_unitario, valor_total,
-                    referencia, usuario, observaciones, estado
-                ) VALUES (?, ?, ?, ?, ?, 'ENTRADA_COMPRA', ?, ?, 'PROVEEDOR', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Completado')
-            """, (
-                fecha_str, hora_str, prod_id, prod_cod, prod_nom,
-                unidades_reales, unidad_base, ubicacion_destino,
-                st_orig_ant, st_orig_des, st_dest_ant, st_dest_des,
-                costo_unitario_convertido, subtotal_item, num_compra, usuario,
-                f"Entrada por compra {num_compra} ({cant_comprada:g} {unidad_compra} x {factor_conv:g} = {unidades_reales:g} {unidad_base})"
-            ))
+        total_compra = _aplicar_items_compra(
+            cur, compra_id, num_compra, items, ubicacion_destino, usuario, fecha_str, hora_str
+        )
+        cur.execute("UPDATE compras_inventario SET total_compra = ? WHERE id = ?", (total_compra, compra_id))
 
         conn.commit()
         return {"numero_compra": num_compra, "compra_id": compra_id, "total": total_compra}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise e
+    finally:
+        if cerrar_conn and conn:
+            conn.close()
+
+
+def obtener_detalle_compra(compra_id, conn=None):
+    """Retorna la cabecera y los ítems de una compra para visualizarla o editarla."""
+    cerrar_conn = False
+    if conn is None:
+        conn = conectar_db()
+        cerrar_conn = True
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM compras_inventario WHERE id = ?", (compra_id,))
+        cab = cur.fetchone()
+        if not cab:
+            return None
+        cur.execute("SELECT * FROM detalle_compras WHERE compra_id = ? ORDER BY id", (compra_id,))
+        items = [dict(r) for r in cur.fetchall()]
+        data = dict(cab)
+        data["items"] = items
+        return data
+    finally:
+        if cerrar_conn and conn:
+            conn.close()
+
+
+def editar_compra(compra_id, proveedor_id, proveedor_nombre, doc_referencia, items,
+                  ubicacion_destino="BODEGA", usuario="Administrador", observaciones=None, conn=None):
+    """
+    Edita una compra existente de forma atómica:
+    1) Revierte el efecto de los ítems anteriores en el inventario.
+    2) Reemplaza el detalle por los nuevos ítems y los aplica al inventario.
+    3) Actualiza la cabecera (proveedor, factura, destino y total).
+    Todo queda registrado en el Kárdex con la misma referencia de la compra.
+    """
+    cerrar_conn = False
+    if conn is None:
+        conn = conectar_db()
+        cerrar_conn = True
+    try:
+        if not items:
+            raise ValueError("La compra debe tener al menos un artículo. Si desea quitarla por completo, use 'Eliminar'.")
+
+        ubicacion_destino = str(ubicacion_destino).strip().upper()
+        if ubicacion_destino not in ("BODEGA", "VITRINA"):
+            ubicacion_destino = "BODEGA"
+
+        conn.row_factory = None
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT numero_compra, ubicacion_destino, observaciones
+            FROM compras_inventario WHERE id = ?
+        """, (compra_id,))
+        cab = cur.fetchone()
+        if not cab:
+            raise ValueError("La compra seleccionada ya no existe.")
+        num_compra, ubic_ant, obs_ant = cab[0], (cab[1] or "BODEGA").upper(), cab[2] or ""
+
+        ahora = datetime.now()
+        fecha_str = ahora.strftime("%Y-%m-%d")
+        hora_str = ahora.strftime("%H:%M:%S")
+
+        _revertir_items_compra(cur, compra_id, num_compra, ubic_ant, usuario, fecha_str, hora_str,
+                               motivo="Edición: reversión de")
+        cur.execute("DELETE FROM detalle_compras WHERE compra_id = ?", (compra_id,))
+
+        total = _aplicar_items_compra(cur, compra_id, num_compra, items, ubicacion_destino, usuario,
+                                      fecha_str, hora_str, etiqueta="Edición: nueva entrada de")
+
+        cur.execute("""
+            UPDATE compras_inventario
+            SET proveedor_id = ?, proveedor_nombre = ?, documento_referencia = ?,
+                ubicacion_destino = ?, total_compra = ?, observaciones = ?
+            WHERE id = ?
+        """, (
+            proveedor_id, proveedor_nombre, doc_referencia, ubicacion_destino, total,
+            obs_ant if observaciones is None else observaciones, compra_id
+        ))
+        conn.commit()
+        return {"numero_compra": num_compra, "compra_id": compra_id, "total": total}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise e
+    finally:
+        if cerrar_conn and conn:
+            conn.close()
+
+
+def eliminar_compra(compra_id, usuario="Administrador", conn=None):
+    """
+    Elimina una compra: revierte las existencias que ingresó (dejando la
+    trazabilidad en Kárdex como REVERSION_COMPRA) y borra la compra y su detalle.
+    """
+    cerrar_conn = False
+    if conn is None:
+        conn = conectar_db()
+        cerrar_conn = True
+    try:
+        conn.row_factory = None
+        cur = conn.cursor()
+        cur.execute("SELECT numero_compra, ubicacion_destino FROM compras_inventario WHERE id = ?", (compra_id,))
+        cab = cur.fetchone()
+        if not cab:
+            raise ValueError("La compra seleccionada ya no existe.")
+        num_compra, ubic = cab[0], (cab[1] or "BODEGA").upper()
+
+        ahora = datetime.now()
+        fecha_str = ahora.strftime("%Y-%m-%d")
+        hora_str = ahora.strftime("%H:%M:%S")
+
+        _revertir_items_compra(cur, compra_id, num_compra, ubic, usuario, fecha_str, hora_str,
+                               motivo="Eliminación de compra")
+        cur.execute("DELETE FROM detalle_compras WHERE compra_id = ?", (compra_id,))
+        cur.execute("DELETE FROM compras_inventario WHERE id = ?", (compra_id,))
+        conn.commit()
+        return {"numero_compra": num_compra}
     except Exception as e:
         if conn:
             conn.rollback()

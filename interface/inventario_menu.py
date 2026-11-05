@@ -53,6 +53,7 @@ try:
         obtener_existencias_bodega, obtener_existencias_vitrina,
         ejecutar_traslado, registrar_compra_entrada, registrar_ajuste_inventario,
         obtener_kardex, obtener_historial_traslados, obtener_historial_compras,
+        obtener_detalle_compra, editar_compra, eliminar_compra,
         obtener_alertas_inventario, obtener_resumen_indicadores,
         TODAS_LAS_UNIDADES, UNIDADES_DISCRETAS
     )
@@ -64,6 +65,7 @@ except ImportError:
         obtener_existencias_bodega, obtener_existencias_vitrina,
         ejecutar_traslado, registrar_compra_entrada, registrar_ajuste_inventario,
         obtener_kardex, obtener_historial_traslados, obtener_historial_compras,
+        obtener_detalle_compra, editar_compra, eliminar_compra,
         obtener_alertas_inventario, obtener_resumen_indicadores,
         TODAS_LAS_UNIDADES, UNIDADES_DISCRETAS
     )
@@ -1133,9 +1135,13 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     tk.Label(bar_cmp, text="📥 Recepción de Compras de Mercancía a Proveedores", font=("Segoe UI", 12, "bold"),
              bg=t["bg_surface"], fg=t["text_main"]).pack(side="left")
 
-    def abrir_modal_nueva_compra():
+    def abrir_modal_nueva_compra(compra_existente=None):
+        es_edicion = bool(compra_existente)
         modal = tk.Toplevel(ventana)
-        modal.title("Registrar Entrada / Compra de Mercancía")
+        if es_edicion:
+            modal.title(f"Editar Entrada / Compra {compra_existente.get('numero_compra', '')}")
+        else:
+            modal.title("Registrar Entrada / Compra de Mercancía")
         t_mod = aplicar_tema(modal)
         calcular_geometria_segura(modal, 780, 640, 680, 500)
         modal.configure(bg=t_mod["bg_surface"])
@@ -1309,6 +1315,18 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         tree_ci.pack(side="left", fill="both", expand=True)
         sc_ci_y.pack(side="right", fill="y")
 
+        def _recalcular_total():
+            tot = sum(it["subtotal"] for it in items_en_compra)
+            lbl_total_compra.config(text=f"TOTAL ENTRADA: {formato_peso(tot)}")
+
+        def _insertar_fila_item(item_obj):
+            tree_ci.insert("", "end", values=(
+                item_obj["codigo"], item_obj["nombre"], item_obj["unidad_compra"],
+                f"{item_obj['factor_conversion']:g}", f"{item_obj['cantidad_comprada']:g}",
+                f"{item_obj['cantidad_unidades']:g}", formato_peso(item_obj["costo_unidad_compra"]),
+                formato_peso(item_obj["costo_unitario_convertido"]), formato_peso(item_obj["subtotal"])
+            ))
+
         def quitar_item_tabla():
             sel = tree_ci.selection()
             if not sel:
@@ -1318,11 +1336,50 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
             tree_ci.delete(sel[0])
             if 0 <= idx < len(items_en_compra):
                 items_en_compra.pop(idx)
-            tot = sum(it["subtotal"] for it in items_en_compra)
-            lbl_total_compra.config(text=f"TOTAL ENTRADA: {formato_peso(tot)}")
+            _recalcular_total()
+
+        estado_edicion = {"pendiente": False}
+
+        def editar_item_tabla(event=None):
+            """Carga el ítem seleccionado en el formulario superior para corregirlo y volver a agregarlo."""
+            sel = tree_ci.selection()
+            if not sel:
+                messagebox.showwarning("Aviso", "Seleccione una fila de la tabla para editarla.", parent=modal)
+                return
+            if estado_edicion["pendiente"]:
+                messagebox.showwarning("Aviso", "Primero vuelva a agregar el ítem que está editando (➕ Agregar a la Entrada).", parent=modal)
+                return
+            idx = tree_ci.index(sel[0])
+            if not (0 <= idx < len(items_en_compra)):
+                return
+            it = items_en_compra.pop(idx)
+            tree_ci.delete(sel[0])
+            _recalcular_total()
+            estado_edicion["pendiente"] = True
+
+            vals = list(cb_ai_prod["values"])
+            objetivo = next((v for v in vals if v.startswith(f"{it['codigo']} -")), None)
+            if objetivo is None:
+                objetivo = f"{it['codigo']} - {it['nombre']}"
+                cb_ai_prod["values"] = vals + [objetivo]
+            var_ai_prod.set(objetivo)
+            if it["unidad_compra"] not in cb_ai_unid["values"]:
+                cb_ai_unid["values"] = list(cb_ai_unid["values"]) + [it["unidad_compra"]]
+            var_ai_unid.set(it["unidad_compra"])
+            e_ai_factor.delete(0, tk.END)
+            e_ai_factor.insert(0, f"{it['factor_conversion']:g}")
+            e_ai_cant.delete(0, tk.END)
+            e_ai_cant.insert(0, f"{it['cantidad_comprada']:g}")
+            e_ai_costo.set_value(it["costo_unidad_compra"])
+            actualizar_calculo_item()
+            lbl_ai_res.config(text=f"✏️ Editando: {it['nombre']}. Corrija los valores y pulse '➕ Agregar a la Entrada'.")
+            e_ai_cant.focus_set()
+
+        tree_ci.bind("<Double-1>", editar_item_tabla)
 
         f_table_actions = tk.Frame(modal, bg=t_mod["bg_surface"], padx=20)
         f_table_actions.pack(fill="x")
+        crear_boton(f_table_actions, "Editar Ítem", editar_item_tabla, tipo="primary", icono="✏️", tam_fuente=8, padx=6, pady=2).pack(side="left", padx=(0, 6))
         crear_boton(f_table_actions, "Quitar Ítem", quitar_item_tabla, tipo="secondary", icono="🗑️", tam_fuente=8, padx=6, pady=2).pack(side="left")
 
         def agregar_item_tabla():
@@ -1361,13 +1418,9 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
                     "subtotal": sub
                 }
                 items_en_compra.append(item_obj)
-                tree_ci.insert("", "end", values=(
-                    cod, art["nombre"], item_obj["unidad_compra"], f"{fac:g}",
-                    f"{cant:g}", f"{unid_base_tot:g}", formato_peso(cost_emp),
-                    formato_peso(c_unit), formato_peso(sub)
-                ))
-                tot = sum(it["subtotal"] for it in items_en_compra)
-                lbl_total_compra.config(text=f"TOTAL ENTRADA: {formato_peso(tot)}")
+                estado_edicion["pendiente"] = False
+                _insertar_fila_item(item_obj)
+                _recalcular_total()
                 lbl_ai_res.config(text=f"✅ Agregado: {cant:g} {var_ai_unid.get()} de {art['nombre']} ({formato_peso(sub)})")
                 # Resetear campos para agilizar el ingreso del siguiente artículo
                 e_ai_cant.delete(0, tk.END)
@@ -1386,6 +1439,11 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         e_ai_costo.bind("<Return>", lambda e: agregar_item_tabla())
 
         def guardar_compra():
+            # Si hay un ítem cargado en el formulario por "Editar Ítem" y no se re-agregó, agregarlo
+            if estado_edicion["pendiente"]:
+                agregar_item_tabla()
+                if estado_edicion["pendiente"]:
+                    return  # La validación falló; el usuario debe corregir los valores
             # Si no hay ítems pero hay datos válidos en el formulario superior, auto-agregar
             if not items_en_compra:
                 sel_art = var_ai_prod.get()
@@ -1404,50 +1462,144 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
             if prov_txt != "Ninguno":
                 try:
                     prov_id = int(prov_txt.split(" - ")[0])
-                    prov_nom = prov_txt.split(" - ")[1]
+                    prov_nom = prov_txt.split(" - ", 1)[1]
                 except Exception:
                     pass
             doc_fac = e_cp_fac.get().strip()
             dest = var_cp_dest.get()
 
             try:
-                res = registrar_compra_entrada(
-                    proveedor_id=prov_id,
-                    proveedor_nombre=prov_nom,
-                    doc_referencia=doc_fac,
-                    items=items_en_compra,
-                    ubicacion_destino=dest,
-                    usuario=usuario_actual
-                )
-                messagebox.showinfo("Éxito", f"✅ Entrada de mercancía {res['numero_compra']} registrada correctamente.\nTotal: {formato_peso(res['total'])}", parent=modal)
+                if es_edicion:
+                    res = editar_compra(
+                        compra_id=compra_existente["id"],
+                        proveedor_id=prov_id,
+                        proveedor_nombre=prov_nom,
+                        doc_referencia=doc_fac,
+                        items=items_en_compra,
+                        ubicacion_destino=dest,
+                        usuario=usuario_actual
+                    )
+                    messagebox.showinfo("Éxito", f"✅ Entrada {res['numero_compra']} actualizada correctamente.\nNuevo total: {formato_peso(res['total'])}", parent=modal)
+                else:
+                    res = registrar_compra_entrada(
+                        proveedor_id=prov_id,
+                        proveedor_nombre=prov_nom,
+                        doc_referencia=doc_fac,
+                        items=items_en_compra,
+                        ubicacion_destino=dest,
+                        usuario=usuario_actual
+                    )
+                    messagebox.showinfo("Éxito", f"✅ Entrada de mercancía {res['numero_compra']} registrada correctamente.\nTotal: {formato_peso(res['total'])}", parent=modal)
                 modal.destroy()
-                try:
-                    cargar_tabla_bodega()
-                except Exception:
-                    pass
-                try:
-                    cargar_tabla_vitrina()
-                except Exception:
-                    pass
-                try:
-                    cargar_tabla_catalogo()
-                except Exception:
-                    pass
-                try:
-                    cargar_tabla_compras()
-                except Exception:
-                    pass
-                try:
-                    cargar_tabla_kardex()
-                except Exception:
-                    pass
+                refrescar_tras_cambio_compra()
             except Exception as ex:
                 messagebox.showerror("Error al Guardar", str(ex), parent=modal)
 
+        # Precargar la información de la compra cuando se abre en modo edición
+        if es_edicion:
+            prov_id_ex = compra_existente.get("proveedor_id")
+            prov_nom_ex = compra_existente.get("proveedor_nombre") or ""
+            if prov_id_ex:
+                etiqueta_prov = next((f"{p[0]} - {p[1]}" for p in p_list if str(p[0]) == str(prov_id_ex)),
+                                     f"{prov_id_ex} - {prov_nom_ex}")
+                if etiqueta_prov not in cb_cp_prov["values"]:
+                    cb_cp_prov["values"] = list(cb_cp_prov["values"]) + [etiqueta_prov]
+                var_cp_prov.set(etiqueta_prov)
+            else:
+                if "Ninguno" not in cb_cp_prov["values"]:
+                    cb_cp_prov["values"] = list(cb_cp_prov["values"]) + ["Ninguno"]
+                var_cp_prov.set("Ninguno")
+            e_cp_fac.insert(0, compra_existente.get("documento_referencia") or "")
+            var_cp_dest.set((compra_existente.get("ubicacion_destino") or "BODEGA").upper())
+
+            for d in compra_existente.get("items", []):
+                it = {
+                    "producto_id": d.get("producto_id"),
+                    "codigo": d.get("codigo_producto"),
+                    "nombre": d.get("nombre_producto"),
+                    "unidad_compra": d.get("unidad_compra") or "Unidad",
+                    "factor_conversion": float(d.get("factor_conversion") or 1.0),
+                    "cantidad_comprada": float(d.get("cantidad_comprada") or 0.0),
+                    "cantidad_unidades": float(d.get("cantidad_unidades") or 0.0),
+                    "costo_unidad_compra": float(d.get("costo_unidad_compra") or 0.0),
+                    "costo_unitario_convertido": float(d.get("costo_unitario_convertido") or 0.0),
+                    "subtotal": float(d.get("subtotal") or 0.0),
+                }
+                items_en_compra.append(it)
+                _insertar_fila_item(it)
+            _recalcular_total()
+            e_ai_costo.set_value(0)
+            lbl_ai_res.config(text=f"✏️ Editando {compra_existente.get('numero_compra', '')} ({compra_existente.get('fecha', '')}). "
+                                   "Doble clic en un ítem para modificarlo.")
+
         crear_boton(f_foot_cp, "Cancelar", modal.destroy, tipo="secondary", tam_fuente=9).pack(side="right", padx=5)
-        crear_boton(f_foot_cp, "Confirmar Entrada de Mercancía", guardar_compra, tipo="success", icono="💾", tam_fuente=10).pack(side="right", padx=5)
+        texto_guardar = "Guardar Cambios de la Entrada" if es_edicion else "Confirmar Entrada de Mercancía"
+        crear_boton(f_foot_cp, texto_guardar, guardar_compra, tipo="success", icono="💾", tam_fuente=10).pack(side="right", padx=5)
+
+    def refrescar_tras_cambio_compra():
+        for fn in (lambda: cargar_tabla_bodega(), lambda: cargar_tabla_vitrina(),
+                   lambda: cargar_tabla_catalogo(), lambda: cargar_tabla_compras(),
+                   lambda: cargar_tabla_kardex(), lambda: refrescar_kpis()):
+            try:
+                fn()
+            except Exception:
+                pass
+
+    def _compra_seleccionada():
+        sel = tree_cmp.selection()
+        if not sel:
+            messagebox.showwarning("Aviso", "Seleccione una entrada / compra de la tabla.", parent=ventana)
+            return None
+        try:
+            return int(sel[0])
+        except (TypeError, ValueError):
+            return None
+
+    def editar_compra_seleccionada(event=None):
+        cid = _compra_seleccionada()
+        if cid is None:
+            return
+        datos = obtener_detalle_compra(cid)
+        if not datos:
+            messagebox.showerror("Error", "La compra seleccionada ya no existe.", parent=ventana)
+            cargar_tabla_compras()
+            return
+        abrir_modal_nueva_compra(compra_existente=datos)
+
+    def eliminar_compra_seleccionada():
+        cid = _compra_seleccionada()
+        if cid is None:
+            return
+        datos = obtener_detalle_compra(cid)
+        if not datos:
+            cargar_tabla_compras()
+            return
+        resumen = "\n".join(
+            f"  • {d['nombre_producto']}: {float(d['cantidad_unidades']):g} unid."
+            for d in datos.get("items", [])[:8]
+        )
+        if len(datos.get("items", [])) > 8:
+            resumen += f"\n  • ... y {len(datos['items']) - 8} ítems más"
+        if not messagebox.askyesno(
+            "Eliminar Entrada / Compra",
+            f"¿Eliminar la entrada {datos['numero_compra']} de {datos['proveedor_nombre']} "
+            f"por {formato_peso(datos['total_compra'])}?\n\n"
+            f"Se descontarán de {datos['ubicacion_destino']} las unidades que ingresaron:\n{resumen}\n\n"
+            "Esta acción quedará registrada en el Kárdex.",
+            parent=ventana
+        ):
+            return
+        try:
+            res = eliminar_compra(cid, usuario=usuario_actual)
+            messagebox.showinfo("Eliminada", f"🗑️ La entrada {res['numero_compra']} fue eliminada y el inventario se ajustó.", parent=ventana)
+            refrescar_tras_cambio_compra()
+        except Exception as ex:
+            messagebox.showerror("No se pudo eliminar", str(ex), parent=ventana)
 
     crear_boton(bar_cmp, "Registrar Nueva Entrada / Compra", abrir_modal_nueva_compra, tipo="success", icono="➕", tam_fuente=9).pack(side="right")
+    crear_boton(bar_cmp, "Eliminar", eliminar_compra_seleccionada, tipo="danger", icono="🗑️", tam_fuente=9).pack(side="right", padx=(0, 6))
+    crear_boton(bar_cmp, "Ver / Editar", editar_compra_seleccionada, tipo="primary", icono="✏️", tam_fuente=9).pack(side="right", padx=(0, 6))
+
 
     frame_tree_cmp = tk.Frame(tab_compras, bg=t["bg_surface"])
     frame_tree_cmp.pack(fill="both", expand=True, padx=15, pady=(0, 15))
@@ -1477,12 +1629,15 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
             tree_cmp.delete(r)
         lista = obtener_historial_compras(limit=100)
         for c_item in lista:
-            tree_cmp.insert("", "end", values=(
+            tree_cmp.insert("", "end", iid=str(c_item["id"]), values=(
                 c_item["numero_compra"], c_item["fecha"], c_item["hora"],
                 c_item["proveedor_nombre"], c_item["documento_referencia"] or "—",
                 c_item["ubicacion_destino"], formato_peso(c_item["total_compra"]),
                 c_item["cantidad_items"], c_item["usuario"], c_item["estado"]
             ))
+
+    tree_cmp.bind("<Double-1>", editar_compra_seleccionada)
+    tree_cmp.bind("<Delete>", lambda e: eliminar_compra_seleccionada())
 
     # ==========================================================================
     # SECCIÓN 6: KÁRDEX E HISTORIAL DE MOVIMIENTOS
@@ -1498,7 +1653,7 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
 
     tk.Label(bar_kdx, text="Tipo de Movimiento:", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 5))
     var_tipo_kdx = tk.StringVar(value="Todos")
-    tipos_mov_list = ["Todos", "ENTRADA_COMPRA", "ENTRADA_INICIAL", "TRASLADO_BODEGA_A_VITRINA", "TRASLADO_VITRINA_A_BODEGA", "VENTA", "DEVOLUCION_VENTA", "AJUSTE_POSITIVO", "AJUSTE_NEGATIVO"]
+    tipos_mov_list = ["Todos", "ENTRADA_COMPRA", "ENTRADA_INICIAL", "TRASLADO_BODEGA_A_VITRINA", "TRASLADO_VITRINA_A_BODEGA", "VENTA", "DEVOLUCION_VENTA", "AJUSTE_POSITIVO", "AJUSTE_NEGATIVO", "REVERSION_COMPRA"]
     cb_tipo_kdx = ttk.Combobox(bar_kdx, textvariable=var_tipo_kdx, values=tipos_mov_list, state="readonly", width=22)
     cb_tipo_kdx.pack(side="left", padx=(0, 15))
 
