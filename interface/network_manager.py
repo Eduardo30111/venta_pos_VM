@@ -332,10 +332,11 @@ def construir_url_servidor(ip: str = None, puerto: int = None) -> str:
 def iniciar_servidor_segundo_plano() -> Tuple[bool, str]:
     """
     Intenta iniciar el servidor FastAPI local en segundo plano si no está activo,
-    sin mostrar consolas negras en Windows y habilitando el puerto en Firewall si es necesario.
+    ejecutándolo preferentemente en un hilo en segundo plano o mediante subproceso sin ventanas negras.
     """
     global _PROCESO_SERVIDOR_LOCAL
     import shutil
+    import threading
 
     # 1. Verificar si ya está escuchando
     cfg = obtener_config_red()
@@ -343,11 +344,50 @@ def iniciar_servidor_segundo_plano() -> Tuple[bool, str]:
     if verificar_puerto_abierto("127.0.0.1", puerto, timeout=0.5):
         return True, f"El servidor ya está activo y escuchando en el puerto {puerto}."
 
-    server_dir = os.path.join(_PROJECT_ROOT, "server")
-    if not os.path.exists(server_dir):
-        return False, f"No se encontró el directorio del servidor en {server_dir}"
+    # 2. Habilitar regla de Firewall en Windows para el puerto de comunicación multi-caja
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                f'netsh advfirewall firewall add rule name="VmPOS Server {puerto}" dir=in action=allow protocol=TCP localport={puerto}',
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=0x08000000
+            )
+        except Exception:
+            pass
 
-    # 2. Localizar el intérprete Python adecuado (evitando binario congelado .exe/.app)
+    # 3. Intentar iniciar uvicorn directamente en un hilo dentro del proceso (funciona en .exe congelado)
+    try:
+        from server.main import app as fastapi_app
+        import uvicorn
+
+        def _run_uvicorn_thread():
+            try:
+                uvicorn.run(fastapi_app, host="0.0.0.0", port=puerto, log_level="warning")
+            except Exception as _e_srv:
+                print(f"Error en hilo de servidor uvicorn: {_e_srv}")
+
+        srv_thread = threading.Thread(target=_run_uvicorn_thread, daemon=True, name="VmPOS_Internal_Server")
+        srv_thread.start()
+
+        # Esperar hasta 5 segundos a que el puerto abra
+        for _ in range(15):
+            time.sleep(0.3)
+            if verificar_puerto_abierto("127.0.0.1", puerto, timeout=0.2):
+                return True, f"Servidor iniciado exitosamente en http://0.0.0.0:{puerto}"
+    except Exception as e_thread:
+        print(f"Aviso al iniciar servidor en hilo interno: {e_thread}, intentando por subproceso...")
+
+    # 4. Fallback por subproceso si el hilo falló
+    server_dir = os.path.join(_PROJECT_ROOT, "server")
+    if not os.path.exists(server_dir) and getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        server_dir = os.path.join(sys._MEIPASS, "server")
+
+    if not os.path.exists(server_dir):
+        return False, f"El servidor central está empaquetado. Conecta esta caja al servidor principal o verifica la conexión de red."
+
+    # Localizar intérprete Python
     python_candidatos = [
         os.path.join(_PROJECT_ROOT, "venv", "Scripts", "python.exe"),
         os.path.join(_PROJECT_ROOT, ".venv", "Scripts", "python.exe"),
@@ -372,19 +412,6 @@ def iniciar_servidor_segundo_plano() -> Tuple[bool, str]:
     if not python_bin:
         python_bin = sys.executable
 
-    # 3. Habilitar regla de Firewall en Windows para el puerto de comunicación multi-caja
-    if sys.platform == "win32":
-        try:
-            subprocess.run(
-                f'netsh advfirewall firewall add rule name="VmPOS Server {puerto}" dir=in action=allow protocol=TCP localport={puerto}',
-                shell=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=0x08000000
-            )
-        except Exception:
-            pass
-
     try:
         cmd = [
             python_bin, "-m", "uvicorn", "server.main:app",
@@ -397,17 +424,16 @@ def iniciar_servidor_segundo_plano() -> Tuple[bool, str]:
             "stderr": subprocess.DEVNULL
         }
         if sys.platform == "win32":
-            popen_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW silencioso
+            popen_kwargs["creationflags"] = 0x08000000
 
         _PROCESO_SERVIDOR_LOCAL = subprocess.Popen(cmd, **popen_kwargs)
 
-        # Esperar hasta 5 segundos a que el puerto abra
         for _ in range(10):
             time.sleep(0.5)
             if verificar_puerto_abierto("127.0.0.1", puerto, timeout=0.2):
                 return True, f"Servidor iniciado exitosamente en http://0.0.0.0:{puerto}"
 
-        return False, "El proceso del servidor se inició en segundo plano pero aún no responde en el puerto. Verifique la base de datos o dependencias."
+        return False, "El proceso del servidor se inició en segundo plano pero aún no responde en el puerto."
     except Exception as e:
         return False, f"Error al iniciar el servidor local: {e}"
 

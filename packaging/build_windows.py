@@ -85,6 +85,7 @@ add_data = [
     f"database{sep}database",
     f"interface{sep}interface",
     f"client{sep}client",
+    f"server{sep}server",
 ]
 
 net_config = os.path.join(PROJECT_ROOT, "network_config.json")
@@ -113,7 +114,15 @@ hidden_imports = [
     "barcode.ean",
     "barcode.writer",
     "babel",
-    "babel.numbers"
+    "babel.numbers",
+    "server",
+    "server.main",
+    "server.config",
+    "server.database",
+    "uvicorn",
+    "fastapi",
+    "sqlalchemy",
+    "asyncpg"
 ]
 
 if sys.platform.startswith("win"):
