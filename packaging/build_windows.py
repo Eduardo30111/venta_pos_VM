@@ -9,6 +9,11 @@ import sys
 import shutil
 import subprocess
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(PROJECT_ROOT)
 
@@ -39,8 +44,8 @@ cmd_pip = [sys.executable, "-m", "pip", "install", "--upgrade"] + DEPENDENCIAS
 try:
     res = subprocess.run(cmd_pip, check=True)
 except Exception as e:
-    print(f"⚠️ Aviso al instalar dependencias con pip: {e}")
-    print("Continuando con la compilación...")
+    print(f"[AVISO] Aviso al instalar dependencias con pip: {e}")
+    print("Continuando con la compilacion...")
 
 # 2. Limpiar carpetas y ejecutables anteriores sin borrar instaladores DMG/ZIP de macOS
 print("\n[2/4] Limpiando carpetas build/ y ejecutables previos...")
@@ -48,26 +53,26 @@ build_dir = os.path.join(PROJECT_ROOT, "build")
 if os.path.exists(build_dir):
     try:
         shutil.rmtree(build_dir)
-        print("  ✓ Eliminada carpeta previa: build")
+        print("  [OK] Eliminada carpeta previa: build")
     except Exception as e:
-        print(f"  ⚠️ Aviso build: {e}")
+        print(f"  [AVISO] Aviso build: {e}")
 
 vmpos_dist = os.path.join(PROJECT_ROOT, "dist", "VmPOS")
 if os.path.exists(vmpos_dist):
     try:
         shutil.rmtree(vmpos_dist)
-        print("  ✓ Eliminada carpeta previa: dist/VmPOS")
+        print("  [OK] Eliminada carpeta previa: dist/VmPOS")
     except Exception as e:
-        print(f"  ⚠️ Aviso dist/VmPOS: {e}")
+        print(f"  [AVISO] Aviso dist/VmPOS: {e}")
 
 # Eliminar spec previo para evitar conflictos de rutas entre macOS y Windows
 old_spec = os.path.join(PROJECT_ROOT, "VmPOS.spec")
 if os.path.exists(old_spec):
     try:
         os.remove(old_spec)
-        print("  ✓ Eliminado archivo de especificación anterior: VmPOS.spec")
+        print("  [OK] Eliminado archivo de especificacion anterior: VmPOS.spec")
     except Exception as e:
-        print(f"  ⚠️ Aviso spec: {e}")
+        print(f"  [AVISO] Aviso spec: {e}")
 
 # 3. Compilación con PyInstaller
 print("\n[3/4] Compilando VmPOS.exe con PyInstaller...")
@@ -140,18 +145,18 @@ print("Ejecutando PyInstaller...")
 try:
     subprocess.run(pyinstaller_cmd, check=True)
 except subprocess.CalledProcessError as e:
-    print(f"\n❌ Error fatal en PyInstaller (código de salida: {e.returncode})")
+    print(f"\n[ERROR] Error fatal en PyInstaller (codigo de salida: {e.returncode})")
     sys.exit(e.returncode)
 except Exception as e:
-    print(f"\n❌ Excepción durante PyInstaller: {e}")
+    print(f"\n[ERROR] Excepcion durante PyInstaller: {e}")
     sys.exit(1)
 
 # Verificar ejecutable generado
 exe_path = os.path.join(PROJECT_ROOT, "dist", "VmPOS", "VmPOS.exe")
 if os.path.exists(exe_path) or (not sys.platform.startswith("win") and os.path.exists(os.path.join(PROJECT_ROOT, "dist", "VmPOS", "VmPOS"))):
-    print("\n✓ ¡Ejecutable generado con éxito!")
+    print("\n[OK] Ejecutable generado con exito!")
 else:
-    print(f"\n❌ Advertencia: No se encontró el ejecutable en: {exe_path}")
+    print(f"\n[AVISO] No se encontro el ejecutable en: {exe_path}")
 
 # Generar archivo comprimido ZIP para distribución directa
 print("\n[4/4] Generando paquete ZIP distribuible...")
@@ -160,9 +165,9 @@ vmpos_dist_dir = os.path.join(PROJECT_ROOT, "dist", "VmPOS")
 if os.path.exists(vmpos_dist_dir):
     try:
         shutil.make_archive(zip_target, 'zip', vmpos_dist_dir)
-        print(f"✓ Paquete ZIP creado en: {zip_target}.zip")
+        print(f"[OK] Paquete ZIP creado en: {zip_target}.zip")
     except Exception as e:
-        print(f"⚠️ Aviso al comprimir ZIP: {e}")
+        print(f"[AVISO] Error al comprimir ZIP: {e}")
 
 # Verificar si Inno Setup está disponible para crear el instalador VmPOS_Setup_v4.0.exe
 iscc_candidates = [
@@ -185,17 +190,16 @@ if iscc_bin and os.path.exists(iss_script):
     try:
         subprocess.run(f'"{iscc_bin}" "{iss_script}"', shell=True, check=True)
         setup_exe = os.path.join(PROJECT_ROOT, "dist", "VmPOS_Setup_v4.0.exe")
-        print(f"✓ ¡Instalador Setup generado con éxito en: {setup_exe}!")
+        print(f"[OK] Instalador Setup generado con exito en: {setup_exe}!")
     except Exception as e:
-        print(f"⚠️ Error al ejecutar Inno Setup: {e}")
+        print(f"[AVISO] Error al ejecutar Inno Setup: {e}")
 else:
-    print("\nℹ️ Nota sobre Inno Setup:")
-    print("  Inno Setup no está instalado en la ruta por defecto.")
-    print("  La aplicación ya está 100% funcional en:")
+    print("\n[INFO] Nota sobre Inno Setup:")
+    print("  Inno Setup no esta instalado en la ruta por defecto.")
+    print("  La aplicacion ya esta 100% funcional en:")
     print(f"  -> Carpeta ejecutable: {vmpos_dist_dir}")
     print(f"  -> Archivo ZIP: {zip_target}.zip")
-    print("  (Si deseas el instalador .exe con asistente, instala Inno Setup gratuito desde https://jrsoftware.org/isdl.php)")
 
 print("\n" + "=" * 70)
-print("  🎉 ¡COMPILACIÓN PARA WINDOWS FINALIZADA CON ÉXITO!")
+print("  [EXITO] COMPILACION PARA WINDOWS FINALIZADA CON EXITO!")
 print("=" * 70)
