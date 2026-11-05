@@ -5,6 +5,10 @@
 # ==============================================================================
 set -e
 
+if [ -d "/Library/Developer/CommandLineTools" ]; then
+    export DEVELOPER_DIR="/Library/Developer/CommandLineTools"
+fi
+
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
