@@ -2536,8 +2536,7 @@ class App:
                         cur_c.execute("""
                             SELECT id, nombre, cedula, limite_credito, saldo_pendiente, telefono, permite_fiado, estado 
                             FROM clientes 
-                            WHERE (permite_fiado = 1 OR permite_fiado = '1' OR permite_fiado = 'True' OR permite_fiado = 'true' OR COALESCE(saldo_pendiente, 0) > 0)
-                              AND (estado IS NULL OR estado != 'Inactivo')
+                            WHERE (estado IS NULL OR LOWER(estado) != 'inactivo')
                             ORDER BY nombre ASC
                         """)
                         for r in cur_c.fetchall():
@@ -2576,7 +2575,8 @@ class App:
                             deuda_val = float(c.get("saldo_pendiente") or c.get("deuda_total") or 0.0)
                             est = str(c.get("estado", "Activo")).lower()
 
-                            if (permite or deuda_val > 0) and est != "inactivo":
+                            # Mostrar todos los clientes activos del sistema
+                            if est != "inactivo":
                                 cid = str(c.get("id"))
                                 doc = str(c.get("documento") or c.get("cedula") or "").strip()
                                 nom = str(c.get("nombre") or "").strip()

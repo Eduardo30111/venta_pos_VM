@@ -621,59 +621,48 @@ def iniciar_clientes(parent_pid="", parent=None):
             doc = str(cli_info.get("documento") or cli_info.get("cedula") or "").strip()
             deuda = float(cli_info.get("deuda_actual", 0) or cli_info.get("saldo_pendiente", 0) or 0.0)
 
-            # 1. Protección estricta: NO permitir eliminar con deuda pendiente
+            # Confirmación de eliminación definitiva
             if deuda > 0.01:
-                messagebox.showerror(
-                    "Operación Denegada - Deuda Pendiente",
-                    f"No se puede eliminar ni desactivar al cliente '{nom}'.\n\n"
-                    f"⚠️ Saldo pendiente actual: ${deuda:,.0f} COP\n\n"
-                    "Para proteger la cartera del negocio, el cliente debe saldar o abonar "
-                    "la totalidad de su deuda antes de poder ser retirado.",
+                confirmacion = messagebox.askyesno(
+                    "⚠️ Eliminar Cliente con Deuda",
+                    f"El cliente '{nom}' (Doc: {doc}) registra una deuda pendiente de ${deuda:,.0f} COP.\n\n"
+                    f"¿Desea ELIMINARLO DEFINITIVAMENTE y cancelar este saldo de la cartera?\n\n"
+                    f"(Presione 'Sí' para borrar al cliente y su saldo por completo, o 'No' para cancelar)",
                     parent=dlg_f
                 )
-                return
-
-            # 2. Confirmación
-            confirmacion = messagebox.askyesno(
-                "Confirmar Eliminación de Cliente",
-                f"¿Está seguro de que desea eliminar al cliente '{nom}' (Doc: {doc})?\n\n"
-                "• Si tiene facturas o abonos históricos, será DESACTIVADO/ARCHIVADO para proteger la contabilidad.\n"
-                "• Si no tiene historial, será ELIMINADO DEFINITIVAMENTE.\n\n"
-                "¿Desea continuar?",
-                parent=dlg_f
-            )
+            else:
+                confirmacion = messagebox.askyesno(
+                    "🗑️ Confirmar Eliminación Definitiva",
+                    f"¿Está seguro de que desea ELIMINAR DEFINITIVAMENTE al cliente '{nom}' (Doc: {doc})?\n\n"
+                    f"El cliente será borrado por completo de la base de datos.",
+                    parent=dlg_f
+                )
             if not confirmacion:
                 return
 
-            # Intentar API
+            # 1. Intentar borrado en API
             msg_api = None
             try:
-                resp = api.delete(f"/clientes/{cid}")
+                resp = api.delete(f"/clientes/{cid}", params={"permanente": True, "forzar": True})
                 if resp.status_code == 200:
                     msg_api = resp.json().get("message")
             except Exception as e_api:
                 print(f"Aviso API al eliminar: {e_api}")
 
-            # Sincronizar en SQLite local
-            msg_local = ""
+            # 2. Borrado definitivo en SQLite local
             try:
                 conn_l = conectar_db()
                 if conn_l:
                     cur_l = conn_l.cursor()
-                    cur_l.execute("SELECT COUNT(*) FROM ventas WHERE cliente_id = ? OR documento_cliente = ?", (cid, doc))
-                    has_v = (cur_l.fetchone()[0] or 0) > 0
-                    if has_v:
-                        cur_l.execute("UPDATE clientes SET estado = 'Inactivo', permite_fiado = 0 WHERE id = ? OR cedula = ?", (cid, doc))
-                        msg_local = f"Cliente '{nom}' archivado/desactivado correctamente para preservar historial contable."
-                    else:
-                        cur_l.execute("DELETE FROM clientes WHERE id = ? OR cedula = ?", (cid, doc))
-                        msg_local = f"Cliente '{nom}' eliminado definitivamente."
+                    cur_l.execute("UPDATE ventas SET cliente_id = NULL WHERE cliente_id = ? OR documento_cliente = ?", (cid, doc))
+                    cur_l.execute("DELETE FROM abonos_cartera WHERE cliente_id = ? OR cedula_cliente = ?", (cid, doc))
+                    cur_l.execute("DELETE FROM clientes WHERE id = ? OR cedula = ?", (cid, doc))
                     conn_l.commit()
                     conn_l.close()
             except Exception as e_sql:
-                print(f"Error sincronizando SQLite al eliminar: {e_sql}")
+                print(f"Error borrando cliente en SQLite: {e_sql}")
 
-            messagebox.showinfo("Operación Exitosa", msg_api or msg_local or "Cliente retirado con éxito.", parent=dlg_f)
+            messagebox.showinfo("Cliente Eliminado", msg_api or f"✅ Cliente '{nom}' eliminado definitivamente de la base de datos.", parent=dlg_f)
             cargar_fiados()
             cargar_datos_servidor()
 
@@ -1370,7 +1359,7 @@ def iniciar_clientes(parent_pid="", parent=None):
         crear_boton(footer_mc, "Cancelar", modal_c.destroy, tipo="secondary", icono="❌", tam_fuente=9).pack(side="right", padx=5, pady=4)
         crear_boton(footer_mc, "Guardar", guardar, tipo="success", icono="💾", tam_fuente=9).pack(side="right", padx=5, pady=4)
 
-    # Eliminar o Archivar cliente con protección de cartera e historial contable
+    # Eliminar definitivamente cliente de la base de datos
     def eliminar_cliente_ui():
         cli = get_cliente_seleccionado()
         if not cli:
@@ -1379,83 +1368,84 @@ def iniciar_clientes(parent_pid="", parent=None):
 
         cid = cli["id"]
         nom = cli["nombre"]
+        doc = str(cli.get("documento") or cli.get("cedula") or "").strip()
         deuda = float(cli.get("deuda_total") or cli.get("saldo_pendiente") or 0.0)
 
-        # 1. Validación estricta de saldo pendiente
+        # Confirmación de eliminación definitiva
         if deuda > 0.01:
-            messagebox.showerror(
-                "Operación Denegada - Deuda Pendiente",
-                f"No se puede eliminar ni desactivar al cliente '{nom}'.\n\n"
-                f"⚠️ Saldo pendiente actual: ${deuda:,.0f} COP\n\n"
-                "Para proteger la cartera del negocio, el cliente debe saldar o abonar "
-                "la totalidad de su deuda antes de poder ser retirado.",
+            confirmacion = messagebox.askyesno(
+                "⚠️ Eliminar Cliente con Deuda",
+                f"El cliente '{nom}' (Doc: {doc}) registra una deuda pendiente de ${deuda:,.0f} COP.\n\n"
+                f"¿Está seguro de que desea ELIMINARLO DEFINITIVAMENTE y cancelar esa deuda de la cartera?\n\n"
+                f"(Presione 'Sí' para borrar el cliente por completo, o 'No' para cancelar)",
                 parent=ventana
             )
-            return
-
-        # 2. Confirmación de Administrador
-        confirmacion = messagebox.askyesno(
-            "Confirmar Retiro de Cliente",
-            f"¿Está seguro de que desea retirar al cliente '{nom}'?\n\n"
-            "• Si el cliente registra facturas o abonos históricos, será DESACTIVADO/ARCHIVADO "
-            "para garantizar la integridad de los informes contables.\n"
-            "• Si nunca registró movimientos, será ELIMINADO DEFINITIVAMENTE.\n\n"
-            "¿Desea continuar?",
-            parent=ventana
-        )
+        else:
+            confirmacion = messagebox.askyesno(
+                "🗑️ Confirmar Eliminación Definitiva",
+                f"¿Está seguro de que desea ELIMINAR DEFINITIVAMENTE al cliente '{nom}' (Doc: {doc})?\n\n"
+                f"El cliente será borrado por completo de la base de datos.",
+                parent=ventana
+            )
         if not confirmacion:
             return
 
+        # 1. Borrado en API
+        msg_api = None
         try:
-            resp = api.delete(f"/clientes/{cid}")
+            resp = api.delete(f"/clientes/{cid}", params={"permanente": True, "forzar": True})
             if resp.status_code == 200:
                 data = resp.json()
-                msg = data.get("message", "Operación completada con éxito.")
-                
-                # Sincronizar en SQLite local
-                try:
-                    conn_l = conectar_db()
-                    if conn_l:
-                        cur_l = conn_l.cursor()
-                        # Comprobar si tiene ventas en SQLite
-                        cur_l.execute("SELECT COUNT(*) FROM ventas WHERE cliente_id = ? OR documento_cliente = ?", (cid, str(cli.get("documento") or cli.get("cedula") or "")))
-                        has_v = (cur_l.fetchone()[0] or 0) > 0
-                        if has_v:
-                            cur_l.execute("UPDATE clientes SET estado = 'Inactivo' WHERE id = ?", (cid,))
-                        else:
-                            cur_l.execute("DELETE FROM clientes WHERE id = ?", (cid,))
-                        conn_l.commit()
-                        conn_l.close()
-                except Exception as e_sql:
-                    print(f"Aviso actualizando SQLite local al eliminar cliente: {e_sql}")
-
-                messagebox.showinfo("Operación Exitosa", msg, parent=ventana)
-                cargar_datos_servidor()
-            else:
-                detail = resp.json().get("detail", "No se pudo retirar el cliente.")
-                messagebox.showerror("Error", detail, parent=ventana)
+                msg_api = data.get("message")
         except Exception as e:
-            # Fallback en modo local puro si API no responde
-            try:
-                conn_l = conectar_db()
-                if conn_l:
-                    cur_l = conn_l.cursor()
-                    cur_l.execute("SELECT COUNT(*) FROM ventas WHERE cliente_id = ? OR documento_cliente = ?", (cid, str(cli.get("documento") or cli.get("cedula") or "")))
-                    has_v = (cur_l.fetchone()[0] or 0) > 0
-                    if has_v:
-                        cur_l.execute("UPDATE clientes SET estado = 'Inactivo' WHERE id = ?", (cid,))
-                        msg_local = f"Cliente '{nom}' desactivado/archivado localmente."
-                    else:
-                        cur_l.execute("DELETE FROM clientes WHERE id = ?", (cid,))
-                        msg_local = f"Cliente '{nom}' eliminado definitivamente de la base local."
-                    conn_l.commit()
-                    conn_l.close()
-                    messagebox.showinfo("Operación Exitosa", msg_local, parent=ventana)
-                    cargar_datos_servidor()
-                    return
-            except Exception as e2:
-                print(f"Error fallback SQLite: {e2}")
-            messagebox.showerror("Error", f"Error de conexión: {e}", parent=ventana)
+            print(f"Aviso API al eliminar: {e}")
+
+        # 2. Borrado definitivo en SQLite local
+        try:
+            conn_l = conectar_db()
+            if conn_l:
+                cur_l = conn_l.cursor()
+                cur_l.execute("UPDATE ventas SET cliente_id = NULL WHERE cliente_id = ? OR documento_cliente = ?", (cid, doc))
+                cur_l.execute("DELETE FROM abonos_cartera WHERE cliente_id = ? OR cedula_cliente = ?", (cid, doc))
+                cur_l.execute("DELETE FROM clientes WHERE id = ? OR cedula = ?", (cid, doc))
+                conn_l.commit()
+                conn_l.close()
+        except Exception as e_sql:
+            print(f"Error borrando cliente en SQLite: {e_sql}")
+
+        messagebox.showinfo("Cliente Eliminado", msg_api or f"✅ Cliente '{nom}' eliminado definitivamente de la base de datos.", parent=ventana)
+        cargar_datos_servidor()
+
+    # Reactivar cliente para crédito y ventas
+    def reactivar_cliente_ui():
+        cli = get_cliente_seleccionado()
+        if not cli:
+            messagebox.showwarning("Selección requerida", "Por favor selecciona un cliente de la lista para reactivar.", parent=ventana)
+            return
+
+        cid = cli["id"]
+        nom = cli["nombre"]
+        doc = str(cli.get("documento") or cli.get("cedula") or "").strip()
+
+        # Reactivar en API
+        try:
+            api.put(f"/clientes/{cid}", json={"estado": "Activo", "permite_fiado": True})
+        except Exception as e_api:
+            print(f"Aviso API al reactivar: {e_api}")
+
+        # Reactivar en SQLite
+        try:
+            conn_l = conectar_db()
+            if conn_l:
+                cur_l = conn_l.cursor()
+                cur_l.execute("UPDATE clientes SET estado = 'Activo', permite_fiado = 1 WHERE id = ? OR cedula = ?", (cid, doc))
+                conn_l.commit()
+                conn_l.close()
+        except Exception as e_sql:
+            print(f"Error reactivando cliente en SQLite: {e_sql}")
+
+        messagebox.showinfo("Cliente Reactivado", f"✅ Cliente '{nom}' reactivado exitosamente con crédito habilitado.", parent=ventana)
+        cargar_datos_servidor()
 
     # Doble clic en tabla principal abre el detalle
     def on_doble_clic(event):
@@ -1503,6 +1493,7 @@ def iniciar_clientes(parent_pid="", parent=None):
         ("Editar Cliente", t["btn_purple_bg"], on_editar_clic, "✏️"),
         ("Ver Detalle / Compras", t["btn_info_bg"], on_detalle_clic, "📋"),
         ("Gestionar Deuda / Abonar", t["btn_success_bg"], on_abonar_directo, "💵"),
+        ("Reactivar Cliente", t["btn_success_bg"], reactivar_cliente_ui, "⚡"),
         ("Eliminar Cliente", t["btn_danger_bg"], eliminar_cliente_ui, "🗑️"),
         ("Actualizar", t["btn_secondary_bg"], lambda: cargar_datos_servidor(), "🔄")
     ]
