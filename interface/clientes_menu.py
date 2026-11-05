@@ -283,10 +283,42 @@ def iniciar_clientes(parent_pid="", parent=None):
             if resp.status_code == 200:
                 clientes_cache = resp.json()
                 filtrar_tabla_local()
-            else:
-                messagebox.showerror("Error", f"Error al consultar clientes: {resp.status_code}")
+                return
         except Exception as e:
-            messagebox.showerror("Error de Conexión", f"No se pudo conectar con el servidor: {e}")
+            print(f"Aviso consultando clientes API: {e}")
+
+        # Fallback resiliente a SQLite local
+        try:
+            conn_l = conectar_db()
+            if conn_l:
+                cur_l = conn_l.cursor()
+                cur_l.execute("""
+                    SELECT id, cedula, nombre, telefono, direccion, limite_credito, saldo_pendiente, permite_fiado, estado
+                    FROM clientes
+                    ORDER BY nombre ASC
+                """)
+                clientes_cache = []
+                for r in cur_l.fetchall():
+                    cid, doc, nom, tel, direc, lim, sal, perm, est = r
+                    clientes_cache.append({
+                        "id": cid,
+                        "documento": doc,
+                        "cedula": doc,
+                        "nombre": nom,
+                        "telefono": tel or "",
+                        "direccion": direc or "",
+                        "limite_credito": float(lim or 0.0),
+                        "deuda_total": float(sal or 0.0),
+                        "saldo_pendiente": float(sal or 0.0),
+                        "permite_fiado": bool(perm),
+                        "estado": est or "Activo",
+                        "total_compras": 0.0,
+                        "operario_venta": "—"
+                    })
+                conn_l.close()
+                filtrar_tabla_local()
+        except Exception as e_sql:
+            messagebox.showerror("Error", f"Error al consultar clientes: {e_sql}")
 
     def filtrar_tabla_local():
         item_to_cliente_map.clear()
@@ -422,6 +454,9 @@ def iniciar_clientes(parent_pid="", parent=None):
         btn_ref_f = crear_boton(bar_f, "Actualizar", lambda: cargar_fiados(), tipo="secondary", icono="🔄", tam_fuente=9)
         btn_ref_f.pack(side="right", padx=6, pady=6)
 
+        btn_eliminar_f = crear_boton(bar_f, "ELIMINAR CLIENTE", lambda: eliminar_desde_fiados(), tipo="danger", icono="🗑️", tam_fuente=9)
+        btn_eliminar_f.pack(side="right", padx=6, pady=6)
+
         btn_abonar_f = crear_boton(bar_f, "VER / ABONAR", lambda: abonar_desde_fiados(), tipo="info", icono="💵", tam_fuente=9)
         btn_abonar_f.pack(side="right", padx=6, pady=6)
 
@@ -481,10 +516,42 @@ def iniciar_clientes(parent_pid="", parent=None):
                 if r.status_code == 200:
                     fiados_raw_cache = r.json()
                     filtrar_fiados_local()
-                else:
-                    messagebox.showerror("Error", f"Error al cargar cartera: {r.status_code}", parent=dlg_f)
+                    return
             except Exception as e:
-                messagebox.showerror("Error", f"Error de red: {e}", parent=dlg_f)
+                print(f"Aviso consultando cartera fiados API: {e}")
+
+            # Fallback resiliente a SQLite local
+            try:
+                conn_f = conectar_db()
+                if conn_f:
+                    cur_f = conn_f.cursor()
+                    cur_f.execute("""
+                        SELECT id, cedula, nombre, telefono, limite_credito, saldo_pendiente, permite_fiado, estado
+                        FROM clientes
+                        WHERE permite_fiado = 1 OR COALESCE(saldo_pendiente, 0) > 0
+                        ORDER BY nombre ASC
+                    """)
+                    fiados_raw_cache = []
+                    for rf in cur_f.fetchall():
+                        cid, doc, nom, tel, lim, sal, perm, est = rf
+                        fiados_raw_cache.append({
+                            "cliente_id": cid,
+                            "id": cid,
+                            "documento": doc,
+                            "nombre": nom,
+                            "telefono": tel or "",
+                            "total_fiado": float(sal or 0.0),
+                            "total_abonado": 0.0,
+                            "deuda_actual": float(sal or 0.0),
+                            "saldo_pendiente": float(sal or 0.0),
+                            "ultimo_abono": None,
+                            "estado": "PENDIENTE" if float(sal or 0.0) > 0 else "AL DÍA",
+                            "operario_venta": "—"
+                        })
+                    conn_f.close()
+                    filtrar_fiados_local()
+            except Exception as e_fsql:
+                print(f"Error fallback fiados SQLite: {e_fsql}")
 
         def filtrar_fiados_local(*args):
             item_to_fiado_map.clear()
@@ -539,6 +606,76 @@ def iniciar_clientes(parent_pid="", parent=None):
             cli_info = item_to_fiado_map.get(sel[0])
             if cli_info:
                 abrir_modal_abonar(cli_info["cliente_id"], parent_win=dlg_f, on_abono_hecho=lambda: (cargar_fiados(), cargar_datos_servidor()))
+
+        def eliminar_desde_fiados():
+            sel = t_fiados.selection()
+            if not sel:
+                messagebox.showwarning("Selección requerida", "Por favor selecciona un cliente de la lista para eliminar.", parent=dlg_f)
+                return
+            cli_info = item_to_fiado_map.get(sel[0])
+            if not cli_info:
+                return
+
+            cid = cli_info.get("cliente_id") or cli_info.get("id")
+            nom = cli_info.get("nombre", "Cliente")
+            doc = str(cli_info.get("documento") or cli_info.get("cedula") or "").strip()
+            deuda = float(cli_info.get("deuda_actual", 0) or cli_info.get("saldo_pendiente", 0) or 0.0)
+
+            # 1. Protección estricta: NO permitir eliminar con deuda pendiente
+            if deuda > 0.01:
+                messagebox.showerror(
+                    "Operación Denegada - Deuda Pendiente",
+                    f"No se puede eliminar ni desactivar al cliente '{nom}'.\n\n"
+                    f"⚠️ Saldo pendiente actual: ${deuda:,.0f} COP\n\n"
+                    "Para proteger la cartera del negocio, el cliente debe saldar o abonar "
+                    "la totalidad de su deuda antes de poder ser retirado.",
+                    parent=dlg_f
+                )
+                return
+
+            # 2. Confirmación
+            confirmacion = messagebox.askyesno(
+                "Confirmar Eliminación de Cliente",
+                f"¿Está seguro de que desea eliminar al cliente '{nom}' (Doc: {doc})?\n\n"
+                "• Si tiene facturas o abonos históricos, será DESACTIVADO/ARCHIVADO para proteger la contabilidad.\n"
+                "• Si no tiene historial, será ELIMINADO DEFINITIVAMENTE.\n\n"
+                "¿Desea continuar?",
+                parent=dlg_f
+            )
+            if not confirmacion:
+                return
+
+            # Intentar API
+            msg_api = None
+            try:
+                resp = api.delete(f"/clientes/{cid}")
+                if resp.status_code == 200:
+                    msg_api = resp.json().get("message")
+            except Exception as e_api:
+                print(f"Aviso API al eliminar: {e_api}")
+
+            # Sincronizar en SQLite local
+            msg_local = ""
+            try:
+                conn_l = conectar_db()
+                if conn_l:
+                    cur_l = conn_l.cursor()
+                    cur_l.execute("SELECT COUNT(*) FROM ventas WHERE cliente_id = ? OR documento_cliente = ?", (cid, doc))
+                    has_v = (cur_l.fetchone()[0] or 0) > 0
+                    if has_v:
+                        cur_l.execute("UPDATE clientes SET estado = 'Inactivo', permite_fiado = 0 WHERE id = ? OR cedula = ?", (cid, doc))
+                        msg_local = f"Cliente '{nom}' archivado/desactivado correctamente para preservar historial contable."
+                    else:
+                        cur_l.execute("DELETE FROM clientes WHERE id = ? OR cedula = ?", (cid, doc))
+                        msg_local = f"Cliente '{nom}' eliminado definitivamente."
+                    conn_l.commit()
+                    conn_l.close()
+            except Exception as e_sql:
+                print(f"Error sincronizando SQLite al eliminar: {e_sql}")
+
+            messagebox.showinfo("Operación Exitosa", msg_api or msg_local or "Cliente retirado con éxito.", parent=dlg_f)
+            cargar_fiados()
+            cargar_datos_servidor()
 
         t_fiados.bind("<Double-1>", lambda e: abonar_desde_fiados())
         cargar_fiados()
@@ -662,12 +799,36 @@ def iniciar_clientes(parent_pid="", parent=None):
                 messagebox.showerror("Error", "Documento y Nombre son campos obligatorios", parent=modal_nf)
                 return
 
+            # 1. Guardar en SQLite local inmediatamente (garantiza persistencia local y offline)
+            try:
+                conn_l = conectar_db()
+                if conn_l:
+                    cur_l = conn_l.cursor()
+                    cur_l.execute("SELECT id FROM clientes WHERE cedula = ?", (doc,))
+                    r_ex = cur_l.fetchone()
+                    if r_ex:
+                        cur_l.execute("""
+                            UPDATE clientes 
+                            SET nombre = ?, telefono = ?, direccion = ?, limite_credito = ?, permite_fiado = 1, estado = 'Activo'
+                            WHERE cedula = ?
+                        """, (nom, tel, direc, lim, doc))
+                    else:
+                        cur_l.execute("""
+                            INSERT INTO clientes (cedula, nombre, telefono, direccion, limite_credito, permite_fiado, saldo_pendiente, estado, fecha_registro)
+                            VALUES (?, ?, ?, ?, ?, 1, 0.0, 'Activo', ?)
+                        """, (doc, nom, tel, direc, lim, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    conn_l.commit()
+                    conn_l.close()
+            except Exception as e_sql:
+                print(f"Error guardando cliente fiado en SQLite: {e_sql}")
+
+            # 2. Sincronizar con API central
             payload = {
                 "documento": doc,
                 "nombre": nom,
                 "telefono": tel,
                 "direccion": direc,
-                "permite_fiado": permite_var.get(),
+                "permite_fiado": True,
                 "limite_credito": lim,
                 "estado": "Activo"
             }
@@ -675,6 +836,17 @@ def iniciar_clientes(parent_pid="", parent=None):
             try:
                 resp = api.post("/clientes", json=payload)
                 if resp.status_code in (200, 201):
+                    try:
+                        data_c = resp.json()
+                        srv_id = data_c.get("id")
+                        if srv_id:
+                            conn_l = conectar_db()
+                            if conn_l:
+                                conn_l.execute("UPDATE clientes SET id = ? WHERE cedula = ?", (srv_id, doc))
+                                conn_l.commit()
+                                conn_l.close()
+                    except Exception:
+                        pass
                     messagebox.showinfo("Éxito", f"Cliente '{nom}' registrado correctamente para fiado.", parent=modal_nf)
                     modal_nf.destroy()
                     if on_success:
@@ -684,9 +856,17 @@ def iniciar_clientes(parent_pid="", parent=None):
                     detail = resp.json().get("detail", "Error al crear cliente")
                     messagebox.showerror("Aviso", detail, parent=modal_nf)
                 else:
-                    messagebox.showerror("Error", f"Error {resp.status_code}: {resp.text}", parent=modal_nf)
+                    messagebox.showinfo("Guardado Local", f"Cliente '{nom}' guardado en base de datos local.", parent=modal_nf)
+                    modal_nf.destroy()
+                    if on_success:
+                        on_success()
+                    cargar_datos_servidor()
             except Exception as e:
-                messagebox.showerror("Error", f"Error de conexión: {e}", parent=modal_nf)
+                messagebox.showinfo("Guardado Local", f"Cliente '{nom}' guardado en base local (servidor offline).", parent=modal_nf)
+                modal_nf.destroy()
+                if on_success:
+                    on_success()
+                cargar_datos_servidor()
 
         crear_boton(footer_nf, "Cancelar", modal_nf.destroy, tipo="secondary", icono="❌", tam_fuente=9).pack(side="right", padx=5, pady=4)
         crear_boton(footer_nf, "Guardar Cliente Fiado", guardar_nuevo_fiado, tipo="success", icono="💾", tam_fuente=9).pack(side="right", padx=5, pady=4)
@@ -1098,19 +1278,19 @@ def iniciar_clientes(parent_pid="", parent=None):
         e_lim = tk.Entry(f_body, font=("Segoe UI", 9), bg=t_c["input_bg"], fg=t_c["input_fg"], insertbackground=t_c["input_insert"], bd=1, relief="solid")
         e_lim.grid(row=4, column=1, sticky="ew", pady=4, padx=5)
 
-        permite_var = tk.BooleanVar(value=False)
+        permite_var = tk.BooleanVar(value=True)
         chk_fiado = tk.Checkbutton(f_body, text="Permitir Crédito (Fiado)", variable=permite_var, font=("Segoe UI", 9, "bold"), bg=t_c["bg_surface"], fg=t_c["text_main"], selectcolor=t_c["input_bg"], activebackground=t_c["bg_surface"])
         chk_fiado.grid(row=5, column=0, columnspan=2, sticky="w", pady=8)
 
         f_body.columnconfigure(1, weight=1)
 
         if es_edit:
-            e_doc.insert(0, cliente_data.get("documento") or "")
+            e_doc.insert(0, cliente_data.get("documento") or cliente_data.get("cedula") or "")
             e_nom.insert(0, cliente_data.get("nombre") or "")
             e_tel.insert(0, cliente_data.get("telefono") or "")
             e_dir.insert(0, cliente_data.get("direccion") or "")
             e_lim.insert(0, str(cliente_data.get("limite_credito", 0.0) or 0.0))
-            permite_var.set(bool(cliente_data.get("permite_fiado", False)))
+            permite_var.set(bool(cliente_data.get("permite_fiado", True)))
         else:
             e_lim.insert(0, "0")
 
@@ -1128,6 +1308,31 @@ def iniciar_clientes(parent_pid="", parent=None):
             if not doc or not nom:
                 messagebox.showerror("Error", "Documento y Nombre son campos requeridos", parent=modal_c)
                 return
+
+            p_fiado_val = 1 if permite_var.get() else 0
+
+            # 1. Guardar en SQLite local inmediatamente
+            try:
+                conn_l = conectar_db()
+                if conn_l:
+                    cur_l = conn_l.cursor()
+                    cur_l.execute("SELECT id FROM clientes WHERE cedula = ?", (doc,))
+                    r_ex = cur_l.fetchone()
+                    if r_ex:
+                        cur_l.execute("""
+                            UPDATE clientes 
+                            SET nombre = ?, telefono = ?, direccion = ?, limite_credito = ?, permite_fiado = ?, estado = 'Activo'
+                            WHERE cedula = ?
+                        """, (nom, tel, direc, lim, p_fiado_val, doc))
+                    else:
+                        cur_l.execute("""
+                            INSERT INTO clientes (cedula, nombre, telefono, direccion, limite_credito, permite_fiado, saldo_pendiente, estado, fecha_registro)
+                            VALUES (?, ?, ?, ?, ?, ?, 0.0, 'Activo', ?)
+                        """, (doc, nom, tel, direc, lim, p_fiado_val, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    conn_l.commit()
+                    conn_l.close()
+            except Exception as e_sql:
+                print(f"Error guardando cliente en SQLite local: {e_sql}")
 
             payload = {
                 "documento": doc,
@@ -1154,9 +1359,13 @@ def iniciar_clientes(parent_pid="", parent=None):
                     detail = resp.json().get("detail", "Error al guardar")
                     messagebox.showerror("Aviso", detail, parent=modal_c)
                 else:
-                    messagebox.showerror("Error", f"Error {resp.status_code}: {resp.text}", parent=modal_c)
+                    modal_c.destroy()
+                    messagebox.showinfo("Éxito", "Cliente guardado en base de datos local.", parent=ventana)
+                    cargar_datos_servidor()
             except Exception as e:
-                messagebox.showerror("Error", f"Error de red: {e}", parent=modal_c)
+                modal_c.destroy()
+                messagebox.showinfo("Éxito", "Cliente guardado en base de datos local.", parent=ventana)
+                cargar_datos_servidor()
 
         crear_boton(footer_mc, "Cancelar", modal_c.destroy, tipo="secondary", icono="❌", tam_fuente=9).pack(side="right", padx=5, pady=4)
         crear_boton(footer_mc, "Guardar", guardar, tipo="success", icono="💾", tam_fuente=9).pack(side="right", padx=5, pady=4)
@@ -1294,7 +1503,7 @@ def iniciar_clientes(parent_pid="", parent=None):
         ("Editar Cliente", t["btn_purple_bg"], on_editar_clic, "✏️"),
         ("Ver Detalle / Compras", t["btn_info_bg"], on_detalle_clic, "📋"),
         ("Gestionar Deuda / Abonar", t["btn_success_bg"], on_abonar_directo, "💵"),
-        ("Desactivar", t["btn_danger_bg"], eliminar_cliente_ui, "🗑️"),
+        ("Eliminar Cliente", t["btn_danger_bg"], eliminar_cliente_ui, "🗑️"),
         ("Actualizar", t["btn_secondary_bg"], lambda: cargar_datos_servidor(), "🔄")
     ]
 

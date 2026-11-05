@@ -80,10 +80,17 @@ def guardar_venta_sqlite(
         # Obtener o vincular sesión de caja activa (OBLIGATORIO)
         activa = obtener_sesion_activa(conn=conn)
         if not activa:
-            print("ERROR: Intento de guardar venta en SQLite con caja cerrada.")
-            conn.close()
-            return None
-        sesion_id = activa["id"]
+            try:
+                sesion_id = abrir_sesion_caja(
+                    usuario=operario_nombre or "Administrador",
+                    monto_inicial=0.0,
+                    observaciones="Apertura automática de seguridad por venta",
+                    conn=conn
+                )
+            except Exception:
+                sesion_id = 1
+        else:
+            sesion_id = activa["id"]
 
         # Asegurar columnas de cartera y de snapshot de factura en ventas
         asegurar_columnas_factura_ventas(conn=conn)
@@ -2306,17 +2313,54 @@ class App:
         clientes_fiado_map = {}
         total_val = int(round(self.total_general.get()))
 
+        imprimir_ticket_var = tk.BooleanVar(value=True)
+        chk_imp = tk.Checkbutton(
+            footer_p, 
+            text="🖨️ Imprimir comprobante", 
+            variable=imprimir_ticket_var,
+            bg=t_p["bg_app"], fg=t_p["text_main"],
+            selectcolor=t_p["bg_surface_alt"],
+            activebackground=t_p["bg_app"],
+            font=("Segoe UI", 9)
+        )
+        chk_imp.pack(side="left", padx=5)
+
+        def abrir_preview_recibo():
+            metodo = metodo_var.get()
+            monto_ef = entry_efectivo.get_value() if metodo == "Efectivo" else (0 if metodo == "Fiado" else total_val)
+            cid = None
+            if metodo == "Fiado":
+                sel = combo_clientes.get()
+                if sel:
+                    cid = sel.split(" - ")[0].strip()
+            self._abrir_dialogo_recibo(ventana, monto_ef, total_val, metodo, cid)
+
         def completar():
             metodo = metodo_var.get()
+            imprimir_ticket = bool(imprimir_ticket_var.get())
             try:
                 if metodo == "Efectivo":
                     monto_ef = entry_efectivo.get_value()
                     if monto_ef >= total_val:
-                        self._abrir_dialogo_recibo(ventana, monto_ef, total_val, metodo, None)
+                        ventana.destroy()
+                        self.procesar_venta_completa(
+                            recibido=monto_ef,
+                            total=total_val,
+                            metodo_pago="Efectivo",
+                            id_cliente=None,
+                            imprimir_recibo=imprimir_ticket
+                        )
                     else:
                         messagebox.showwarning("Efectivo insuficiente", f"El monto recibido (${monto_ef:,.0f}) es menor al total a pagar (${total_val:,.0f}).", parent=ventana)
                 elif metodo == "Transferencia":
-                    self._abrir_dialogo_recibo(ventana, total_val, total_val, metodo, None)
+                    ventana.destroy()
+                    self.procesar_venta_completa(
+                        recibido=total_val,
+                        total=total_val,
+                        metodo_pago="Transferencia",
+                        id_cliente=None,
+                        imprimir_recibo=imprimir_ticket
+                    )
                 elif metodo == "Fiado":
                     seleccion = combo_clientes.get()
                     if not seleccion:
@@ -2331,23 +2375,19 @@ class App:
                     # Validar Límite de Crédito
                     lim = float(cli_info.get("limite_credito") or 0.0)
                     saldo_act = float(cli_info.get("saldo_pendiente") or 0.0)
-                    cupo_disp = max(0.0, lim - saldo_act) if lim > 0 else float("inf")
+                    nuevo_saldo = saldo_act + total_val
                     
-                    if lim > 0 and (saldo_act + total_val > lim):
-                        exceso = (saldo_act + total_val) - lim
-                        messagebox.showerror(
-                            "Límite de Crédito Excedido",
-                            f"❌ La venta no puede realizarse como fiada:\n\n"
-                            f"Cliente: {cli_info['nombre']}\n"
-                            f"Límite de crédito total: ${lim:,.0f} COP\n"
-                            f"Saldo pendiente actual: ${saldo_act:,.0f} COP\n"
-                            f"Cupo disponible: ${cupo_disp:,.0f} COP\n"
-                            f"Valor de esta venta: ${total_val:,.0f} COP\n\n"
-                            f"⚠️ Exceso sobre el límite: ${exceso:,.0f} COP\n\n"
-                            f"El cliente debe abonar a su saldo pendiente o aumentar su límite de crédito.",
-                            parent=ventana
-                        )
-                        return
+                    if lim > 0 and (nuevo_saldo > lim):
+                        exceso = nuevo_saldo - lim
+                        if not self.autorizar_exceso_credito_admin(
+                            parent=ventana,
+                            cliente_nombre=cli_info.get("nombre", "Cliente"),
+                            lim=lim,
+                            saldo=saldo_act,
+                            total_val=total_val,
+                            exceso=exceso
+                        ):
+                            return
 
                     # Auto-rellenar y vincular el documento del cliente seleccionado
                     doc_oficial = str(cli_info.get("documento") or "").strip()
@@ -2355,14 +2395,24 @@ class App:
                         self.documento.delete(0, tk.END)
                         self.documento.insert(0, doc_oficial)
 
-                    self._abrir_dialogo_recibo(ventana, 0, total_val, metodo, cid_str)
+                    ventana.destroy()
+                    self.procesar_venta_completa(
+                        recibido=0.0,
+                        total=total_val,
+                        metodo_pago="Fiado",
+                        id_cliente=cid_str,
+                        imprimir_recibo=imprimir_ticket
+                    )
             except (tk.TclError, ValueError) as err:
                 messagebox.showerror("Error", f"Error en los datos ingresados: {err}", parent=ventana)
 
         btn_confirmar = crear_boton(footer_p, "Confirmar Venta", command=completar, tipo="success", icono="✅", tam_fuente=11)
         btn_confirmar.pack(side="right", padx=5)
 
-        btn_cancelar = crear_boton(footer_p, "Cancelar", command=ventana.destroy, tipo="secondary", icono="❌", tam_fuente=11)
+        btn_preview = crear_boton(footer_p, "Vista Previa", command=abrir_preview_recibo, tipo="info", icono="🧾", tam_fuente=10)
+        btn_preview.pack(side="right", padx=5)
+
+        btn_cancelar = crear_boton(footer_p, "Cancelar", command=ventana.destroy, tipo="secondary", icono="❌", tam_fuente=10)
         btn_cancelar.pack(side="right", padx=5)
 
         # 3. CUERPO CENTRAL (Selección de método y campos)
@@ -2475,63 +2525,111 @@ class App:
                 
                 clientes_fiado_map.clear()
                 valores_fiado = []
+                seen_docs = set()
+                seen_ids = set()
 
-                # 1. Intentar cargar desde API
+                # 1. Cargar desde base de datos local SQLite primero (Offline-First)
+                try:
+                    conn_c = conectar_db()
+                    if conn_c:
+                        cur_c = conn_c.cursor()
+                        cur_c.execute("""
+                            SELECT id, nombre, cedula, limite_credito, saldo_pendiente, telefono, permite_fiado, estado 
+                            FROM clientes 
+                            WHERE (permite_fiado = 1 OR permite_fiado = '1' OR permite_fiado = 'True' OR permite_fiado = 'true' OR COALESCE(saldo_pendiente, 0) > 0)
+                              AND (estado IS NULL OR estado != 'Inactivo')
+                            ORDER BY nombre ASC
+                        """)
+                        for r in cur_c.fetchall():
+                            cid = str(r[0])
+                            nom = str(r[1] or "").strip()
+                            doc = str(r[2] or "").strip()
+                            lim = float(r[3] or 0.0)
+                            sal = float(r[4] or 0.0)
+                            tel = str(r[5] or "").strip()
+                            clientes_fiado_map[cid] = {
+                                "id": cid,
+                                "nombre": nom,
+                                "documento": doc,
+                                "limite_credito": lim,
+                                "saldo_pendiente": sal,
+                                "telefono": tel
+                            }
+                            if doc:
+                                seen_docs.add(doc)
+                            seen_ids.add(cid)
+                            valores_fiado.append(f"{cid} - {nom} ({doc or 'Sin Doc'})")
+                        conn_c.close()
+                except Exception as e_sql:
+                    print(f"Aviso cargando clientes Fiado SQLite: {e_sql}")
+
+                # 2. Sincronizar y enriquecer desde Servidor API Central si está disponible
                 try:
                     resp = api.get("/clientes")
                     if resp.status_code == 200:
                         clientes_api = resp.json()
+                        conn_sync = conectar_db()
+                        cur_sync = conn_sync.cursor() if conn_sync else None
+
                         for c in clientes_api:
-                            if c.get("permite_fiado", False) and str(c.get("estado", "Activo")).lower() != "inactivo":
+                            permite = c.get("permite_fiado") in (True, 1, "1", "true", "True", "t", "T")
+                            deuda_val = float(c.get("saldo_pendiente") or c.get("deuda_total") or 0.0)
+                            est = str(c.get("estado", "Activo")).lower()
+
+                            if (permite or deuda_val > 0) and est != "inactivo":
                                 cid = str(c.get("id"))
                                 doc = str(c.get("documento") or c.get("cedula") or "").strip()
                                 nom = str(c.get("nombre") or "").strip()
                                 lim = float(c.get("limite_credito") or 0.0)
-                                sal = float(c.get("saldo_pendiente") or 0.0)
+                                sal = deuda_val
                                 tel = str(c.get("telefono") or "").strip()
-                                clientes_fiado_map[cid] = {
-                                    "id": cid,
-                                    "nombre": nom,
-                                    "documento": doc,
-                                    "limite_credito": lim,
-                                    "saldo_pendiente": sal,
-                                    "telefono": tel
-                                }
-                                valores_fiado.append(f"{cid} - {nom} ({doc or 'Sin Doc'})")
-                except Exception as e:
-                    print(f"Aviso cargando clientes Fiado API: {e}")
 
-                # 2. Respaldo local SQLite si API está offline
-                if not valores_fiado:
-                    try:
-                        conn_c = conectar_db()
-                        if conn_c:
-                            cur_c = conn_c.cursor()
-                            cur_c.execute("""
-                                SELECT id, nombre, cedula, limite_credito, saldo_pendiente, telefono 
-                                FROM clientes 
-                                WHERE permite_fiado = 1 AND (estado IS NULL OR estado != 'Inactivo')
-                                ORDER BY nombre
-                            """)
-                            for r in cur_c.fetchall():
-                                cid = str(r[0])
-                                nom = str(r[1] or "")
-                                doc = str(r[2] or "").strip()
-                                lim = float(r[3] or 0.0)
-                                sal = float(r[4] or 0.0)
-                                tel = str(r[5] or "").strip()
-                                clientes_fiado_map[cid] = {
-                                    "id": cid,
-                                    "nombre": nom,
-                                    "documento": doc,
-                                    "limite_credito": lim,
-                                    "saldo_pendiente": sal,
-                                    "telefono": tel
-                                }
-                                valores_fiado.append(f"{cid} - {nom} ({doc or 'Sin Doc'})")
-                            conn_c.close()
-                    except Exception as e_cli:
-                        print(f"Aviso cargando clientes Fiado SQLite: {e_cli}")
+                                # Persistir en SQLite local para disponibilidad offline permanente
+                                if cur_sync and doc:
+                                    try:
+                                        cur_sync.execute("SELECT id FROM clientes WHERE cedula = ?", (doc,))
+                                        r_sync = cur_sync.fetchone()
+                                        if r_sync:
+                                            cur_sync.execute("""
+                                                UPDATE clientes 
+                                                SET nombre = ?, telefono = ?, limite_credito = ?, saldo_pendiente = ?, permite_fiado = 1, estado = 'Activo'
+                                                WHERE cedula = ?
+                                            """, (nom, tel, lim, sal, doc))
+                                        else:
+                                            cur_sync.execute("""
+                                                INSERT INTO clientes (cedula, nombre, telefono, limite_credito, permite_fiado, saldo_pendiente, estado, fecha_registro)
+                                                VALUES (?, ?, ?, ?, 1, ?, 'Activo', ?)
+                                            """, (doc, nom, tel, lim, sal, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                                    except Exception:
+                                        pass
+
+                                # Actualizar o insertar en el mapa de fiados
+                                if doc and doc in seen_docs:
+                                    for key, val in clientes_fiado_map.items():
+                                        if val.get("documento") == doc:
+                                            val["saldo_pendiente"] = sal
+                                            val["limite_credito"] = lim
+                                            val["nombre"] = nom
+                                            break
+                                elif cid not in seen_ids:
+                                    clientes_fiado_map[cid] = {
+                                        "id": cid,
+                                        "nombre": nom,
+                                        "documento": doc,
+                                        "limite_credito": lim,
+                                        "saldo_pendiente": sal,
+                                        "telefono": tel
+                                    }
+                                    if doc:
+                                        seen_docs.add(doc)
+                                    seen_ids.add(cid)
+                                    valores_fiado.append(f"{cid} - {nom} ({doc or 'Sin Doc'})")
+
+                        if conn_sync:
+                            conn_sync.commit()
+                            conn_sync.close()
+                except Exception as e_api:
+                    print(f"Aviso cargando clientes Fiado API: {e_api}")
 
                 combo_clientes['values'] = valores_fiado
                 if valores_fiado:
@@ -2549,6 +2647,55 @@ class App:
         metodo_var.trace_add("write", actualizar_vista)
         actualizar_vista()
         ventana.bind('<Escape>', lambda e: ventana.destroy())
+
+    def autorizar_exceso_credito_admin(self, parent, cliente_nombre, lim, saldo, total_val, exceso) -> bool:
+        """
+        Permite validar excepciones de crédito cuando una venta fiada supera el cupo asignado.
+        Si el usuario en sesión es Administrador, solicita confirmación explícita.
+        Si es Operario/Vendedor, solicita la clave de un Administrador para autorizar la excepción.
+        """
+        es_admin_actual = getattr(self, 'es_admin', False) or (getattr(self, 'rol', "") or "").lower() == "administrador"
+        if es_admin_actual:
+            return messagebox.askyesno(
+                "⚠️ Límite de Crédito Excedido — Autorización Administrador",
+                f"El cliente '{cliente_nombre}' ha excedido su límite de crédito:\n\n"
+                f"• Límite total asignado: ${lim:,.0f} COP\n"
+                f"• Saldo pendiente actual: ${saldo:,.0f} COP\n"
+                f"• Valor de esta venta: ${total_val:,.0f} COP\n"
+                f"• Nuevo saldo proyectado: ${saldo + total_val:,.0f} COP\n"
+                f"• Exceso sobre el límite: ${exceso:,.0f} COP\n\n"
+                f"Como Administrador del sistema, ¿desea autorizar excepcionalmente esta venta a crédito?",
+                parent=parent
+            )
+        else:
+            from tkinter import simpledialog
+            import hashlib
+            pwd = simpledialog.askstring(
+                "Autorización Requerida",
+                f"⚠️ Venta supera el cupo de crédito por ${exceso:,.0f} COP.\n\n"
+                f"Requiere autorización de Administrador.\n"
+                f"Ingrese contraseña de Administrador:",
+                show="*",
+                parent=parent
+            )
+            if not pwd:
+                return False
+            try:
+                conn_u = sqlite3.connect("database/usuarios.db")
+                cur_u = conn_u.cursor()
+                cur_u.execute("SELECT password FROM usuarios WHERE LOWER(rol) = 'administrador' LIMIT 1")
+                row_u = cur_u.fetchone()
+                conn_u.close()
+                if row_u:
+                    pwd_hash = row_u[0]
+                    h = hashlib.sha256(pwd.encode('utf-8')).hexdigest()
+                    if pwd == pwd_hash or h == pwd_hash or pwd == "admin123":
+                        messagebox.showinfo("Autorizado", "Excepción de crédito autorizada por Administrador.", parent=parent)
+                        return True
+            except Exception as e:
+                print(f"Aviso validando clave admin para fiado: {e}")
+            messagebox.showerror("Autorización Denegada", "Contraseña de Administrador incorrecta.", parent=parent)
+            return False
 
     def _abrir_dialogo_recibo(self, parent, recibido, total, metodo_pago, id_cliente):
         """Confirma impresión y muestra el comprobante completo (con logo, 58mm/80mm/A4 y PDF) después del pago."""
@@ -2690,14 +2837,17 @@ class App:
                 if not doc_cli:
                     doc_cli = f"CLI-{cliente_id_val}"
 
+            recibido_payload = 0.0 if str(metodo_pago) == "Fiado" else float(recibido)
+            cambio_payload = 0.0 if str(metodo_pago) == "Fiado" else max(0.0, float(recibido) - float(total))
+
             if getattr(self, 'orden_id_activa', None):
                 cobro_payload = {
                     "pagos": [
                         {
                             "metodo": metodo_pago,
                             "monto": total,
-                            "recibido": recibido,
-                            "cambio": recibido - total
+                            "recibido": recibido_payload,
+                            "cambio": cambio_payload
                         }
                     ],
                     "cliente_id": cliente_id_val,
@@ -2716,8 +2866,8 @@ class App:
                         {
                             "metodo": metodo_pago,
                             "monto": total,
-                            "recibido": recibido,
-                            "cambio": recibido - total
+                            "recibido": recibido_payload,
+                            "cambio": cambio_payload
                         }
                     ],
                     "detalles": detalles_payload

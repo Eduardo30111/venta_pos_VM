@@ -58,10 +58,11 @@ class VentaService:
                     resolved_cliente_id = cli_doc.id
                 else:
                     try:
+                        es_fiado_venta = any(p.metodo == 'Fiado' for p in (venta_data.pagos or []))
                         nuevo_cli = Cliente(
                             documento=doc_cliente,
                             nombre=f"Cliente {doc_cliente}",
-                            permite_fiado=False,
+                            permite_fiado=es_fiado_venta,
                             limite_credito=0.0,
                             estado="Activo"
                         )
@@ -259,12 +260,22 @@ class VentaService:
 
                 # Fiado logic
                 if monto_fiado > 0:
-                    if not venta_data.cliente_id:
+                    cli_target_id = resolved_cliente_id or venta_data.cliente_id
+                    cliente = None
+                    if cli_target_id:
+                        cli_result = await db.execute(select(Cliente).where(Cliente.id == cli_target_id))
+                        cliente = cli_result.scalars().first()
+                    if not cliente and doc_cliente:
+                        cli_doc_res = await db.execute(select(Cliente).where(Cliente.documento == doc_cliente))
+                        cliente = cli_doc_res.scalars().first()
+
+                    if not cliente:
                         raise HTTPException(status_code=400, detail="Cliente requerido para Fiado")
-                    cli_result = await db.execute(select(Cliente).where(Cliente.id == venta_data.cliente_id))
-                    cliente = cli_result.scalars().first()
-                    if not cliente or not cliente.permite_fiado:
-                        raise HTTPException(status_code=400, detail="Cliente no permite fiado")
+                    
+                    if not cliente.permite_fiado and str(cliente.estado or "").lower() != "inactivo":
+                        cliente.permite_fiado = True
+                        db.add(cliente)
+                        await db.flush()
                     
                     # Check limit
                     cxc_result = await db.execute(select(func.sum(CuentaPorCobrar.saldo_pendiente)).where(CuentaPorCobrar.cliente_id == cliente.id, CuentaPorCobrar.estado == "Pendiente"))
