@@ -40,11 +40,12 @@ jobs:
         if: failure()
         shell: bash
         run: |
+          cp build.log build_log.txt
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add build.log
-          git commit -m "chore(debug): build log" || true
-          git push origin main || true
+          git add -f build_log.txt
+          git commit -m "chore(debug): build log"
+          git push origin main
 
       - name: Subir log de compilacion
         if: always()
