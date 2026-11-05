@@ -421,7 +421,8 @@ def iniciar_configuracion(parent=None, on_save_callback=None):
     var_alineacion = tk.StringVar(master=ventana, value=cfg_imp_ini.get("alineacion_encabezado", "center"))
     var_copias = tk.IntVar(master=ventana, value=int(cfg_imp_ini.get("copias", 1)))
     var_corte_auto = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("corte_automatico", True)))
-    var_abrir_cajon = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("abrir_cajon", False)))
+    var_abrir_cajon = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("abrir_cajon", True)))
+    var_ip_impresora_red = tk.StringVar(master=ventana, value=str(cfg_imp_ini.get("ip_impresora_red", "")))
 
     var_mostrar_logo = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_logo", True)))
     var_mostrar_razon = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_razon_social", True)))
@@ -812,6 +813,36 @@ def iniciar_configuracion(parent=None, on_save_callback=None):
         activebackground=t["bg_surface"], selectcolor=t["bg_surface"]
     ).pack(side="left")
 
+    def _probar_cajon_config():
+        try:
+            try:
+                from interface.receipt_manager import pulsar_apertura_cajon
+            except ImportError:
+                from receipt_manager import pulsar_apertura_cajon
+            cfg_temp = {
+                "ip_impresora_red": var_ip_impresora_red.get().strip(),
+                "impresora_nombre": var_impresora_nombre.get().strip(),
+                "abrir_cajon": True
+            }
+            ok_c, msg_c = pulsar_apertura_cajon(config_override=cfg_temp)
+            if ok_c:
+                messagebox.showinfo("Cajón Monedero", f"✅ {msg_c}", parent=ventana)
+            else:
+                messagebox.showwarning("Cajón Monedero", f"⚠️ {msg_c}", parent=ventana)
+        except Exception as _e_c:
+            messagebox.showerror("Error", f"Error probando cajón: {_e_c}", parent=ventana)
+
+    # Fila 3: IP de Impresora de Red (LAN / WiFi / Digital POS)
+    tk.Label(grid_imp, text="IP Impresora Red (LAN / WiFi):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=3, column=0, sticky="w", pady=5, padx=(0, 10))
+    _crear_entry(grid_imp, var_ip_impresora_red, 3, 1, 20)
+
+    btn_test_cajon = tk.Button(
+        grid_imp, text="🔓 Probar Apertura Cajón", command=_probar_cajon_config,
+        font=("Segoe UI", 9, "bold"), bg=t.get("accent", "#0284C7"), fg="#FFFFFF",
+        relief="flat", cursor="hand2", padx=8, pady=2
+    )
+    btn_test_cajon.grid(row=3, column=2, columnspan=2, sticky="w", padx=5, pady=5)
+
     # Casillas de campos visibles en la factura
     tk.Label(body_imp, text="👁️ Campos Visibles en la Factura / Recibo:", font=("Segoe UI", 9, "bold"),
              bg=t["bg_surface"], fg=t["text_primary"]).pack(anchor="w", pady=(8, 4))
@@ -884,6 +915,7 @@ def iniciar_configuracion(parent=None, on_save_callback=None):
             "copias": max(1, min(10, copias_val)),
             "corte_automatico": bool(var_corte_auto.get()),
             "abrir_cajon": bool(var_abrir_cajon.get()),
+            "ip_impresora_red": var_ip_impresora_red.get().strip(),
             "mostrar_logo": bool(var_mostrar_logo.get()),
             "mostrar_razon_social": bool(var_mostrar_razon.get()),
             "mostrar_nit": bool(var_mostrar_nit.get()),

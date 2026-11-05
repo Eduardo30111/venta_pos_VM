@@ -89,7 +89,9 @@ PRINTER_CONFIG_POR_DEFECTO = {
     "pie_factura_extra": "",
     "copias": 1,
     "corte_automatico": True,
-    "abrir_cajon": False,
+    "abrir_cajon": True,
+    "ip_impresora_red": "",
+    "puerto_impresora_red": 9100,
     "usb_vendor_id": "",
     "usb_product_id": ""
 }

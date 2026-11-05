@@ -1430,7 +1430,8 @@ def _imprimir_por_sistema_os(norm, cfg):
                     logo_b = _imagen_a_escpos_raster(neg["logo_path"], max_width_dots=240 if fmt == "58mm" else 360)
                 txt_b = _codificar_texto_escpos(generar_texto_factura(norm, formato=fmt, config_impresora=cfg) + "\n\n\n\n")
                 corte_b = b"\x1d\x56\x42\x00" if cfg.get("corte_automatico", True) else b""
-                raw_payload = b"\x1b\x40" + logo_b + txt_b + corte_b
+                cajon_b = b"\x1b\x70\x00\x19\xfa\x1b\x70\x01\x19\xfa" if cfg.get("abrir_cajon", True) else b""
+                raw_payload = cajon_b + b"\x1b\x40" + logo_b + txt_b + corte_b
 
                 hPrinter = win32print.OpenPrinter(nombre_dest)
                 try:
@@ -1452,6 +1453,109 @@ def _imprimir_por_sistema_os(norm, cfg):
             return False, f"No se pudo imprimir en Windows: {e}"
 
 
+def _imprimir_por_red_tcp(norm, cfg):
+    """
+    Imprime tirilla y abre cajón en una impresora de red local por puerto TCP 9100 (Digital POS, Epson, Xprinter, etc.).
+    """
+    ip = str(cfg.get("ip_impresora_red", "")).strip()
+    if not ip:
+        return False, "No hay IP configurada para la impresora de red."
+
+    puerto = int(cfg.get("puerto_impresora_red", 9100) or 9100)
+    fmt = str(cfg.get("formato_papel", "58mm"))
+    neg = norm["negocio"]
+
+    logo_bytes = b""
+    if cfg.get("mostrar_logo", True) and neg.get("logo_path"):
+        max_dots = 240 if fmt == "58mm" else 360
+        logo_bytes = _imagen_a_escpos_raster(neg["logo_path"], max_width_dots=max_dots)
+
+    texto = generar_texto_factura(norm, formato=fmt, config_impresora=cfg)
+    cuerpo_bytes = _codificar_texto_escpos(texto + "\n\n\n\n")
+
+    corte_bytes = b"\x1d\x56\x42\x00" if cfg.get("corte_automatico", True) else b""
+    cajon_bytes = b"\x1b\x70\x00\x19\xfa\x1b\x70\x01\x19\xfa" if cfg.get("abrir_cajon", True) else b""
+
+    payload = cajon_bytes + b"\x1b\x40" + logo_bytes + cuerpo_bytes + corte_bytes
+    copias = max(1, min(10, int(cfg.get("copias", 1) or 1)))
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(4.0)
+            s.connect((ip, puerto))
+            for _ in range(copias):
+                s.sendall(payload)
+        return True, f"Factura impresa y cajón abierto vía red TCP ({ip}:{puerto})."
+    except Exception as e:
+        return False, f"Error conectando con impresora de red {ip}:{puerto}: {e}"
+
+
+def pulsar_apertura_cajon(config_override=None) -> Tuple[bool, str]:
+    """
+    Envía la señal ESC/POS para abrir el cajón monedero conectado a la impresora
+    (ya sea por Red LAN/WiFi TCP 9100, USB directo o cola de Windows RAW).
+    """
+    cfg = dict(business_mgr.obtener_config_impresora())
+    if isinstance(config_override, dict):
+        cfg.update(config_override)
+
+    cmd_cajon = b"\x1b\x70\x00\x19\xfa\x1b\x70\x01\x19\xfa"
+
+    # 1. Probar por Red LAN TCP (si tiene IP configurada)
+    ip_red = str(cfg.get("ip_impresora_red", "")).strip()
+    if ip_red:
+        puerto_red = int(cfg.get("puerto_impresora_red", 9100) or 9100)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(2.5)
+                s.connect((ip_red, puerto_red))
+                s.sendall(cmd_cajon)
+            return True, f"Cajón abierto vía impresora de red ({ip_red}:{puerto_red})."
+        except Exception as e:
+            pass
+
+    # 2. Probar en Windows vía win32print RAW
+    if sys.platform.startswith("win"):
+        try:
+            import win32print
+            nombre_dest = str(cfg.get("impresora_nombre", "")).strip()
+            if not nombre_dest or nombre_dest in ("Predeterminada del sistema", "USB Térmica Directa (ESC/POS)"):
+                nombre_dest = win32print.GetDefaultPrinter()
+            if nombre_dest:
+                hPrinter = win32print.OpenPrinter(nombre_dest)
+                try:
+                    hJob = win32print.StartDocPrinter(hPrinter, 1, ("Abrir Cajon VmPOS", None, "RAW"))
+                    win32print.StartPagePrinter(hPrinter)
+                    win32print.WritePrinter(hPrinter, cmd_cajon)
+                    win32print.EndPagePrinter(hPrinter)
+                    win32print.EndDocPrinter(hPrinter)
+                finally:
+                    win32print.ClosePrinter(hPrinter)
+                return True, f"Cajón abierto vía impresora '{nombre_dest}'."
+        except Exception as e:
+            pass
+
+    # 3. Probar por USB directo ESC/POS
+    try:
+        import usb.core
+        dev = _buscar_impresora_usb_compatible(cfg)
+        if dev:
+            cfg_desc = dev.get_active_configuration()
+            intf = cfg_desc[(0, 0)]
+            ep = None
+            for e in intf:
+                if not (e.bEndpointAddress & 0x80):
+                    ep = e.bEndpointAddress
+                    break
+            if ep:
+                dev.write(ep, cmd_cajon, timeout=2000)
+                return True, "Cajón abierto exitosamente vía USB ESC/POS."
+    except Exception:
+        pass
+
+    return False, "No se pudo comunicar con la impresora para abrir el cajón. Verifique la conexión USB o IP de la impresora."
+
+
 def imprimir_factura_unificada(datos_venta, config_override=None):
     """
     Punto de entrada único para imprimir cualquier factura o comprobante.
@@ -1470,6 +1574,12 @@ def imprimir_factura_unificada(datos_venta, config_override=None):
 
     if metodo == "solo_pdf":
         return generar_pdf_factura(norm, formato=fmt, config_impresora=cfg)
+
+    # Si hay una IP de impresora de red configurada o método red
+    if metodo == "red_tcp" or (cfg.get("ip_impresora_red") and metodo != "sistema"):
+        ok_net, msg_net = _imprimir_por_red_tcp(norm, cfg)
+        if ok_net:
+            return True, msg_net
 
     if metodo == "escpos_usb" or imp_sel.startswith("USB"):
         return _imprimir_por_usb_escpos(norm, cfg)

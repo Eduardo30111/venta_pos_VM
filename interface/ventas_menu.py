@@ -763,6 +763,9 @@ class App:
         btn_nueva = crear_boton(payment_frame, "Nueva Venta (F5)", command=self.limpiar_formulario, tipo="warning", icono="🆕", tam_fuente=10)
         btn_nueva.pack(side="right", padx=5)
 
+        btn_cajon = crear_boton(payment_frame, "Abrir Cajón (F7)", command=self.abrir_cajon_manual, tipo="secondary", icono="🔓", tam_fuente=10)
+        btn_cajon.pack(side="right", padx=5)
+
         # 3. CUERPO CENTRAL (Flexible y expandible)
         central_frame = tk.Frame(self.ventana, bg=bg_app)
         central_frame.pack(side="top", fill="both", expand=True, padx=8, pady=3)
@@ -1065,6 +1068,20 @@ class App:
         comando_f12 = self.pagar if self.puede_procesar_venta else self.mandar_a_caja
         self.ventana.bind('<F12>', lambda e: comando_f12())
         self.ventana.bind('<F5>', lambda e: self.limpiar_formulario())
+        self.ventana.bind('<F7>', lambda e: self.abrir_cajon_manual())
+
+    def abrir_cajon_manual(self, event=None):
+        """Abre el cajón monedero conectado a la impresora térmica (F7)."""
+        try:
+            try:
+                from interface.receipt_manager import pulsar_apertura_cajon
+            except ImportError:
+                from receipt_manager import pulsar_apertura_cajon
+            ok, msg = pulsar_apertura_cajon()
+            if not ok:
+                messagebox.showwarning("Cajón Monedero", f"No se pudo abrir el cajón automáticamente:\n{msg}", parent=self.ventana)
+        except Exception as e:
+            messagebox.showerror("Error Cajón Monedero", f"Error al abrir cajón: {e}", parent=self.ventana)
 
     def actualizar_indicadores_empleado_pos(self):
         """
@@ -2946,6 +2963,16 @@ class App:
                         if not imp_ok:
                             aviso_impresion = "\n\n⚠️ Nota: No se detectó impresora física activa; puedes reimprimir o exportar el PDF desde Gestión de Ventas."
                 
+                if not imprimir_recibo and metodo_pago == "Efectivo":
+                    try:
+                        try:
+                            from interface.receipt_manager import pulsar_apertura_cajon
+                        except ImportError:
+                            from receipt_manager import pulsar_apertura_cajon
+                        pulsar_apertura_cajon()
+                    except Exception:
+                        pass
+
                 extra_info = f"\n\n{msg_asistencia}" if msg_asistencia else ""
                 extra_info += aviso_impresion
                 if metodo_pago == "Efectivo":
