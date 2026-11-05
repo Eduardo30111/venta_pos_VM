@@ -259,7 +259,10 @@ def registrar_abono_cartera(
     usuario: str = "Administrador",
     observaciones: str = "",
     notas: Optional[str] = None,
-    sesion_id: Optional[int] = None
+    sesion_id: Optional[int] = None,
+    cliente_doc: Optional[str] = None,
+    cliente_nombre: Optional[str] = None,
+    saldo_actual_conocido: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Registra un abono a cartera de fiado de forma atómica.
@@ -289,18 +292,46 @@ def registrar_abono_cartera(
 
         cur.execute(f"SELECT * FROM clientes WHERE {col_id} = ?", (cliente_id,))
         cli = cur.fetchone()
+        
+        # Búsqueda de respaldo por documento si no se encontró por ID numérico
+        if not cli and cliente_doc:
+            doc_search = str(cliente_doc).strip()
+            cur.execute(f"SELECT * FROM clientes WHERE cedula = ? OR nombre = ?", (doc_search, str(cliente_nombre or '').strip()))
+            cli = cur.fetchone()
+
+        # Si aún no existe en SQLite (ej. cliente creado en servidor central), registrarlo localmente para resiliencia
+        if not cli:
+            doc_final = str(cliente_doc or f"DOC-{cliente_id}").strip()
+            nom_final = str(cliente_nombre or f"Cliente #{cliente_id}").strip()
+            saldo_ini = float(saldo_actual_conocido if saldo_actual_conocido is not None else monto)
+            hoy_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                cur.execute(f"""
+                    INSERT INTO clientes ({col_id}, cedula, nombre, permite_fiado, saldo_pendiente, fecha_registro)
+                    VALUES (?, ?, ?, 1, ?, ?)
+                """, (cliente_id, doc_final, nom_final, saldo_ini, hoy_str))
+                conn.commit()
+                cur.execute(f"SELECT * FROM clientes WHERE {col_id} = ?", (cliente_id,))
+                cli = cur.fetchone()
+            except Exception:
+                # Si hubo colisión de clave, buscarlo de nuevo
+                cur.execute(f"SELECT * FROM clientes WHERE cedula = ? OR {col_id} = ?", (doc_final, cliente_id))
+                cli = cur.fetchone()
+
         if not cli:
             raise ValueError(f"Cliente #{cliente_id} no encontrado.")
 
         cli_dict = dict(cli)
         saldo_ant = float(cli_dict.get("saldo_pendiente", 0.0) or 0.0)
-        nombre_cli = cli_dict.get("nombre", f"Cliente #{cliente_id}")
+        if saldo_actual_conocido is not None and saldo_actual_conocido > saldo_ant:
+            saldo_ant = float(saldo_actual_conocido)
+        nombre_cli = cli_dict.get("nombre", cliente_nombre or f"Cliente #{cliente_id}")
 
         if monto > (saldo_ant + 0.01):
             raise ValueError(f"El abono (${monto:,.0f}) excede el saldo pendiente (${saldo_ant:,.0f}).")
 
         saldo_nuevo = max(0.0, saldo_ant - monto)
-        cur.execute(f"UPDATE clientes SET saldo_pendiente = ? WHERE {col_id} = ?", (saldo_nuevo, cliente_id))
+        cur.execute(f"UPDATE clientes SET saldo_pendiente = ? WHERE {col_id} = ?", (saldo_nuevo, cli_dict.get(col_id, cliente_id)))
 
         # Aplicar reducción FIFO al saldo_pendiente de las ventas fiadas de este cliente
         try:
@@ -308,15 +339,17 @@ def registrar_abono_cartera(
             v_cols = [c[1] for c in cur.fetchall()]
             if "saldo_pendiente" not in v_cols:
                 cur.execute("ALTER TABLE ventas ADD COLUMN saldo_pendiente REAL DEFAULT 0.0")
-            doc_cli = str(cli_dict.get("cedula") or cli_dict.get("documento") or "").strip()
+            if "cliente_id" not in v_cols:
+                cur.execute("ALTER TABLE ventas ADD COLUMN cliente_id INTEGER DEFAULT NULL")
+            doc_cli = str(cli_dict.get("cedula") or cli_dict.get("documento") or cliente_doc or "").strip()
             cur.execute("""
                 SELECT id_venta, total_venta, saldo_pendiente
                 FROM ventas
                 WHERE metodo_pago = 'Fiado'
                   AND (estado IS NULL OR estado != 'Anulada')
-                  AND (documento_cliente = ? OR documento_cliente = ? OR LOWER(documento_cliente) = LOWER(?))
+                  AND (cliente_id = ? OR documento_cliente = ? OR documento_cliente = ? OR LOWER(documento_cliente) = LOWER(?))
                 ORDER BY fecha_venta ASC, id_venta ASC
-            """, (doc_cli, str(cliente_id), str(nombre_cli)))
+            """, (cliente_id, doc_cli, str(cliente_id), str(nombre_cli)))
             ventas_fiadas = cur.fetchall()
             remanente_ab = float(monto)
             for vf in ventas_fiadas:

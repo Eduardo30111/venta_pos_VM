@@ -559,25 +559,85 @@ async def update_cliente(
 @router.delete("/{id}")
 async def delete_cliente(
     id: int,
+    permanente: bool = False,
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
+    if current_user.rol != "Administrador":
+        raise HTTPException(
+            status_code=403,
+            detail="Operación restringida: Solo los administradores pueden eliminar o desactivar clientes"
+        )
+
     result = await db.execute(select(Cliente).where(Cliente.id == id))
     cliente = result.scalars().first()
     if not cliente:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
 
-    # Validar que no tenga deudas pendientes
+    # 1. Validar que no tenga deudas pendientes
     saldo = await ClienteService.obtener_saldo_cliente(db, id)
     if saldo > 0:
         raise HTTPException(
             status_code=400,
-            detail=f"No se puede eliminar: el cliente tiene un saldo pendiente de ${saldo:,.0f} COP"
+            detail=f"No se puede eliminar: el cliente registra un saldo pendiente de ${saldo:,.0f} COP. Debe saldar la deuda primero."
         )
 
-    cliente.estado = "Inactivo"
+    # 2. Verificar existencia de historial de ventas, cuentas o libro mayor
+    from ..models.venta import Venta
+    from ..models.cuentas_por_cobrar import CuentaPorCobrar, MovimientoCuentaCliente
+
+    res_v = await db.execute(select(func.count(Venta.id)).where(Venta.cliente_id == id))
+    num_ventas = res_v.scalar() or 0
+
+    res_cxc = await db.execute(select(func.count(CuentaPorCobrar.id)).where(CuentaPorCobrar.cliente_id == id))
+    num_cxc = res_cxc.scalar() or 0
+
+    res_mov = await db.execute(select(func.count(MovimientoCuentaCliente.id)).where(MovimientoCuentaCliente.cliente_id == id))
+    num_movs = res_mov.scalar() or 0
+
+    tiene_historial = (num_ventas > 0 or num_cxc > 0 or num_movs > 0)
+
+    if tiene_historial and permanente:
+        raise HTTPException(
+            status_code=400,
+            detail="No es posible la eliminación definitiva: el cliente registra facturas o movimientos contables históricos. Se debe archivar / desactivar."
+        )
+
+    if tiene_historial or not permanente:
+        cliente.estado = "Inactivo"
+        await db.commit()
+        await log_audit(
+            db=db,
+            usuario_id=current_user.id,
+            usuario_nombre=current_user.nombre,
+            terminal_id=None,
+            terminal_nombre="Terminal",
+            accion="ARCHIVAR_CLIENTE",
+            modulo="CLIENTES",
+            tabla_afectada="clientes",
+            registro_id=str(cliente.id),
+            valor_nuevo={"estado": "Inactivo", "motivo": "Archivado con preservación histórica"}
+        )
+        return {"message": "Cliente archivado y desactivado correctamente.", "accion": "ARCHIVADO"}
+
+    # Eliminación definitiva solo cuando no hay ningún registro histórico
+    doc_respaldo = cliente.documento
+    nom_respaldo = cliente.nombre
+    await db.delete(cliente)
     await db.commit()
-    return {"message": "Cliente marcado como inactivo"}
+    await log_audit(
+        db=db,
+        usuario_id=current_user.id,
+        usuario_nombre=current_user.nombre,
+        terminal_id=None,
+        terminal_nombre="Terminal",
+        accion="ELIMINAR_CLIENTE_DEFINITIVO",
+        modulo="CLIENTES",
+        tabla_afectada="clientes",
+        registro_id=str(id),
+        valor_nuevo={"documento": doc_respaldo, "nombre": nom_respaldo, "motivo": "Eliminación definitiva limpia"}
+    )
+    return {"message": "Cliente eliminado definitivamente de la base de datos.", "accion": "ELIMINADO_DEFINITIVO"}
 
 @router.post("/{id}/abonos")
 async def register_abono(

@@ -322,6 +322,25 @@ def inicializar_base_datos(db_path=None):
         except sqlite3.OperationalError:
             pass
 
+        for col_cli in [
+            "limite_credito REAL DEFAULT 0.0",
+            "estado TEXT DEFAULT 'Activo'",
+            "direccion TEXT DEFAULT ''"
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE clientes ADD COLUMN {col_cli}")
+            except sqlite3.OperationalError:
+                pass
+
+        for col_vta in [
+            "cliente_id INTEGER DEFAULT NULL",
+            "saldo_pendiente REAL DEFAULT 0.0"
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE ventas ADD COLUMN {col_vta}")
+            except sqlite3.OperationalError:
+                pass
+
         try:
             cursor.execute("ALTER TABLE productos ADD COLUMN tipo_producto TEXT DEFAULT 'Fisico'")
         except sqlite3.OperationalError:
@@ -610,6 +629,8 @@ def inicializar_base_datos(db_path=None):
         # Índices de aceleración de consultas frecuentes (Ventas, Detalles, Productos y Clientes)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_fecha_estado ON ventas(fecha_venta, estado)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_fecha ON ventas(fecha_venta)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_cliente_id ON ventas(cliente_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_doc_cliente ON ventas(documento_cliente)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_detalle_id_venta ON detalle_ventas(id_venta)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_detalle_codigo ON detalle_ventas(codigo_producto)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_productos_codigo ON productos(codigo)")

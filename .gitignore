@@ -31,6 +31,7 @@ scratch/
 # Base de datos temporales WAL
 *.db-wal
 *.db-shm
+*backup*.db
 
 # Sistema operativo
 .DS_Store

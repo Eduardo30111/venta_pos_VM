@@ -335,11 +335,21 @@ class NetworkDialog:
 
         btn_check = tk.Button(
             f_status_row,
-            text="🔄 Actualizar Estado",
+            text="🔄 Actualizar",
             font=("Segoe UI", 8),
             command=self._verificar_estado_servidor_async
         )
-        btn_check.pack(side="right")
+        btn_check.pack(side="right", padx=2)
+
+        self.btn_iniciar_srv = tk.Button(
+            f_status_row,
+            text="▶ Iniciar Servidor Ahora",
+            font=("Segoe UI", 8, "bold"),
+            bg="#10B981",
+            relief="groove",
+            command=self._iniciar_servidor_click
+        )
+        self.btn_iniciar_srv.pack(side="right", padx=4)
 
         # Mensaje de ayuda / instrucción
         msg_card = tk.Frame(self.frame_servidor, bg="#FEF3C7", padx=10, pady=10, bd=1, relief="solid")
@@ -516,6 +526,24 @@ class NetworkDialog:
 
         threading.Thread(target=_check, daemon=True).start()
 
+    def _iniciar_servidor_click(self):
+        self.estado_servidor_var.set("⏳ Levantando servidor en segundo plano...")
+        self.lbl_status.config(fg="#3B82F6")
+        def _start():
+            ok, msg = iniciar_servidor_segundo_plano()
+            def _done():
+                if ok:
+                    messagebox.showinfo(
+                        "Servidor Activo",
+                        f"{msg}\n\nLas demás computadoras de la red local ya pueden conectarse a la IP: {self.ip_destacada_var.get()}:{self.servidor_puerto_var.get()}",
+                        parent=self.dialog
+                    )
+                else:
+                    messagebox.showwarning("Aviso de Inicio", msg, parent=self.dialog)
+                self._verificar_estado_servidor_async()
+            self.dialog.after(0, _done)
+        threading.Thread(target=_start, daemon=True).start()
+
     def _ejecutar_prueba_conexion(self):
         ip = self.servidor_ip_var.get().strip()
         puerto = int(self.servidor_puerto_var.get() or 8000)
@@ -559,6 +587,10 @@ class NetworkDialog:
 
         ok = guardar_config_red(nueva_config)
         if ok:
+            # Si se configuró como Servidor Principal y el puerto no está activo, iniciarlo automáticamente
+            if modo == "servidor" and not verificar_puerto_abierto("127.0.0.1", puerto, timeout=0.4):
+                iniciar_servidor_segundo_plano()
+
             messagebox.showinfo(
                 "Configuración Guardada",
                 f"La configuración de red ha sido guardada exitosamente.\n\n"

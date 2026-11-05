@@ -67,7 +67,91 @@ except ImportError:
 FONT_FAMILY = "Helvetica Neue" if sys.platform == "darwin" else "Segoe UI"
 FONT_EMOJI = "Apple Color Emoji" if sys.platform == "darwin" else "Segoe UI Emoji"
 
+def abrir_modal_cambio_password_obligatorio(parent, datos_usuario, on_success):
+    modal = tk.Toplevel(parent)
+    modal.title("🔒 Primer Acceso — Definir Contraseña")
+    t_m = aplicar_tema(modal)
+    modal.configure(bg=t_m["bg_surface"])
+    calcular_geometria_segura(modal, 480, 420, 420, 360)
+    modal.transient(parent)
+    modal.grab_set()
+
+    hdr = tk.Frame(modal, bg="#DC2626")
+    hdr.pack(fill="x")
+    tk.Label(hdr, text="🔒 CAMBIO OBLIGATORIO DE CONTRASEÑA", font=(FONT_FAMILY, 11, "bold"), bg="#DC2626", fg="white").pack(pady=10)
+
+    content = tk.Frame(modal, bg=t_m["bg_surface"], padx=20, pady=15)
+    content.pack(fill="both", expand=True)
+
+    tk.Label(
+        content,
+        text="Has iniciado sesión con la contraseña temporal por defecto ('admin123').\n\n"
+             "Por seguridad de los datos y auditoría de tu negocio, debes definir una nueva contraseña personalizada para continuar.",
+        font=(FONT_FAMILY, 9),
+        bg=t_m["bg_surface"],
+        fg=t_m["text_main"],
+        justify="left",
+        wraplength=420
+    ).pack(pady=(0, 15))
+
+    tk.Label(content, text="Nueva Contraseña (mínimo 6 caracteres):", font=(FONT_FAMILY, 9, "bold"), bg=t_m["bg_surface"], fg=t_m["text_main"]).pack(anchor="w")
+    pass1_var = tk.StringVar()
+    e_p1 = tk.Entry(content, textvariable=pass1_var, show="*", font=(FONT_FAMILY, 10), bg=t_m["input_bg"], fg=t_m["input_fg"], bd=1, relief="solid")
+    e_p1.pack(fill="x", pady=(2, 10))
+
+    tk.Label(content, text="Confirmar Nueva Contraseña:", font=(FONT_FAMILY, 9, "bold"), bg=t_m["bg_surface"], fg=t_m["text_main"]).pack(anchor="w")
+    pass2_var = tk.StringVar()
+    e_p2 = tk.Entry(content, textvariable=pass2_var, show="*", font=(FONT_FAMILY, 10), bg=t_m["input_bg"], fg=t_m["input_fg"], bd=1, relief="solid")
+    e_p2.pack(fill="x", pady=(2, 15))
+
+    def confirmar_cambio():
+        p1 = pass1_var.get().strip()
+        p2 = pass2_var.get().strip()
+        if len(p1) < 6:
+            messagebox.showerror("Contraseña Débil", "La nueva contraseña debe tener al menos 6 caracteres.", parent=modal)
+            return
+        if p1 == "admin123":
+            messagebox.showerror("Contraseña Insegura", "No puedes usar la contraseña por defecto. Elige una contraseña diferente.", parent=modal)
+            return
+        if p1 != p2:
+            messagebox.showerror("Contraseñas no coinciden", "Las contraseñas ingresadas no coinciden. Verifícalas.", parent=modal)
+            return
+
+        uid = datos_usuario.get("id", 1)
+        # Actualizar en API
+        try:
+            api.put(f"/usuarios/{uid}", json={"password": p1})
+        except Exception:
+            pass
+
+        # Actualizar en SQLite
+        try:
+            try:
+                from interface.usuarios_db import actualizar_usuario_db
+            except ImportError:
+                from usuarios_db import actualizar_usuario_db
+            actualizar_usuario_db(uid, password=p1)
+        except Exception as e_sql:
+            print(f"Aviso actualizando SQLite de usuarios: {e_sql}")
+
+        messagebox.showinfo("Éxito", "Contraseña personalizada establecida correctamente.\n¡Bienvenido a VmPOS!", parent=modal)
+        modal.destroy()
+        on_success()
+
+    crear_boton(content, "Establecer Nueva Contraseña", confirmar_cambio, tipo="success", icono="💾", tam_fuente=10).pack(fill="x", pady=6)
+
 def _iniciar_flujo_principal(datos_usuario, usuario_actual):
+    clave_ingresada = pass_var.get().strip()
+    if clave_ingresada == "admin123":
+        abrir_modal_cambio_password_obligatorio(
+            ventana,
+            datos_usuario,
+            lambda: _iniciar_flujo_principal_ejecutar(datos_usuario, usuario_actual)
+        )
+    else:
+        _iniciar_flujo_principal_ejecutar(datos_usuario, usuario_actual)
+
+def _iniciar_flujo_principal_ejecutar(datos_usuario, usuario_actual):
     ventana.destroy()
     try:
         from interface.menu_inicio import iniciar_dashboard
@@ -403,6 +487,21 @@ btn_red_link.pack(fill="x", pady=(4, 0))
 ventana.bind("<Return>", validar_usuario)
 ventana.bind("<Escape>", limpiar_campos)
 entry_user.focus()
+
+# Auto-inicio transparente del servidor central si este equipo está configurado como Servidor (Caja Principal)
+def _autoarrancar_servidor_si_es_modo_servidor():
+    try:
+        from interface.network_manager import obtener_config_red, verificar_puerto_abierto, iniciar_servidor_segundo_plano
+        cfg = obtener_config_red()
+        if cfg.get("modo", "servidor") == "servidor":
+            puerto = int(cfg.get("servidor_puerto", 8000))
+            if not verificar_puerto_abierto("127.0.0.1", puerto, timeout=0.3):
+                iniciar_servidor_segundo_plano()
+    except Exception as e_srv:
+        print(f"Aviso auto-arrancando servidor central: {e_srv}")
+
+import threading
+threading.Thread(target=_autoarrancar_servidor_si_es_modo_servidor, daemon=True).start()
 
 if __name__ == "__main__":
     ventana.lift()

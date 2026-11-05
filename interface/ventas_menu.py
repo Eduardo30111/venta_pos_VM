@@ -109,6 +109,11 @@ def guardar_venta_sqlite(
                 cr = cur.fetchone()
                 if cr and cr[0]:
                     doc = str(cr[0]).strip()
+                elif not cr and doc and doc != "Consumidor Final":
+                    cur.execute("""
+                        INSERT INTO clientes (id, cedula, nombre, permite_fiado, saldo_pendiente, fecha_registro)
+                        VALUES (?, ?, ?, 1, 0.0, ?)
+                    """, (cli_id_int, doc, f"Cliente #{cli_id_int}", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             except Exception:
                 pass
         elif doc and doc != "Consumidor Final":
@@ -2284,7 +2289,7 @@ class App:
         ventana = tk.Toplevel(self.ventana)
         ventana.title("💳 Procesar Pago - POS")
         t_p = aplicar_tema(ventana)
-        calcular_geometria_segura(ventana, 500, 520, 420, 390)
+        calcular_geometria_segura(ventana, 540, 620, 440, 420)
         ventana.configure(bg=t_p["bg_app"])
         ventana.grab_set()
 
@@ -2298,11 +2303,11 @@ class App:
         footer_p = tk.Frame(ventana, bg=t_p["bg_app"])
         footer_p.pack(side="bottom", fill="x", padx=15, pady=12)
 
-        imprimir_var = tk.BooleanVar(value=False)
+        clientes_fiado_map = {}
+        total_val = int(round(self.total_general.get()))
 
         def completar():
             metodo = metodo_var.get()
-            total_val = int(round(self.total_general.get()))
             try:
                 if metodo == "Efectivo":
                     monto_ef = entry_efectivo.get_value()
@@ -2315,12 +2320,44 @@ class App:
                 elif metodo == "Fiado":
                     seleccion = combo_clientes.get()
                     if not seleccion:
-                        messagebox.showerror("Error", "Debe seleccionar un cliente habilitado para fiado.", parent=ventana)
+                        messagebox.showerror("Error", "Debe seleccionar un cliente registrado y autorizado para fiado.", parent=ventana)
                         return
-                    id_cliente = seleccion.split(" - ")[0]
-                    self._abrir_dialogo_recibo(ventana, 0, total_val, metodo, id_cliente)
-            except (tk.TclError, ValueError):
-                messagebox.showerror("Error", "Error en los datos ingresados.", parent=ventana)
+                    cid_str = seleccion.split(" - ")[0].strip()
+                    cli_info = clientes_fiado_map.get(cid_str)
+                    if not cli_info:
+                        messagebox.showerror("Error", f"No se pudo cargar la información del cliente #{cid_str}.", parent=ventana)
+                        return
+                    
+                    # Validar Límite de Crédito
+                    lim = float(cli_info.get("limite_credito") or 0.0)
+                    saldo_act = float(cli_info.get("saldo_pendiente") or 0.0)
+                    cupo_disp = max(0.0, lim - saldo_act) if lim > 0 else float("inf")
+                    
+                    if lim > 0 and (saldo_act + total_val > lim):
+                        exceso = (saldo_act + total_val) - lim
+                        messagebox.showerror(
+                            "Límite de Crédito Excedido",
+                            f"❌ La venta no puede realizarse como fiada:\n\n"
+                            f"Cliente: {cli_info['nombre']}\n"
+                            f"Límite de crédito total: ${lim:,.0f} COP\n"
+                            f"Saldo pendiente actual: ${saldo_act:,.0f} COP\n"
+                            f"Cupo disponible: ${cupo_disp:,.0f} COP\n"
+                            f"Valor de esta venta: ${total_val:,.0f} COP\n\n"
+                            f"⚠️ Exceso sobre el límite: ${exceso:,.0f} COP\n\n"
+                            f"El cliente debe abonar a su saldo pendiente o aumentar su límite de crédito.",
+                            parent=ventana
+                        )
+                        return
+
+                    # Auto-rellenar y vincular el documento del cliente seleccionado
+                    doc_oficial = str(cli_info.get("documento") or "").strip()
+                    if doc_oficial:
+                        self.documento.delete(0, tk.END)
+                        self.documento.insert(0, doc_oficial)
+
+                    self._abrir_dialogo_recibo(ventana, 0, total_val, metodo, cid_str)
+            except (tk.TclError, ValueError) as err:
+                messagebox.showerror("Error", f"Error en los datos ingresados: {err}", parent=ventana)
 
         btn_confirmar = crear_boton(footer_p, "Confirmar Venta", command=completar, tipo="success", icono="✅", tam_fuente=11)
         btn_confirmar.pack(side="right", padx=5)
@@ -2349,13 +2386,12 @@ class App:
         frame_dinamico = tk.Frame(body_p, bg=t_p["bg_surface"], bd=1, relief="solid", padx=10, pady=10)
         frame_dinamico.pack(fill="both", expand=True, pady=10)
         
-        # Efectivo widgets con CurrencyEntry (eliminado el problema de '0.0')
+        # Efectivo widgets
         lbl_efectivo = tk.Label(frame_dinamico, text="💵 Efectivo recibido:", font=("Segoe UI", 11, "bold"), bg=t_p["bg_surface"], fg=t_p["text_main"])
         lbl_cambio = tk.Label(frame_dinamico, text="💰 Cambio: $ 0 COP", font=("Segoe UI", 12, "bold"), bg=t_p["bg_surface"], fg="#059669")
         
-        total_a_pagar = int(round(self.total_general.get()))
         def al_cambiar_efectivo(val_recibido):
-            cambio = max(0, val_recibido - total_a_pagar)
+            cambio = max(0, val_recibido - total_val)
             lbl_cambio.config(text=f"💰 Cambio: {formatear_cop(cambio)} COP")
 
         entry_efectivo = CurrencyEntry(
@@ -2373,47 +2409,139 @@ class App:
         )
         entry_efectivo.bind("<Return>", lambda e: completar())
         
-        # Fiado widgets
+        # Fiado widgets & Card de Límites de Crédito
         lbl_fiado = tk.Label(frame_dinamico, text="Cliente Autorizado para Fiado:", font=("Segoe UI", 10, "bold"), bg=t_p["bg_surface"], fg=t_p["text_main"])
-        combo_clientes = ttk.Combobox(frame_dinamico, state="readonly", width=30, font=("Segoe UI", 10))
+        combo_clientes = ttk.Combobox(frame_dinamico, state="readonly", width=34, font=("Segoe UI", 10))
+        
+        card_credito = tk.Frame(frame_dinamico, bg=t_p["bg_card"], bd=1, relief="solid", padx=12, pady=8)
+        lbl_cc_cli = tk.Label(card_credito, text="Cliente: —", font=("Segoe UI", 9, "bold"), bg=t_p["bg_card"], fg=t_p["text_main"])
+        lbl_cc_cli.pack(anchor="w", pady=1)
+        lbl_cc_limites = tk.Label(card_credito, text="Límite: $0 | Saldo actual: $0", font=("Segoe UI", 9), bg=t_p["bg_card"], fg=t_p["text_muted"])
+        lbl_cc_limites.pack(anchor="w", pady=1)
+        lbl_cc_cupo = tk.Label(card_credito, text="Cupo Disponible: $0", font=("Segoe UI", 10, "bold"), bg=t_p["bg_card"], fg=t_p["btn_success_bg"])
+        lbl_cc_cupo.pack(anchor="w", pady=1)
+        lbl_cc_alerta = tk.Label(card_credito, text="", font=("Segoe UI", 9, "bold"), bg=t_p["bg_card"], fg=t_p["btn_danger_bg"], wraplength=380, justify="left")
+        lbl_cc_alerta.pack(anchor="w", pady=2)
+
+        def al_seleccionar_cliente(event=None):
+            sel = combo_clientes.get()
+            if not sel:
+                return
+            cid_str = sel.split(" - ")[0].strip()
+            c_info = clientes_fiado_map.get(cid_str)
+            if not c_info:
+                return
+            
+            # Sincronizar documento oficial en la venta principal
+            doc = c_info.get("documento") or ""
+            if doc:
+                self.documento.delete(0, tk.END)
+                self.documento.insert(0, doc)
+
+            lim = float(c_info.get("limite_credito") or 0.0)
+            saldo = float(c_info.get("saldo_pendiente") or 0.0)
+            cupo = max(0.0, lim - saldo) if lim > 0 else float("inf")
+            cupo_str = f"${cupo:,.0f} COP" if lim > 0 else "Sin Límite Asignado"
+
+            lbl_cc_cli.config(text=f"👤 {c_info.get('nombre')} | Doc: {doc or '—'} | Tel: {c_info.get('telefono') or '—'}")
+            lbl_cc_limites.config(text=f"Límite Total: ${lim:,.0f} COP | Saldo Pendiente: ${saldo:,.0f} COP")
+            lbl_cc_cupo.config(text=f"Cupo Disponible: {cupo_str}", fg=t_p["btn_success_bg"] if (lim == 0 or cupo >= total_val) else t_p["btn_danger_bg"])
+
+            if lim > 0 and (saldo + total_val > lim):
+                exceso = (saldo + total_val) - lim
+                lbl_cc_alerta.config(text=f"⚠️ VENTA SUPERA EL LÍMITE POR ${exceso:,.0f} COP", fg="#DC2626")
+                btn_confirmar.config(text="⚠️ Cupo Excedido")
+            else:
+                lbl_cc_alerta.config(text="✅ Cupo disponible para procesar la venta", fg="#059669")
+                btn_confirmar.config(text="Confirmar Venta")
+
+        combo_clientes.bind("<<ComboboxSelected>>", al_seleccionar_cliente)
         
         def actualizar_vista(*args):
             for w in frame_dinamico.winfo_children():
                 w.pack_forget()
                 
             metodo = metodo_var.get()
+            btn_confirmar.config(text="Confirmar Venta")
             if metodo == "Efectivo":
                 lbl_efectivo.pack(pady=(4, 2))
                 entry_efectivo.pack(pady=4)
                 lbl_cambio.pack(pady=(4, 2))
                 entry_efectivo.focus()
             elif metodo == "Fiado":
-                lbl_fiado.pack(pady=4)
-                combo_clientes.pack(pady=4)
+                lbl_fiado.pack(pady=(4, 2))
+                combo_clientes.pack(pady=(2, 6))
+                card_credito.pack(fill="x", pady=6)
+                
+                clientes_fiado_map.clear()
                 valores_fiado = []
+
+                # 1. Intentar cargar desde API
                 try:
                     resp = api.get("/clientes")
                     if resp.status_code == 200:
                         clientes_api = resp.json()
-                        clientes_fiado = [c for c in clientes_api if c.get("permite_fiado", False)]
-                        valores_fiado = [f"{c.get('id')} - {c.get('nombre')} ({c.get('cedula', '')})" for c in clientes_fiado]
+                        for c in clientes_api:
+                            if c.get("permite_fiado", False) and str(c.get("estado", "Activo")).lower() != "inactivo":
+                                cid = str(c.get("id"))
+                                doc = str(c.get("documento") or c.get("cedula") or "").strip()
+                                nom = str(c.get("nombre") or "").strip()
+                                lim = float(c.get("limite_credito") or 0.0)
+                                sal = float(c.get("saldo_pendiente") or 0.0)
+                                tel = str(c.get("telefono") or "").strip()
+                                clientes_fiado_map[cid] = {
+                                    "id": cid,
+                                    "nombre": nom,
+                                    "documento": doc,
+                                    "limite_credito": lim,
+                                    "saldo_pendiente": sal,
+                                    "telefono": tel
+                                }
+                                valores_fiado.append(f"{cid} - {nom} ({doc or 'Sin Doc'})")
                 except Exception as e:
-                    print(f"Error cargando clientes API: {e}")
+                    print(f"Aviso cargando clientes Fiado API: {e}")
 
+                # 2. Respaldo local SQLite si API está offline
                 if not valores_fiado:
                     try:
                         conn_c = conectar_db()
                         if conn_c:
                             cur_c = conn_c.cursor()
-                            cur_c.execute("SELECT id, nombre, cedula FROM clientes WHERE permite_fiado = 1 ORDER BY nombre")
-                            valores_fiado = [f"{r[0]} - {r[1]} ({r[2] or ''})" for r in cur_c.fetchall()]
+                            cur_c.execute("""
+                                SELECT id, nombre, cedula, limite_credito, saldo_pendiente, telefono 
+                                FROM clientes 
+                                WHERE permite_fiado = 1 AND (estado IS NULL OR estado != 'Inactivo')
+                                ORDER BY nombre
+                            """)
+                            for r in cur_c.fetchall():
+                                cid = str(r[0])
+                                nom = str(r[1] or "")
+                                doc = str(r[2] or "").strip()
+                                lim = float(r[3] or 0.0)
+                                sal = float(r[4] or 0.0)
+                                tel = str(r[5] or "").strip()
+                                clientes_fiado_map[cid] = {
+                                    "id": cid,
+                                    "nombre": nom,
+                                    "documento": doc,
+                                    "limite_credito": lim,
+                                    "saldo_pendiente": sal,
+                                    "telefono": tel
+                                }
+                                valores_fiado.append(f"{cid} - {nom} ({doc or 'Sin Doc'})")
                             conn_c.close()
                     except Exception as e_cli:
-                        print(f"Error cargando clientes SQLite: {e_cli}")
+                        print(f"Aviso cargando clientes Fiado SQLite: {e_cli}")
 
                 combo_clientes['values'] = valores_fiado
                 if valores_fiado:
                     combo_clientes.current(0)
+                    al_seleccionar_cliente()
+                else:
+                    lbl_cc_cli.config(text="No hay clientes habilitados para fiado.")
+                    lbl_cc_limites.config(text="Cree clientes con permiso de crédito en el módulo Clientes y Fiado.")
+                    lbl_cc_cupo.config(text="")
+                    lbl_cc_alerta.config(text="")
             elif metodo == "Transferencia":
                 tk.Label(frame_dinamico, text="📱 Pago inmediato por Transferencia\n(Nequi, Daviplata, Bancolombia)", 
                          font=("Segoe UI", 10, "italic"), bg="#FFE4E1", fg="#2D3436").pack(pady=15)
@@ -2545,6 +2673,23 @@ class App:
             doc_cli = self.documento.get().strip()
             cliente_id_val = int(id_cliente) if id_cliente and str(id_cliente).isdigit() else (int(doc_cli) if doc_cli and doc_cli.isdigit() else None)
 
+            # Para ventas a crédito (Fiado), garantizar que el documento nunca quede vacío ni como 'Consumidor Final'
+            if str(metodo_pago) == "Fiado":
+                if (not doc_cli or doc_cli == "Consumidor Final") and cliente_id_val:
+                    try:
+                        conn_doc = conectar_db()
+                        if conn_doc:
+                            cur_doc = conn_doc.cursor()
+                            cur_doc.execute("SELECT cedula FROM clientes WHERE id = ?", (cliente_id_val,))
+                            row_doc = cur_doc.fetchone()
+                            if row_doc and row_doc[0]:
+                                doc_cli = str(row_doc[0]).strip()
+                            conn_doc.close()
+                    except Exception:
+                        pass
+                if not doc_cli:
+                    doc_cli = f"CLI-{cliente_id_val}"
+
             if getattr(self, 'orden_id_activa', None):
                 cobro_payload = {
                     "pagos": [
@@ -2589,7 +2734,7 @@ class App:
                 venta_respuesta = resp.json()
                 numero_factura = venta_respuesta.get("numero", self.factura_num)
                 id_local = guardar_venta_sqlite(
-                    self.documento.get(), total, metodo_pago, detalles_payload,
+                    doc_cli, total, metodo_pago, detalles_payload,
                     operario_nombre, cliente_id=cliente_id_val,
                     recibido=recibido, cambio=cambio_calc,
                     numero_factura=numero_factura, snapshot_negocio=snapshot_actual
@@ -2597,7 +2742,7 @@ class App:
                 venta_exitosa = True
             else:
                 id_local = guardar_venta_sqlite(
-                    self.documento.get(), total, metodo_pago, detalles_payload,
+                    doc_cli, total, metodo_pago, detalles_payload,
                     operario_nombre, cliente_id=cliente_id_val,
                     recibido=recibido, cambio=cambio_calc,
                     numero_factura="", snapshot_negocio=snapshot_actual

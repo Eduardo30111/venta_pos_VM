@@ -331,44 +331,83 @@ def construir_url_servidor(ip: str = None, puerto: int = None) -> str:
 
 def iniciar_servidor_segundo_plano() -> Tuple[bool, str]:
     """
-    Intenta iniciar el servidor FastAPI local en segundo plano si no está activo.
+    Intenta iniciar el servidor FastAPI local en segundo plano si no está activo,
+    sin mostrar consolas negras en Windows y habilitando el puerto en Firewall si es necesario.
     """
     global _PROCESO_SERVIDOR_LOCAL
+    import shutil
 
-    # Verificar si ya está escuchando
+    # 1. Verificar si ya está escuchando
     cfg = obtener_config_red()
     puerto = int(cfg.get("servidor_puerto", 8000))
     if verificar_puerto_abierto("127.0.0.1", puerto, timeout=0.5):
         return True, f"El servidor ya está activo y escuchando en el puerto {puerto}."
 
-    # Intentar levantarlo con uvicorn vía Python del entorno virtual o sistema
-    python_bin = sys.executable
     server_dir = os.path.join(_PROJECT_ROOT, "server")
-
     if not os.path.exists(server_dir):
         return False, f"No se encontró el directorio del servidor en {server_dir}"
 
+    # 2. Localizar el intérprete Python adecuado (evitando binario congelado .exe/.app)
+    python_candidatos = [
+        os.path.join(_PROJECT_ROOT, "venv", "Scripts", "python.exe"),
+        os.path.join(_PROJECT_ROOT, ".venv", "Scripts", "python.exe"),
+        os.path.join(_PROJECT_ROOT, "venv", "bin", "python"),
+        os.path.join(_PROJECT_ROOT, ".venv", "bin", "python"),
+        sys.executable,
+        "python",
+        "py",
+        "python3"
+    ]
+    python_bin = None
+    for p in python_candidatos:
+        if os.path.isabs(p) and os.path.exists(p) and not p.lower().endswith("vmpos.exe"):
+            python_bin = p
+            break
+        elif not os.path.isabs(p):
+            found = shutil.which(p)
+            if found and not found.lower().endswith("vmpos.exe"):
+                python_bin = found
+                break
+
+    if not python_bin:
+        python_bin = sys.executable
+
+    # 3. Habilitar regla de Firewall en Windows para el puerto de comunicación multi-caja
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                f'netsh advfirewall firewall add rule name="VmPOS Server {puerto}" dir=in action=allow protocol=TCP localport={puerto}',
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=0x08000000
+            )
+        except Exception:
+            pass
+
     try:
-        # Comando para iniciar uvicorn escuchando en 0.0.0.0
         cmd = [
             python_bin, "-m", "uvicorn", "server.main:app",
             "--host", "0.0.0.0",
             "--port", str(puerto)
         ]
-        _PROCESO_SERVIDOR_LOCAL = subprocess.Popen(
-            cmd,
-            cwd=_PROJECT_ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
+        popen_kwargs = {
+            "cwd": _PROJECT_ROOT,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL
+        }
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW silencioso
 
-        # Esperar hasta 4 segundos a que el puerto abra
-        for _ in range(8):
+        _PROCESO_SERVIDOR_LOCAL = subprocess.Popen(cmd, **popen_kwargs)
+
+        # Esperar hasta 5 segundos a que el puerto abra
+        for _ in range(10):
             time.sleep(0.5)
             if verificar_puerto_abierto("127.0.0.1", puerto, timeout=0.2):
                 return True, f"Servidor iniciado exitosamente en http://0.0.0.0:{puerto}"
 
-        return False, "El proceso se inició pero el puerto aún no responde. Revisa que PostgreSQL o las dependencias estén activas."
+        return False, "El proceso del servidor se inició en segundo plano pero aún no responde en el puerto. Verifique la base de datos o dependencias."
     except Exception as e:
         return False, f"Error al iniciar el servidor local: {e}"
 
