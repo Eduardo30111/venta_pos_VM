@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Archivo: interface/network_manager.py
-Gestión de red, detección automática de IP/puerto, diagnóstico de conectividad
-y persistencia de configuración de terminales para VmPOS.
+Gestión de red, detección automática de IP/puerto, diagnóstico real de salud (/api/health),
+control de proceso único del servidor con registro de logs y persistencia de terminales para VmPOS.
 """
 
 import os
@@ -11,20 +11,75 @@ import sys
 import json
 import time
 import socket
+import shutil
+import threading
+import traceback
 import urllib.request
 import urllib.error
 import subprocess
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any
 
-# Rutas de persistencia de configuración de red
+try:
+    from interface.config import (
+        USER_DATA_DIR,
+        CONFIG_DIR,
+        LOGS_DIR,
+        OFFICIAL_SERVER_PORT,
+    )
+except Exception:
+    _CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+    USER_DATA_DIR = os.path.abspath(os.path.join(_CURRENT_DIR, ".."))
+    CONFIG_DIR = os.path.join(USER_DATA_DIR, "config")
+    LOGS_DIR = os.path.join(USER_DATA_DIR, "logs")
+    OFFICIAL_SERVER_PORT = 8000
+
 _CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_CURRENT_DIR, ".."))
+
+os.makedirs(CONFIG_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+NETWORK_CONFIG_MAIN = os.path.join(CONFIG_DIR, "network_config.json")
 NETWORK_CONFIG_LOCAL = os.path.join(_PROJECT_ROOT, "network_config.json")
 CONFIG_DIR_USER = os.path.expanduser("~/.vmpos")
 NETWORK_CONFIG_USER = os.path.join(CONFIG_DIR_USER, "network_config.json")
 
-# Variable global para guardar referencia al proceso del servidor local si se lanza desde la app
+SERVER_LOG_PATH = os.path.join(LOGS_DIR, "server.log")
+SERVER_PID_PATH = os.path.join(LOGS_DIR, "server.pid")
+
 _PROCESO_SERVIDOR_LOCAL = None
+_UVICORN_SERVER_INSTANCE = None
+_LOCK_ARRANQUE = threading.Lock()
+_ESTADO_SERVIDOR = "detenido"  # "detenido" | "iniciando" | "activo" | "error" | "deteniendo"
+_ULTIMO_ERROR_SERVIDOR = ""
+
+
+def _registrar_log_servidor(mensaje: str):
+    """Escribe una línea con marca de tiempo en logs/server.log."""
+    try:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(SERVER_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {mensaje}\n")
+    except Exception:
+        pass
+
+
+def leer_ultimas_lineas_log(max_lineas: int = 12) -> str:
+    """Devuelve las últimas líneas relevantes de server.log para diagnóstico real."""
+    if not os.path.exists(SERVER_LOG_PATH):
+        return ""
+    try:
+        with open(SERVER_LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+            lineas = [ln.rstrip() for ln in f.readlines() if ln.strip()]
+        return "\n".join(lineas[-max_lineas:])
+    except Exception:
+        return ""
+
+
+def obtener_estado_control_servidor() -> str:
+    """Retorna el estado actual del controlador: detenido, iniciando, activo, error, deteniendo."""
+    return _ESTADO_SERVIDOR
 
 
 def _es_ip_valida_lan(ip: str) -> bool:
@@ -36,7 +91,6 @@ def _es_ip_valida_lan(ip: str) -> bool:
         return False
     if ip.startswith("127.") or ip.startswith("169.254."):
         return False
-    # Descartar rangos típicos de adaptadores virtuales Host-Only de VirtualBox
     if ip.startswith("192.168.56."):
         return False
     return True
@@ -45,28 +99,25 @@ def _es_ip_valida_lan(ip: str) -> bool:
 def _prioridad_ip(ip: str) -> int:
     """Asigna menor número a las IPs más probablemente conectadas a la red física principal."""
     if ip.startswith("192.168.") and not ip.startswith("192.168.56."):
-        return 1  # Subred LAN comercial/hogar más común
+        return 1
     if ip.startswith("10."):
-        return 2  # Subred corporativa Clase A
+        return 2
     if ip.startswith("172."):
         partes = ip.split(".")
         if len(partes) == 4 and partes[1].isdigit():
             seg = int(partes[1])
             if 16 <= seg <= 31:
-                return 3  # Subred Clase B (o Hyper-V / Docker)
+                return 3
     return 4
 
 
 def obtener_ips_locales() -> List[str]:
     """
-    Detecta automáticamente las direcciones IP locales de la computadora
-    (WiFi o cable Ethernet), descartando adaptadores virtuales (WSL, Hyper-V, VirtualBox, APIPA),
-    y ordenando por prioridad de interfaz física activa conectada al router.
+    Detecta automáticamente las direcciones IP locales de la computadora (WiFi o Ethernet),
+    descartando adaptadores virtuales y ordenando por prioridad de red LAN.
     """
     candidatos = []
 
-    # Método 1: Socket UDP hacia un destino externo/gateway sin transmitir paquetes
-    # El kernel del SO resuelve la interfaz de ruta por defecto
     for dest in [("8.8.8.8", 80), ("1.1.1.1", 80), ("192.168.1.1", 80), ("10.0.0.1", 80)]:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -80,17 +131,14 @@ def obtener_ips_locales() -> List[str]:
         except Exception:
             pass
 
-    # Método 2: En Windows, inspeccionar adaptadores con ipconfig para evitar adaptadores virtuales
     if sys.platform == "win32":
         try:
             out = subprocess.check_output("ipconfig", stderr=subprocess.DEVNULL, text=True, shell=True)
             bloque_virtual = False
             for line in out.splitlines():
                 line_lower = line.lower()
-                # Detectar encabezado de adaptador
                 if ":" in line and not line.startswith(" "):
-                    # Descartar si el nombre del adaptador indica virtualización
-                    if any(v in line_lower for v in ("vEthernet", "virtual", "wsl", "vmware", "virtualbox", "host-only", "tap", "npcap", "bluetooth")):
+                    if any(v in line_lower for v in ("vethernet", "virtual", "wsl", "vmware", "virtualbox", "host-only", "tap", "npcap", "bluetooth")):
                         bloque_virtual = True
                     else:
                         bloque_virtual = False
@@ -104,7 +152,6 @@ def obtener_ips_locales() -> List[str]:
         except Exception:
             pass
 
-    # Método 3: socket.gethostbyname_ex del hostname local
     try:
         hostname = socket.gethostname()
         for ip in socket.gethostbyname_ex(hostname)[2]:
@@ -113,7 +160,6 @@ def obtener_ips_locales() -> List[str]:
     except Exception:
         pass
 
-    # Método 4: En macOS/Linux, fallback con ifconfig o ip addr
     if not candidatos:
         try:
             cmd = ["ip", "-4", "addr", "show"] if sys.platform != "darwin" else ["ifconfig"]
@@ -130,17 +176,14 @@ def obtener_ips_locales() -> List[str]:
         except Exception:
             pass
 
-    # Ordenar candidatos según prioridad física LAN
     candidatos.sort(key=_prioridad_ip)
-
     if not candidatos:
         candidatos.append("127.0.0.1")
-
     return candidatos
 
 
-def verificar_puerto_abierto(host: str = "127.0.0.1", puerto: int = 8000, timeout: float = 1.0) -> bool:
-    """Verifica si un puerto TCP específico está abierto y escuchando."""
+def verificar_puerto_abierto(host: str = "127.0.0.1", puerto: int = OFFICIAL_SERVER_PORT, timeout: float = 0.8) -> bool:
+    """Verifica si un puerto TCP específico está abierto y aceptando conexiones."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
@@ -151,98 +194,117 @@ def verificar_puerto_abierto(host: str = "127.0.0.1", puerto: int = 8000, timeou
         return False
 
 
-def probar_conexion(host_o_url: str, puerto: int = 8000, timeout: float = 3.0) -> Tuple[bool, str, float]:
+def verificar_salud_servidor(
+    host_o_url: str = "127.0.0.1",
+    puerto: int = OFFICIAL_SERVER_PORT,
+    timeout: float = 2.5,
+) -> Tuple[bool, Dict[str, Any], str, float]:
     """
-    Realiza una prueba de conectividad HTTP al servidor VmPOS.
-    Retorna: (exito: bool, mensaje: str, latencia_ms: float)
+    Comprueba de forma real el endpoint `/api/health` del servidor VmPOS:
+    - Proceso escuchando en el puerto.
+    - FastAPI respondiendo HTTP 200.
+    - Base de datos conectada (`database == "connected"`).
+    - Identidad de la aplicación (`app == "VmPOS"` y `status == "ok"`).
+    Retorna: (saludable: bool, payload: dict, mensaje: str, latencia_ms: float)
     """
     raw = str(host_o_url or "").strip()
     if not raw:
-        return False, "La dirección IP o URL del servidor está vacía", 0.0
+        return False, {}, "La dirección IP del servidor está vacía.", 0.0
 
-    # Normalizar URL
     if not raw.startswith("http://") and not raw.startswith("https://"):
-        url = f"http://{raw}:{puerto}"
+        base_url = f"http://{raw}:{int(puerto)}"
     else:
-        url = raw
-        # Si no tiene puerto especificado en la URL y se pasó uno distinto a 80/443
-        if ":" not in url.replace("http://", "").replace("https://", ""):
-            url = f"{url}:{puerto}"
+        base_url = raw.rstrip("/")
+        sin_proto = base_url.replace("http://", "").replace("https://", "")
+        if ":" not in sin_proto:
+            base_url = f"{base_url}:{int(puerto)}"
 
-    url = url.rstrip("/")
     t_inicio = time.time()
-
-    # Intentar endpoint de documentación o raíz de FastAPI
-    endpoints_a_probar = [f"{url}/docs", f"{url}/openapi.json", f"{url}/"]
-
-    ultimo_error = ""
-    for ep in endpoints_a_probar:
+    for ep in [f"{base_url}/api/health", f"{base_url}/health"]:
         try:
-            req = urllib.request.Request(ep, headers={"User-Agent": "VmPOS-Ping/4.0"})
+            req = urllib.request.Request(ep, headers={"User-Agent": "VmPOS-HealthCheck/4.0"})
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 codigo = response.getcode()
+                cuerpo = response.read().decode("utf-8", errors="replace")
                 latencia_ms = round((time.time() - t_inicio) * 1000, 1)
-                if codigo in (200, 301, 302, 307, 308, 404):
-                    return True, f"¡Conexión exitosa con el servidor VmPOS! (HTTP {codigo})", latencia_ms
+                if codigo == 200:
+                    datos = json.loads(cuerpo)
+                    if isinstance(datos, dict) and datos.get("status") == "ok" and datos.get("app") == "VmPOS":
+                        if datos.get("database") == "connected":
+                            neg = datos.get("nombre_negocio") or "VmPOS"
+                            return True, datos, f"Servidor VmPOS activo ({neg}) — Base de datos conectada", latencia_ms
+                        return False, datos, "El servidor respondió pero la base de datos no está conectada.", latencia_ms
         except urllib.error.HTTPError as e:
             latencia_ms = round((time.time() - t_inicio) * 1000, 1)
-            # El servidor respondió (ej: 401 Unauthorized o 404), lo que confirma que está activo y alcanzable
-            return True, f"Servidor alcanzado correctamente (HTTP {e.code})", latencia_ms
+            try:
+                err_body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                err_body = str(e)
+            return False, {}, f"El servidor respondió con error HTTP {e.code}: {err_body}", latencia_ms
         except urllib.error.URLError as e:
             ultimo_error = str(e.reason)
         except Exception as e:
             ultimo_error = str(e)
 
-    # Diagnóstico del error
-    err_lower = ultimo_error.lower()
+    err_lower = ultimo_error.lower() if "ultimo_error" in locals() else ""
     if "connection refused" in err_lower or "111" in err_lower or "10061" in err_lower:
-        msg = f"Servidor no responde en {url}. Verifica que VmPOS esté iniciado en la PC Servidor."
+        msg = f"El servidor no está escuchando en {base_url}. Verifica que el Servidor VmPOS esté iniciado."
     elif "timed out" in err_lower or "timeout" in err_lower:
-        msg = f"Tiempo de espera agotado ({timeout}s). Verifica que ambas computadoras estén en la misma red y que el Firewall permita el puerto {puerto}."
-    elif "no route to host" in err_lower or "network is unreachable" in err_lower:
-        msg = "No hay ruta hacia el servidor. Verifica que el cable de red o WiFi esté conectado."
+        msg = f"Tiempo de espera agotado ({timeout}s) hacia {base_url}. Verifica que ambas computadoras estén en la misma red y que el Firewall permita el puerto {puerto}."
     else:
-        msg = f"No se pudo conectar a {url}: {ultimo_error}"
+        msg = f"No se pudo verificar el estado de salud en {base_url}: {locals().get('ultimo_error', 'Sin respuesta')}"
+    return False, {}, msg, 0.0
 
-    return False, msg, 0.0
+
+def probar_conexion(host_o_url: str, puerto: int = OFFICIAL_SERVER_PORT, timeout: float = 3.0) -> Tuple[bool, str, float]:
+    """
+    Realiza una prueba real de conectividad y salud contra `/api/health` del servidor VmPOS.
+    Retorna: (exito: bool, mensaje: str, latencia_ms: float)
+    """
+    ok, _datos, msg, latencia_ms = verificar_salud_servidor(host_o_url, puerto=puerto, timeout=timeout)
+    return ok, msg, latencia_ms
 
 
 def obtener_config_red() -> Dict[str, Any]:
     """
-    Obtiene la configuración de red actual con fallback a variables de entorno o valores por defecto.
+    Obtiene la configuración de red actual desde la fuente oficial (`CONFIG_DIR/network_config.json`),
+    normalizando claves heredadas (`tipo_nodo` -> `modo`) y puerto oficial (`8000`).
     """
     config_defecto = {
-        "modo": "servidor",               # "servidor" o "cliente"
+        "modo": "servidor",
         "servidor_ip": "127.0.0.1",
-        "servidor_puerto": 8000,
+        "servidor_puerto": OFFICIAL_SERVER_PORT,
         "terminal_id": 1,
         "terminal_nombre": "CAJA-01",
-        "timeout_segundos": 10
+        "timeout_segundos": 10,
     }
 
-    # Detectar IP real para el valor por defecto si es servidor
     ips = obtener_ips_locales()
     if ips and ips[0] != "127.0.0.1":
         config_defecto["servidor_ip"] = ips[0]
 
     datos = {}
-    # 1. Intentar archivo local de proyecto
-    if os.path.exists(NETWORK_CONFIG_LOCAL):
-        try:
-            with open(NETWORK_CONFIG_LOCAL, "r", encoding="utf-8") as f:
-                datos = json.load(f)
-        except Exception:
-            pass
+    for ruta in (NETWORK_CONFIG_MAIN, NETWORK_CONFIG_USER, NETWORK_CONFIG_LOCAL):
+        if os.path.exists(ruta):
+            try:
+                with open(ruta, "r", encoding="utf-8") as f:
+                    cargado = json.load(f)
+                if isinstance(cargado, dict) and cargado:
+                    datos = cargado
+                    break
+            except Exception:
+                continue
 
-    # 2. Si no, intentar en el directorio de usuario ~/.vmpos/
-    if not datos and os.path.exists(NETWORK_CONFIG_USER):
+    if isinstance(datos, dict):
+        if "modo" not in datos and "tipo_nodo" in datos:
+            datos["modo"] = datos.get("tipo_nodo", "servidor")
+        if str(datos.get("modo", "")).lower() not in ("servidor", "cliente"):
+            datos["modo"] = "servidor"
         try:
-            with open(NETWORK_CONFIG_USER, "r", encoding="utf-8") as f:
-                datos = json.load(f)
+            datos["servidor_puerto"] = int(datos.get("servidor_puerto") or OFFICIAL_SERVER_PORT)
         except Exception:
-            pass
+            datos["servidor_puerto"] = OFFICIAL_SERVER_PORT
 
-    # 3. Mezclar con variables de entorno si existen
     env_url = os.getenv("API_BASE_URL")
     if env_url:
         try:
@@ -265,193 +327,310 @@ def obtener_config_red() -> Dict[str, Any]:
     if os.getenv("TERMINAL_NOMBRE"):
         datos["terminal_nombre"] = os.getenv("TERMINAL_NOMBRE")
 
-    # Combinar con valores por defecto
     resultado = dict(config_defecto)
     if isinstance(datos, dict):
         resultado.update(datos)
-
+    resultado.pop("tipo_nodo", None)
     return resultado
 
 
 def guardar_config_red(datos: Dict[str, Any]) -> bool:
     """
-    Guarda la configuración de red en disco (tanto en el proyecto como en ~/.vmpos/)
-    y actualiza la instancia activa de APIClient.
+    Guarda la configuración de red en la ubicación oficial (`CONFIG_DIR/network_config.json`),
+    actualiza `APIClient` en memoria y sincroniza la configuración comercial si es Caja Secundaria.
     """
     try:
         actual = obtener_config_red()
         actual.update(datos)
+        actual.pop("tipo_nodo", None)
+        actual["modo"] = "cliente" if str(actual.get("modo", "")).lower() == "cliente" else "servidor"
+        actual["servidor_puerto"] = int(actual.get("servidor_puerto") or OFFICIAL_SERVER_PORT)
+        actual["terminal_id"] = int(actual.get("terminal_id") or 1)
+        actual["terminal_nombre"] = str(actual.get("terminal_nombre") or f"CAJA-{actual['terminal_id']:02d}")
 
-        # Guardar en archivo local del proyecto
-        try:
-            with open(NETWORK_CONFIG_LOCAL, "w", encoding="utf-8") as f:
-                json.dump(actual, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            print(f"Aviso guardando {NETWORK_CONFIG_LOCAL}: {e}")
+        for ruta in (NETWORK_CONFIG_MAIN, NETWORK_CONFIG_USER, NETWORK_CONFIG_LOCAL):
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(ruta)), exist_ok=True)
+                with open(ruta, "w", encoding="utf-8") as f:
+                    json.dump(actual, f, indent=4, ensure_ascii=False)
+            except Exception:
+                pass
 
-        # Guardar en ~/.vmpos/ para compatibilidad con ejecutable empaquetado
-        try:
-            if not os.path.exists(CONFIG_DIR_USER):
-                os.makedirs(CONFIG_DIR_USER, exist_ok=True)
-            with open(NETWORK_CONFIG_USER, "w", encoding="utf-8") as f:
-                json.dump(actual, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            print(f"Aviso guardando {NETWORK_CONFIG_USER}: {e}")
-
-        # Actualizar variables de entorno en el proceso actual
-        ip = actual.get("servidor_ip", "127.0.0.1")
-        puerto = actual.get("servidor_puerto", 8000)
-        nueva_url = f"http://{ip}:{puerto}"
+        # Si el equipo es Servidor, el cliente API interno se comunica con 127.0.0.1:<puerto>
+        # Si es Caja Secundaria (cliente), se comunica con <servidor_ip>:<puerto>
+        ip_efectiva = "127.0.0.1" if actual["modo"] == "servidor" else actual.get("servidor_ip", "127.0.0.1")
+        puerto = actual["servidor_puerto"]
+        nueva_url = f"http://{ip_efectiva}:{puerto}"
         os.environ["API_BASE_URL"] = nueva_url
-        os.environ["TERMINAL_ID"] = str(actual.get("terminal_id", 1))
-        os.environ["TERMINAL_NOMBRE"] = str(actual.get("terminal_nombre", "CAJA-01"))
+        os.environ["TERMINAL_ID"] = str(actual["terminal_id"])
+        os.environ["TERMINAL_NOMBRE"] = str(actual["terminal_nombre"])
 
-        # Actualizar en memoria el cliente API singleton si ya está instanciado
         try:
             from client.api_client import api
             api.base_url = nueva_url
-            api.terminal_id = actual.get("terminal_id", 1)
+            api.terminal_id = actual["terminal_id"]
+            api.modo = actual["modo"]
+            api.esta_disponible()
         except Exception:
             pass
 
         return True
     except Exception as e:
-        print(f"Error guardando configuración de red: {e}")
+        _registrar_log_servidor(f"Error guardando configuración de red: {e}")
         return False
 
 
 def construir_url_servidor(ip: str = None, puerto: int = None) -> str:
     """Construye la URL HTTP completa del servidor."""
-    if not ip or not puerto:
-        cfg = obtener_config_red()
-        ip = ip or cfg.get("servidor_ip", "127.0.0.1")
-        puerto = puerto or cfg.get("servidor_puerto", 8000)
+    cfg = obtener_config_red()
+    if not ip:
+        ip = "127.0.0.1" if cfg.get("modo") == "servidor" else cfg.get("servidor_ip", "127.0.0.1")
+    if not puerto:
+        puerto = int(cfg.get("servidor_puerto", OFFICIAL_SERVER_PORT))
     return f"http://{ip}:{puerto}"
+
+
+def _iniciar_uvicorn_en_hilo_interno(puerto: int) -> bool:
+    """Inicia Uvicorn dentro de un hilo controlado del proceso actual registrando errores en server.log."""
+    global _UVICORN_SERVER_INSTANCE
+    try:
+        import uvicorn
+        from server.main import app as fastapi_app
+
+        config = uvicorn.Config(
+            fastapi_app,
+            host="0.0.0.0",
+            port=int(puerto),
+            log_level="info",
+            access_log=False,
+        )
+        server = uvicorn.Server(config)
+        _UVICORN_SERVER_INSTANCE = server
+
+        def _worker():
+            try:
+                _registrar_log_servidor(f"Iniciando hilo interno Uvicorn en 0.0.0.0:{puerto}...")
+                server.run()
+            except BaseException as exc:
+                tb = traceback.format_exc()
+                _registrar_log_servidor(f"ERROR CRÍTICO en hilo Uvicorn:\n{exc}\n{tb}")
+
+        t = threading.Thread(target=_worker, daemon=True, name=f"VmPOS_Server_{puerto}")
+        t.start()
+        return True
+    except BaseException as exc:
+        tb = traceback.format_exc()
+        _registrar_log_servidor(f"Fallo al preparar hilo interno Uvicorn: {exc}\n{tb}")
+        return False
 
 
 def iniciar_servidor_segundo_plano() -> Tuple[bool, str]:
     """
-    Intenta iniciar el servidor FastAPI local en segundo plano si no está activo,
-    ejecutándolo preferentemente en un hilo en segundo plano o mediante subproceso sin ventanas negras.
+    Inicia el servidor central FastAPI de forma controlada y única:
+    - Impide ejecuciones duplicadas simultáneas con `_LOCK_ARRANQUE`.
+    - Verifica `/api/health` (proceso + puerto + API + base de datos).
+    - Registra toda la salida y tracebacks en `logs/server.log`.
+    - Solo reporta éxito cuando `/api/health` responde satisfactoriamente.
     """
-    global _PROCESO_SERVIDOR_LOCAL
-    import shutil
-    import threading
+    global _PROCESO_SERVIDOR_LOCAL, _ESTADO_SERVIDOR, _ULTIMO_ERROR_SERVIDOR
 
-    # 1. Verificar si ya está escuchando
     cfg = obtener_config_red()
-    puerto = int(cfg.get("servidor_puerto", 8000))
-    if verificar_puerto_abierto("127.0.0.1", puerto, timeout=0.5):
-        return True, f"El servidor ya está activo y escuchando en el puerto {puerto}."
+    puerto = int(cfg.get("servidor_puerto", OFFICIAL_SERVER_PORT))
 
-    # 2. Habilitar regla de Firewall en Windows para el puerto de comunicación multi-caja
-    if sys.platform == "win32":
-        try:
-            subprocess.run(
-                f'netsh advfirewall firewall add rule name="VmPOS Server {puerto}" dir=in action=allow protocol=TCP localport={puerto}',
-                shell=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=0x08000000
-            )
-        except Exception:
-            pass
+    # 1. Comprobar si ya está saludable antes de adquirir bloqueo largo
+    ok_previo, datos_salud, msg_previo, _ = verificar_salud_servidor("127.0.0.1", puerto=puerto, timeout=1.2)
+    if ok_previo:
+        _ESTADO_SERVIDOR = "activo"
+        return True, f"El servidor VmPOS ya está activo y saludable en el puerto {puerto}."
 
-    # 3. Intentar iniciar uvicorn directamente en un hilo dentro del proceso (funciona en .exe congelado)
+    if not _LOCK_ARRANQUE.acquire(blocking=False):
+        return False, "El servidor ya se encuentra en proceso de arranque. Por favor espera unos segundos."
+
     try:
-        from server.main import app as fastapi_app
-        import uvicorn
+        _ESTADO_SERVIDOR = "iniciando"
+        _ULTIMO_ERROR_SERVIDOR = ""
 
-        def _run_uvicorn_thread():
+        # Re-verificar salud dentro del lock
+        ok_ya, _, _, _ = verificar_salud_servidor("127.0.0.1", puerto=puerto, timeout=1.0)
+        if ok_ya:
+            _ESTADO_SERVIDOR = "activo"
+            return True, f"El servidor VmPOS ya está activo y escuchando en el puerto {puerto}."
+
+        # Comprobar si el puerto está ocupado por una instancia antigua de VmPOS o por otro programa
+        if verificar_puerto_abierto("127.0.0.1", puerto=puerto, timeout=0.6):
+            ok_retry, _, _, _ = verificar_salud_servidor("127.0.0.1", puerto=puerto, timeout=1.5)
+            if ok_retry:
+                _ESTADO_SERVIDOR = "activo"
+                return True, f"Servidor VmPOS activo en el puerto {puerto}."
+
+            # Intentar detener instancia previa de VmPOS / uvicorn que no tenía /api/health
             try:
-                uvicorn.run(fastapi_app, host="0.0.0.0", port=puerto, log_level="warning")
-            except Exception as _e_srv:
-                print(f"Error en hilo de servidor uvicorn: {_e_srv}")
+                if sys.platform == "win32":
+                    out_net = subprocess.check_output(f"netstat -ano | findstr :{puerto}", shell=True, text=True, stderr=subprocess.DEVNULL)
+                    for ln in out_net.splitlines():
+                        partes = ln.split()
+                        if len(partes) >= 5 and "LISTENING" in ln.upper():
+                            pid_old = partes[-1]
+                            if pid_old.isdigit() and int(pid_old) != os.getpid():
+                                subprocess.run(f"taskkill /PID {pid_old} /F", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000)
+                else:
+                    out_lsof = subprocess.check_output(["lsof", "-t", f"-iTCP:{puerto}", "-sTCP:LISTEN"], text=True, stderr=subprocess.DEVNULL)
+                    for pid_str in out_lsof.splitlines():
+                        pid_str = pid_str.strip()
+                        if pid_str.isdigit() and int(pid_str) != os.getpid():
+                            import signal
+                            os.kill(int(pid_str), signal.SIGTERM)
+                time.sleep(0.6)
+            except Exception:
+                pass
 
-        srv_thread = threading.Thread(target=_run_uvicorn_thread, daemon=True, name="VmPOS_Internal_Server")
-        srv_thread.start()
+            if verificar_puerto_abierto("127.0.0.1", puerto=puerto, timeout=0.4):
+                _ESTADO_SERVIDOR = "error"
+                msg_ocupado = (
+                    f"El puerto {puerto} está siendo ocupado por otro proceso que no responde como VmPOS.\n"
+                    f"Cierra la aplicación que usa el puerto {puerto} o verifica el registro en:\n{SERVER_LOG_PATH}"
+                )
+                _registrar_log_servidor(msg_ocupado)
+                return False, msg_ocupado
 
-        # Esperar hasta 5 segundos a que el puerto abra
-        for _ in range(15):
-            time.sleep(0.3)
-            if verificar_puerto_abierto("127.0.0.1", puerto, timeout=0.2):
-                return True, f"Servidor iniciado exitosamente en http://0.0.0.0:{puerto}"
-    except Exception as e_thread:
-        print(f"Aviso al iniciar servidor en hilo interno: {e_thread}, intentando por subproceso...")
-
-    # 4. Fallback por subproceso si el hilo falló
-    server_dir = os.path.join(_PROJECT_ROOT, "server")
-    if not os.path.exists(server_dir) and getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        server_dir = os.path.join(sys._MEIPASS, "server")
-
-    if not os.path.exists(server_dir):
-        return False, f"El servidor central está empaquetado. Conecta esta caja al servidor principal o verifica la conexión de red."
-
-    # Localizar intérprete Python
-    python_candidatos = [
-        os.path.join(_PROJECT_ROOT, "venv", "Scripts", "python.exe"),
-        os.path.join(_PROJECT_ROOT, ".venv", "Scripts", "python.exe"),
-        os.path.join(_PROJECT_ROOT, "venv", "bin", "python"),
-        os.path.join(_PROJECT_ROOT, ".venv", "bin", "python"),
-        sys.executable,
-        "python",
-        "py",
-        "python3"
-    ]
-    python_bin = None
-    for p in python_candidatos:
-        if os.path.isabs(p) and os.path.exists(p) and not p.lower().endswith("vmpos.exe"):
-            python_bin = p
-            break
-        elif not os.path.isabs(p):
-            found = shutil.which(p)
-            if found and not found.lower().endswith("vmpos.exe"):
-                python_bin = found
-                break
-
-    if not python_bin:
-        python_bin = sys.executable
-
-    try:
-        cmd = [
-            python_bin, "-m", "uvicorn", "server.main:app",
-            "--host", "0.0.0.0",
-            "--port", str(puerto)
-        ]
-        popen_kwargs = {
-            "cwd": _PROJECT_ROOT,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL
-        }
+        # 2. Habilitar regla de Firewall en Windows de forma silenciosa
         if sys.platform == "win32":
-            popen_kwargs["creationflags"] = 0x08000000
+            try:
+                subprocess.run(
+                    f'netsh advfirewall firewall add rule name="VmPOS Server {puerto}" dir=in action=allow protocol=TCP localport={puerto}',
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=0x08000000,
+                )
+            except Exception:
+                pass
 
-        _PROCESO_SERVIDOR_LOCAL = subprocess.Popen(cmd, **popen_kwargs)
+        # 3. Lanzar subproceso independiente usando `--run-server` (sin abrir ventana GUI)
+        #    y redirigiendo stdout/stderr a `logs/server.log`.
+        _registrar_log_servidor(f"=== Solicitud de arranque del Servidor VmPOS en puerto {puerto} ===")
+        subproceso_lanzado = False
 
-        for _ in range(10):
-            time.sleep(0.5)
-            if verificar_puerto_abierto("127.0.0.1", puerto, timeout=0.2):
-                return True, f"Servidor iniciado exitosamente en http://0.0.0.0:{puerto}"
+        try:
+            log_fh = open(SERVER_LOG_PATH, "a", encoding="utf-8")
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--run-server", "--host", "0.0.0.0", "--port", str(puerto)]
+                cwd_srv = os.path.dirname(os.path.abspath(sys.executable))
+            else:
+                python_candidatos = [
+                    os.path.join(_PROJECT_ROOT, ".venv", "Scripts", "python.exe"),
+                    os.path.join(_PROJECT_ROOT, "venv", "Scripts", "python.exe"),
+                    os.path.join(_PROJECT_ROOT, ".venv", "bin", "python"),
+                    os.path.join(_PROJECT_ROOT, "venv", "bin", "python"),
+                    sys.executable,
+                ]
+                python_bin = sys.executable
+                for cand in python_candidatos:
+                    if cand and os.path.exists(cand):
+                        python_bin = cand
+                        break
+                entry_script = os.path.join(_PROJECT_ROOT, "interface", "inicio_sesion.py")
+                cmd = [python_bin, entry_script, "--run-server", "--host", "0.0.0.0", "--port", str(puerto)]
+                cwd_srv = _PROJECT_ROOT
 
-        return False, "El proceso del servidor se inició en segundo plano pero aún no responde en el puerto."
-    except Exception as e:
-        return False, f"Error al iniciar el servidor local: {e}"
+            popen_kwargs: Dict[str, Any] = {
+                "cwd": cwd_srv,
+                "stdout": log_fh,
+                "stderr": log_fh,
+            }
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
+            _PROCESO_SERVIDOR_LOCAL = subprocess.Popen(cmd, **popen_kwargs)
+            subproceso_lanzado = True
+            try:
+                with open(SERVER_PID_PATH, "w", encoding="utf-8") as pf:
+                    pf.write(str(_PROCESO_SERVIDOR_LOCAL.pid))
+            except Exception:
+                pass
+        except Exception as e_sub:
+            _registrar_log_servidor(f"Aviso al lanzar subproceso del servidor: {e_sub}. Intentando hilo interno...")
+
+        # Esperar y verificar salud del subproceso o iniciar hilo interno si el subproceso terminó prematuramente
+        hilo_iniciado = False
+        if not subproceso_lanzado:
+            hilo_iniciado = _iniciar_uvicorn_en_hilo_interno(puerto)
+
+        for intento in range(24):  # Hasta ~7.2 segundos
+            time.sleep(0.3)
+            if subproceso_lanzado and _PROCESO_SERVIDOR_LOCAL is not None:
+                ret = _PROCESO_SERVIDOR_LOCAL.poll()
+                if ret is not None and not hilo_iniciado:
+                    _registrar_log_servidor(f"El subproceso del servidor terminó con código {ret}. Activando hilo interno de respaldo...")
+                    hilo_iniciado = _iniciar_uvicorn_en_hilo_interno(puerto)
+
+            saludable, datos_h, msg_h, _ = verificar_salud_servidor("127.0.0.1", puerto=puerto, timeout=1.0)
+            if saludable:
+                _ESTADO_SERVIDOR = "activo"
+                _registrar_log_servidor(f"Servidor ACTIVO y saludable en http://0.0.0.0:{puerto} ({msg_h})")
+                return True, f"Servidor iniciado y verificado exitosamente en http://0.0.0.0:{puerto}\n({msg_h})"
+
+        # Si tras la espera no respondió `/api/health`, reportar el error real registrado
+        _ESTADO_SERVIDOR = "error"
+        extracto_log = leer_ultimas_lineas_log(8)
+        detalle = f"\n\nÚltimo registro en {SERVER_LOG_PATH}:\n{extracto_log}" if extracto_log else ""
+        msg_fallo = f"El servidor no superó la comprobación de salud (/api/health) en el puerto {puerto}.{detalle}"
+        _ULTIMO_ERROR_SERVIDOR = msg_fallo
+        return False, msg_fallo
+    finally:
+        _LOCK_ARRANQUE.release()
 
 
 def detener_servidor_segundo_plano() -> bool:
-    """Detiene el proceso del servidor local si fue iniciado por esta aplicación."""
-    global _PROCESO_SERVIDOR_LOCAL
-    if _PROCESO_SERVIDOR_LOCAL:
+    """Detiene el proceso o hilo del servidor local si fue iniciado por esta aplicación."""
+    global _PROCESO_SERVIDOR_LOCAL, _UVICORN_SERVER_INSTANCE, _ESTADO_SERVIDOR
+    _ESTADO_SERVIDOR = "deteniendo"
+    detenido = False
+
+    if _UVICORN_SERVER_INSTANCE is not None:
+        try:
+            _UVICORN_SERVER_INSTANCE.should_exit = True
+            _UVICORN_SERVER_INSTANCE = None
+            detenido = True
+        except Exception:
+            pass
+
+    if _PROCESO_SERVIDOR_LOCAL is not None:
         try:
             _PROCESO_SERVIDOR_LOCAL.terminate()
-            _PROCESO_SERVIDOR_LOCAL.wait(timeout=2)
+            _PROCESO_SERVIDOR_LOCAL.wait(timeout=3)
             _PROCESO_SERVIDOR_LOCAL = None
-            return True
+            detenido = True
         except Exception:
             try:
                 _PROCESO_SERVIDOR_LOCAL.kill()
                 _PROCESO_SERVIDOR_LOCAL = None
-                return True
+                detenido = True
             except Exception:
                 pass
-    return False
+
+    if os.path.exists(SERVER_PID_PATH):
+        try:
+            with open(SERVER_PID_PATH, "r", encoding="utf-8") as pf:
+                pid_guardado = int(pf.read().strip())
+            if sys.platform == "win32":
+                subprocess.run(
+                    f"taskkill /PID {pid_guardado} /F",
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=0x08000000,
+                )
+            else:
+                import signal
+                os.kill(pid_guardado, signal.SIGTERM)
+            detenido = True
+        except Exception:
+            pass
+        try:
+            os.remove(SERVER_PID_PATH)
+        except Exception:
+            pass
+
+    _ESTADO_SERVIDOR = "detenido"
+    return detenido

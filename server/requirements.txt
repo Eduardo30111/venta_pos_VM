@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
 sqlalchemy[asyncio]
+aiosqlite
 asyncpg
 alembic
 python-jose[cryptography]
@@ -10,3 +11,4 @@ pydantic
 pydantic-settings
 python-multipart
 httpx
+

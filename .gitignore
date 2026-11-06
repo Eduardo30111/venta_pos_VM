@@ -25,14 +25,19 @@ dist/VmPOS.app/
 
 # Logs y depuración
 *.log
+logs/
+cache/
 trace_output.log
 scratch/
 .system_generated/
 
-# Base de datos temporales WAL
+# Base de datos temporales WAL y servidor generado
 *.db-wal
 *.db-shm
 *backup*.db
+database/vmpos_server.db*
+config/network_config.json
+assets/logos/
 
 # Sistema operativo
 .DS_Store

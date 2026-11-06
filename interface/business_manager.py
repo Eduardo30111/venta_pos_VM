@@ -19,9 +19,13 @@ import os
 import sys
 import json
 import time
+import base64
+import hashlib
 import shutil
 import sqlite3
 import tempfile
+import urllib.request
+import urllib.error
 
 try:
     from PIL import Image, ImageOps
@@ -31,16 +35,18 @@ except ImportError:
 
 # Rutas centralizadas y seguras para desarrollo y ejecutable empaquetado
 try:
-    from interface.config import CONFIG_DIR, DB_VENTAS_PATH, LOGOS_DIR, USER_DATA_DIR, BUNDLE_DIR
+    from interface.config import CONFIG_DIR, DB_VENTAS_PATH, LOGOS_DIR, USER_DATA_DIR, BUNDLE_DIR, CACHE_DIR, DATABASE_DIR
 except ImportError:
     try:
-        from config import CONFIG_DIR, DB_VENTAS_PATH, LOGOS_DIR, USER_DATA_DIR, BUNDLE_DIR
+        from config import CONFIG_DIR, DB_VENTAS_PATH, LOGOS_DIR, USER_DATA_DIR, BUNDLE_DIR, CACHE_DIR, DATABASE_DIR
     except ImportError:
         _curr = os.path.dirname(os.path.abspath(__file__))
         _root = os.path.abspath(os.path.join(_curr, ".."))
         CONFIG_DIR = os.path.join(_root, "config")
-        DB_VENTAS_PATH = os.path.join(_root, "database", "ventas.db")
+        DATABASE_DIR = os.path.join(_root, "database")
+        DB_VENTAS_PATH = os.path.join(DATABASE_DIR, "ventas.db")
         LOGOS_DIR = os.path.join(_root, "assets", "logos")
+        CACHE_DIR = os.path.join(_root, "cache")
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 CONFIG_FILE = os.path.join(CONFIG_DIR, "business_config.json")
@@ -235,10 +241,249 @@ class BusinessManager:
         return ruta_absoluta
 
     # =========================================================================
-    # CARGA Y GUARDADO DE IDENTIDAD DEL NEGOCIO
+    # SINCRONIZACIÓN CENTRAL CLIENTE-SERVIDOR Y CARGA/GUARDADO
     # =========================================================================
+    def _obtener_info_red(self):
+        """Retorna (modo, ip, puerto) según la configuración de red activa."""
+        try:
+            from interface.network_manager import obtener_config_red
+            cfg = obtener_config_red()
+        except Exception:
+            try:
+                from network_manager import obtener_config_red
+                cfg = obtener_config_red()
+            except Exception:
+                cfg = {"modo": "servidor", "servidor_ip": "127.0.0.1", "servidor_puerto": 8000}
+        modo = "cliente" if str(cfg.get("modo", "servidor")).lower() == "cliente" else "servidor"
+        ip = str(cfg.get("servidor_ip", "127.0.0.1")).strip() or "127.0.0.1"
+        try:
+            puerto = int(cfg.get("servidor_puerto", 8000))
+        except Exception:
+            puerto = 8000
+        return modo, ip, puerto
+
+    def _ruta_cache_servidor(self, ip: str, puerto: int) -> str:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        ip_safe = "".join(c if c.isalnum() else "_" for c in str(ip))
+        return os.path.join(CACHE_DIR, f"business_cache_{ip_safe}_{puerto}.json")
+
+    def sincronizar_desde_servidor(self, ip: str = None, puerto: int = None, notificar: bool = True) -> bool:
+        """
+        Descarga la configuración comercial central y el logo desde el servidor FastAPI
+        (`GET /api/configuracion/negocio` y `/api/configuracion/logo`) y los aplica en memoria
+        y en el caché específico de ese servidor.
+        """
+        modo_actual, ip_cfg, puerto_cfg = self._obtener_info_red()
+        target_ip = ip or ("127.0.0.1" if modo_actual == "servidor" else ip_cfg)
+        target_port = int(puerto or puerto_cfg or 8000)
+        base_url = f"http://{target_ip}:{target_port}"
+
+        try:
+            req = urllib.request.Request(
+                f"{base_url}/api/configuracion/negocio",
+                headers={"User-Agent": "VmPOS-BusinessSync/4.0"},
+            )
+            with urllib.request.urlopen(req, timeout=2.2) as resp:
+                if resp.getcode() != 200:
+                    return False
+                datos_remotos = json.loads(resp.read().decode("utf-8", errors="replace"))
+        except Exception:
+            return False
+
+        if not isinstance(datos_remotos, dict) or not datos_remotos.get("nombre_negocio"):
+            return False
+
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        ip_safe = "".join(c if c.isalnum() else "_" for c in str(target_ip))
+
+        nuevo_cfg = dict(CONFIG_POR_DEFECTO)
+        for k in CONFIG_POR_DEFECTO.keys():
+            if k in ("logo_path", "logo_thermal_path"):
+                continue
+            if k in datos_remotos and datos_remotos[k] is not None:
+                nuevo_cfg[k] = datos_remotos[k]
+
+        tiene_logo = bool(datos_remotos.get("tiene_logo"))
+        logo_hash = str(datos_remotos.get("logo_hash") or "actual").strip()
+        b64_logo = str(datos_remotos.get("logo_base64") or "").strip()
+
+        if tiene_logo:
+            ruta_logo_cache = os.path.join(CACHE_DIR, f"logo_srv_{ip_safe}_{target_port}_{logo_hash}.png")
+            ruta_thermal_cache = os.path.join(CACHE_DIR, f"logo_thermal_srv_{ip_safe}_{target_port}_{logo_hash}.png")
+
+            if not os.path.isfile(ruta_logo_cache):
+                raw_bytes = None
+                if b64_logo:
+                    try:
+                        raw_bytes = base64.b64decode(b64_logo)
+                    except Exception:
+                        raw_bytes = None
+                if not raw_bytes:
+                    try:
+                        req_logo = urllib.request.Request(
+                            f"{base_url}/api/configuracion/logo",
+                            headers={"User-Agent": "VmPOS-LogoSync/4.0"},
+                        )
+                        with urllib.request.urlopen(req_logo, timeout=2.5) as r_logo:
+                            if r_logo.getcode() == 200:
+                                raw_bytes = r_logo.read()
+                    except Exception:
+                        raw_bytes = None
+
+                if raw_bytes:
+                    try:
+                        with open(ruta_logo_cache, "wb") as lf:
+                            lf.write(raw_bytes)
+                        if PIL_DISPONIBLE:
+                            with Image.open(ruta_logo_cache) as img_p:
+                                img_p.load()
+                                self._generar_bitmap_termico(img_p.copy(), ruta_thermal_cache)
+                    except Exception as e_l:
+                        print(f"Aviso guardando logo en caché de cliente: {e_l}")
+
+            nuevo_cfg["logo_path"] = ruta_logo_cache if os.path.isfile(ruta_logo_cache) else ""
+            nuevo_cfg["logo_thermal_path"] = ruta_thermal_cache if os.path.isfile(ruta_thermal_cache) else ""
+        else:
+            nuevo_cfg["logo_path"] = ""
+            nuevo_cfg["logo_thermal_path"] = ""
+
+        self._config = nuevo_cfg
+
+        # Persistir en el caché exclusivo de este servidor (IP:Puerto)
+        try:
+            cache_file = self._ruta_cache_servidor(target_ip, target_port)
+            with open(cache_file, "w", encoding="utf-8") as cf:
+                json.dump(self._config, cf, indent=4, ensure_ascii=False)
+        except Exception:
+            pass
+
+        if notificar:
+            self.notificar_cambio()
+        return True
+
+    def _sincronizar_hacia_servidor_central(self, eliminar_logo: bool = False):
+        """
+        Envía la configuración comercial y el logo actuales al servidor central
+        (y actualiza `vmpos_server.db` si este equipo es el Servidor Principal).
+        """
+        modo, ip, puerto = self._obtener_info_red()
+        target_ip = "127.0.0.1" if modo == "servidor" else ip
+        base_url = f"http://{target_ip}:{puerto}"
+
+        payload = {
+            k: self._config.get(k, "")
+            for k in CONFIG_POR_DEFECTO.keys()
+            if k not in ("logo_path", "logo_thermal_path")
+        }
+        logo_abs = self._resolver_ruta_logo(self._config.get("logo_path", ""))
+        logo_b64 = ""
+        logo_fname = ""
+        logo_hash = ""
+        if eliminar_logo or not logo_abs or not os.path.isfile(logo_abs):
+            payload["eliminar_logo"] = True
+            payload["logo_base64"] = ""
+        else:
+            try:
+                with open(logo_abs, "rb") as lf:
+                    raw = lf.read()
+                logo_b64 = base64.b64encode(raw).decode("ascii")
+                logo_fname = os.path.basename(logo_abs)
+                logo_hash = hashlib.sha256(raw).hexdigest()[:16]
+                payload["logo_base64"] = logo_b64
+                payload["logo_filename"] = logo_fname
+            except Exception:
+                pass
+
+        # 1. Si estamos en el equipo Servidor, actualizar también directamente vmpos_server.db
+        if modo == "servidor":
+            try:
+                srv_db = os.path.join(DATABASE_DIR, "vmpos_server.db")
+                if os.path.exists(srv_db):
+                    with sqlite3.connect(srv_db, timeout=5.0) as conn:
+                        cur = conn.cursor()
+                        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='configuracion_negocio'")
+                        if cur.fetchone():
+                            cur.execute("SELECT id FROM configuracion_negocio WHERE id = 1")
+                            if cur.fetchone():
+                                cur.execute("""
+                                    UPDATE configuracion_negocio SET
+                                        nombre_negocio = ?, razon_social = ?, subtitulo_negocio = ?,
+                                        tipo_documento_fiscal = ?, nit = ?, regimen_fiscal = ?,
+                                        direccion = ?, ciudad = ?, telefono = ?, email = ?,
+                                        eslogan = ?, encabezado_recibo = ?, tipo_comprobante = ?,
+                                        prefijo_comprobante = ?, color_barra = ?, color_login = ?,
+                                        logo_filename = ?, logo_base64 = ?, logo_hash = ?,
+                                        updated_at = CURRENT_TIMESTAMP
+                                    WHERE id = 1
+                                """, (
+                                    payload.get("nombre_negocio", "VmPOS"),
+                                    payload.get("razon_social", ""),
+                                    payload.get("subtitulo_negocio", ""),
+                                    payload.get("tipo_documento_fiscal", "NIT"),
+                                    payload.get("nit", ""),
+                                    payload.get("regimen_fiscal", ""),
+                                    payload.get("direccion", ""),
+                                    payload.get("ciudad", ""),
+                                    payload.get("telefono", ""),
+                                    payload.get("email", ""),
+                                    payload.get("eslogan", ""),
+                                    payload.get("encabezado_recibo", ""),
+                                    payload.get("tipo_comprobante", "FACTURA DE VENTA POS"),
+                                    payload.get("prefijo_comprobante", ""),
+                                    payload.get("color_barra", "#0284C7"),
+                                    payload.get("color_login", "#1E40AF"),
+                                    logo_fname,
+                                    logo_b64,
+                                    logo_hash,
+                                ))
+                            conn.commit()
+            except Exception as e_db:
+                print(f"Aviso actualizando vmpos_server.db directamente: {e_db}")
+
+        # 2. Enviar PUT al endpoint HTTP del servidor central si está en línea
+        try:
+            body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(
+                f"{base_url}/api/configuracion/negocio",
+                data=body_bytes,
+                method="PUT",
+                headers={"Content-Type": "application/json", "User-Agent": "VmPOS-BusinessSync/4.0"},
+            )
+            with urllib.request.urlopen(req, timeout=2.5) as resp:
+                return resp.getcode() == 200
+        except Exception:
+            return False
+
     def cargar(self):
-        """Carga la configuración del negocio desde JSON o respaldo SQLite."""
+        """
+        Carga la configuración del negocio respetando estrictamente la separación:
+        - En modo `cliente` (Caja Secundaria): obtiene la configuración del Servidor Central
+          (o del caché asociado a la IP/puerto de ese servidor), sin mezclar datos de instalaciones
+          locales anteriores de la computadora cliente.
+        - En modo `servidor` (Caja Principal): carga desde la base/configuración central del servidor.
+        """
+        modo, ip, puerto = self._obtener_info_red()
+
+        if modo == "cliente":
+            if self.sincronizar_desde_servidor(ip=ip, puerto=puerto, notificar=False):
+                return self._config
+            # Si el servidor aún no responde en este instante, usar únicamente el caché de ESE servidor
+            cache_srv = self._ruta_cache_servidor(ip, puerto)
+            if os.path.exists(cache_srv):
+                try:
+                    with open(cache_srv, "r", encoding="utf-8") as cf:
+                        datos_cache = json.load(cf)
+                    if isinstance(datos_cache, dict):
+                        self._config = dict(CONFIG_POR_DEFECTO)
+                        self._config.update(datos_cache)
+                        return self._config
+                except Exception:
+                    pass
+            # Nunca cargar business_config.json local antiguo cuando es Caja Secundaria
+            self._config = dict(CONFIG_POR_DEFECTO)
+            return self._config
+
+        # Modo Servidor Principal:
         datos_cargados = None
         if os.path.exists(CONFIG_FILE):
             try:
@@ -254,38 +499,55 @@ class BusinessManager:
 
         if isinstance(datos_cargados, dict):
             self._config.update(datos_cargados)
-            # Asegurar que todas las claves nuevas existan
             for k, v in CONFIG_POR_DEFECTO.items():
                 if k not in self._config or self._config[k] is None:
                     self._config[k] = v
 
-        # Validar que el logo configurado realmente exista en disco
         logo_resuelto = self._resolver_ruta_logo(self._config.get("logo_path", ""))
         self._config["logo_path"] = logo_resuelto if logo_resuelto else ""
 
         thermal_resuelto = self._resolver_ruta_logo(self._config.get("logo_thermal_path", ""))
         self._config["logo_thermal_path"] = thermal_resuelto if thermal_resuelto else ""
 
+        # Si el servidor local ya está corriendo y tiene datos más recientes, o para sincronizar semilla
+        if not datos_cargados:
+            self.sincronizar_desde_servidor(ip="127.0.0.1", puerto=puerto, notificar=False)
+
         return self._config
 
     def recargar(self):
-        """Recarga desde disco los datos del negocio y de la impresora."""
+        """Recarga los datos del negocio (desde servidor central si es cliente) y de la impresora local."""
         self._config = dict(CONFIG_POR_DEFECTO)
         self.cargar()
         self.cargar_config_impresora()
         return self._config
 
     def guardar(self, nuevos_datos=None, notificar=True):
-        """Guarda la configuración del negocio de forma atómica en JSON y SQLite."""
+        """
+        Guarda la configuración del negocio:
+        - Si es Servidor Principal: guarda en JSON, SQLite y tabla central `configuracion_negocio`.
+        - Si es Caja Secundaria: sincroniza hacia el Servidor Central vía `PUT /api/configuracion/negocio`.
+        """
         if nuevos_datos and isinstance(nuevos_datos, dict):
             for k, v in nuevos_datos.items():
                 self._config[k] = v if v is not None else ""
 
-        # Asegurar nombre comercial mínimo si lo dejaron completamente vacío
         if not str(self._config.get("nombre_negocio", "")).strip():
             self._config["nombre_negocio"] = "VmPOS"
 
-        # Preparar copia serializable con rutas relativas para portabilidad
+        modo, ip, puerto = self._obtener_info_red()
+        eliminar_flag = not bool(self._config.get("logo_path"))
+
+        if modo == "cliente":
+            ok_remoto = self._sincronizar_hacia_servidor_central(eliminar_logo=eliminar_flag)
+            if ok_remoto:
+                self.sincronizar_desde_servidor(ip=ip, puerto=puerto, notificar=notificar)
+                return True
+            if notificar:
+                self.notificar_cambio()
+            return False
+
+        # Modo Servidor: guardar en disco local del servidor y en la base central
         datos_para_disco = dict(self._config)
         if datos_para_disco.get("logo_path"):
             logo_abs = self._resolver_ruta_logo(datos_para_disco["logo_path"])
@@ -305,6 +567,7 @@ class BusinessManager:
                 os.fsync(f.fileno())
             os.replace(temp_path, CONFIG_FILE)
             self._guardar_en_sqlite("business_config", datos_para_disco)
+            self._sincronizar_hacia_servidor_central(eliminar_logo=eliminar_flag)
             if notificar:
                 self.notificar_cambio()
             return True

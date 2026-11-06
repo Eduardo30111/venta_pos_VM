@@ -39,7 +39,7 @@ export MPLCONFIGDIR="$PROJECT_ROOT/build/matplotlib_cache"
 mkdir -p "$PYINSTALLER_CONFIG_DIR" "$MPLCONFIGDIR"
 
 echo "Verificando dependencias de compilación..."
-$PYTHON_BIN -m pip install --quiet pyinstaller pillow reportlab matplotlib pandas openpyxl httpx pydantic pydantic_settings python-barcode babel python-escpos pyusb
+$PYTHON_BIN -m pip install --quiet pyinstaller pillow reportlab matplotlib pandas openpyxl httpx pydantic pydantic_settings python-barcode babel python-escpos pyusb fastapi uvicorn sqlalchemy aiosqlite asyncpg "python-jose[cryptography]" "passlib[bcrypt]" "bcrypt==3.2.2" python-multipart
 
 # 2. Generar archivo .icns si no existe
 ICNS_PATH="$PROJECT_ROOT/assets/Salome.icns"
@@ -95,8 +95,23 @@ $PYTHON_BIN -m PyInstaller \
     --add-data="database:database" \
     --add-data="interface:interface" \
     --add-data="client:client" \
+    --add-data="server:server" \
     $NETWORK_DATA_FLAG \
     --collect-all="escpos" \
+    --collect-submodules="server" \
+    --collect-submodules="uvicorn" \
+    --collect-submodules="passlib" \
+    --hidden-import="fastapi" \
+    --hidden-import="uvicorn" \
+    --hidden-import="sqlalchemy" \
+    --hidden-import="sqlalchemy.dialects.sqlite.aiosqlite" \
+    --hidden-import="sqlalchemy.dialects.postgresql.asyncpg" \
+    --hidden-import="aiosqlite" \
+    --hidden-import="asyncpg" \
+    --hidden-import="jose" \
+    --hidden-import="passlib.handlers.bcrypt" \
+    --hidden-import="bcrypt" \
+    --hidden-import="multipart" \
     --hidden-import="reportlab" \
     --hidden-import="reportlab.lib" \
     --hidden-import="reportlab.platypus" \

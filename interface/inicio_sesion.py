@@ -2,6 +2,30 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# -----------------------------------------------------------------------------
+# Punto de entrada Headless para el Servidor FastAPI (`--run-server`)
+# Impide abrir ventanas gráficas duplicadas cuando VmPOS.exe o inicio_sesion.py
+# es lanzado como servicio o subproceso en segundo plano.
+# -----------------------------------------------------------------------------
+if "--run-server" in sys.argv:
+    _host = "0.0.0.0"
+    _port = 8000
+    for _i, _a in enumerate(sys.argv):
+        if _a == "--host" and _i + 1 < len(sys.argv):
+            _host = sys.argv[_i + 1]
+        elif _a == "--port" and _i + 1 < len(sys.argv):
+            try:
+                _port = int(sys.argv[_i + 1])
+            except Exception:
+                _port = 8000
+    import uvicorn
+    from server.main import app as _fastapi_app
+    uvicorn.run(_fastapi_app, host=_host, port=_port, log_level="info")
+    sys.exit(0)
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 import io
@@ -11,7 +35,6 @@ try:
 except Exception:
     pass
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # -----------------------------------------------------------------------------
 # Enrutador de submódulos para aplicaciones empaquetadas (PyInstaller / VmPOS.exe)
@@ -194,7 +217,7 @@ def abrir_configuracion_red():
         from interface.network_dialog import abrir_dialogo_red
     except ImportError:
         from network_dialog import abrir_dialogo_red
-    abrir_dialogo_red(parent=ventana)
+    abrir_dialogo_red(parent=ventana, on_saved=lambda _cfg: recargar_identidad_login())
 
 def validar_usuario(event=None):
     usuario = usuario_var.get().strip()
@@ -204,11 +227,27 @@ def validar_usuario(event=None):
         mostrar_alerta_bonita("Campos vacíos", "Por favor ingresa usuario y contraseña", "error")
         return
 
+    api.recargar_configuracion_red()
     success, message = api.login(usuario, clave)
     if not success:
         msg_str = str(message or "")
         if "conexión" in msg_str.lower() or "servidor" in msg_str.lower() or "503" in msg_str:
-            # Fallback transparente a base de datos SQLite local de usuarios
+            # Si esta computadora está configurada como CAJA SECUNDARIA (Cliente),
+            # PROHIBIR el inicio en base de datos local aislada para proteger la integridad de los datos.
+            if api.es_modo_cliente():
+                abrir = messagebox.askyesno(
+                    "Servidor Principal No Disponible",
+                    f"Esta computadora está configurada como CAJA SECUNDARIA (Cliente), pero no hay conexión con el Servidor Principal:\n\n"
+                    f"• Dirección configurada: {api.base_url}\n"
+                    f"• Detalle: {msg_str}\n\n"
+                    "Por seguridad e integridad contable, una Caja Secundaria no puede operar en base de datos local aislada.\n\n"
+                    "¿Deseas abrir la Configuración de Red para verificar la IP o el estado del Servidor?"
+                )
+                if abrir:
+                    abrir_configuracion_red()
+                return
+
+            # Solo si esta computadora es el Servidor Principal, permitir respaldo en usuarios.db local
             try:
                 try:
                     from interface.usuarios_db import obtener_usuario_por_credenciales
@@ -219,7 +258,7 @@ def validar_usuario(event=None):
                 if u_local:
                     nom_comp = f"{u_local.get('nombre', '')} {u_local.get('apellidos', '')}".strip()
                     usuario_actual = nom_comp if nom_comp else str(u_local.get('usuario', 'Usuario')).capitalize()
-                    mostrar_alerta_bonita("¡Bienvenida! ✨", f"Hola {usuario_actual}!\n\nAcceso concedido como {u_local.get('rol', 'Usuario')}\n(Modo Local)", "success")
+                    mostrar_alerta_bonita("¡Bienvenida! ✨", f"Hola {usuario_actual}!\n\nAcceso concedido como {u_local.get('rol', 'Usuario')}\n(Servidor Principal)", "success")
                     ventana.after(1000, lambda: _iniciar_flujo_principal(u_local, usuario_actual))
                     return
             except Exception as e_local:
@@ -306,64 +345,78 @@ main_frame.columnconfigure(1, weight=1, minsize=320)
 left_frame = tk.Frame(main_frame, bg=t["bg_card"], relief="solid", bd=1)
 left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
 
-header_frame = tk.Frame(left_frame, bg=COLOR_LOGIN, height=52)
-header_frame.pack(fill="x")
-header_frame.pack_propagate(False)
-crear_etiqueta(header_frame, text="🏪 🧾 📦 💳 📊", font=(FONT_EMOJI, 16), bg=COLOR_LOGIN, fg=FG_LOGIN).pack(pady=10)
 
-# Logo y Título Institucional
-if PIL_DISPONIBLE and business_mgr.logo_path and os.path.exists(business_mgr.logo_path):
-    try:
-        with Image.open(business_mgr.logo_path) as raw_img:
-            raw_img.load()
-            im_copy = raw_img.copy()
-            im_copy.thumbnail((220, 70))
-            logo_tk = ImageTk.PhotoImage(im_copy, master=ventana)
-        lbl_logo = crear_etiqueta(left_frame, image=logo_tk, bg=t["bg_card"])
-        lbl_logo.image = logo_tk
-        lbl_logo.pack(pady=(10, 2))
-    except Exception as e:
-        print(f"Aviso al cargar logo en inicio de sesion: {e}")
+def _renderizar_panel_institucional():
+    """Construye o refresca dinámicamente el panel institucional izquierdo con los datos actuales de business_mgr."""
+    for child in left_frame.winfo_children():
+        try:
+            child.destroy()
+        except Exception:
+            pass
 
-crear_etiqueta(left_frame, text=business_mgr.nombre, font=(FONT_FAMILY, 22, "bold"), bg=t["bg_card"], fg=COLOR_LOGIN, wraplength=320).pack(pady=(6, 2))
+    c_login = business_mgr.color_login or t["accent"]
+    fg_login = calcular_color_texto_optimo(c_login)
 
-if business_mgr.subtitulo:
-    crear_etiqueta(left_frame, text=business_mgr.subtitulo.upper(), font=(FONT_FAMILY, 10, "bold"), bg=t["bg_card"], fg=t["text_primary"], wraplength=320).pack()
+    header_frame = tk.Frame(left_frame, bg=c_login, height=52)
+    header_frame.pack(fill="x")
+    header_frame.pack_propagate(False)
+    crear_etiqueta(header_frame, text="🏪 🧾 📦 💳 📊", font=(FONT_EMOJI, 16), bg=c_login, fg=fg_login).pack(pady=10)
 
-eslogan_txt = business_mgr.obtener("eslogan", "")
-if eslogan_txt:
-    crear_etiqueta(left_frame, text=eslogan_txt, font=(FONT_FAMILY, 9, "italic"), bg=t["bg_card"], fg=t["text_secondary"], wraplength=320).pack(pady=(2, 6))
+    if PIL_DISPONIBLE and business_mgr.logo_path and os.path.exists(business_mgr.logo_path):
+        try:
+            with Image.open(business_mgr.logo_path) as raw_img:
+                raw_img.load()
+                im_copy = raw_img.copy()
+                im_copy.thumbnail((220, 70))
+                logo_tk = ImageTk.PhotoImage(im_copy, master=ventana)
+            lbl_logo = crear_etiqueta(left_frame, image=logo_tk, bg=t["bg_card"])
+            lbl_logo.image = logo_tk
+            lbl_logo.pack(pady=(10, 2))
+        except Exception as e:
+            print(f"Aviso al cargar logo en inicio de sesion: {e}")
 
-tk.Frame(left_frame, bg=t["border"], height=1).pack(fill="x", padx=25, pady=6)
+    crear_etiqueta(left_frame, text=business_mgr.nombre, font=(FONT_FAMILY, 22, "bold"), bg=t["bg_card"], fg=c_login, wraplength=320).pack(pady=(6, 2))
 
-detalles_institucionales = []
-if business_mgr.razon_social and business_mgr.razon_social != business_mgr.subtitulo:
-    detalles_institucionales.append(f"🏢 {business_mgr.razon_social}")
-if business_mgr.nit:
-    detalles_institucionales.append(f"🪪 {business_mgr.tipo_documento_fiscal}: {business_mgr.nit}")
-if business_mgr.direccion or business_mgr.ciudad:
-    ub_str = f"{business_mgr.direccion}, {business_mgr.ciudad}".strip(", ")
-    detalles_institucionales.append(f"📍 {ub_str}")
-if business_mgr.telefono:
-    detalles_institucionales.append(f"📞 Teléfono: {business_mgr.telefono}")
+    if business_mgr.subtitulo:
+        crear_etiqueta(left_frame, text=business_mgr.subtitulo.upper(), font=(FONT_FAMILY, 10, "bold"), bg=t["bg_card"], fg=t["text_primary"], wraplength=320).pack()
 
-if not detalles_institucionales:
-    detalles_institucionales = [
-        "🧾 Facturación POS e impresión térmica / A4",
-        "📦 Control de inventario y movimientos en tiempo real",
-        "💰 Gestión de caja, cartera y contabilidad integrada",
-        "👥 Control de personal, comisiones y nómina"
-    ]
+    eslogan_txt = business_mgr.obtener("eslogan", "")
+    if eslogan_txt:
+        crear_etiqueta(left_frame, text=eslogan_txt, font=(FONT_FAMILY, 9, "italic"), bg=t["bg_card"], fg=t["text_secondary"], wraplength=320).pack(pady=(2, 6))
 
-for s in detalles_institucionales[:4]:
-    crear_etiqueta(left_frame, text=s, font=(FONT_FAMILY, 9), bg=t["bg_card"], fg=t["text_primary"], anchor="w", wraplength=300, justify="left").pack(fill="x", padx=25, pady=2)
+    tk.Frame(left_frame, bg=t["border"], height=1).pack(fill="x", padx=25, pady=6)
 
-tk.Frame(left_frame, bg=t["bg_card"]).pack(expand=True, fill="both")
+    detalles_institucionales = []
+    if business_mgr.razon_social and business_mgr.razon_social != business_mgr.subtitulo:
+        detalles_institucionales.append(f"🏢 {business_mgr.razon_social}")
+    if business_mgr.nit:
+        detalles_institucionales.append(f"🪪 {business_mgr.tipo_documento_fiscal}: {business_mgr.nit}")
+    if business_mgr.direccion or business_mgr.ciudad:
+        ub_str = f"{business_mgr.direccion}, {business_mgr.ciudad}".strip(", ")
+        detalles_institucionales.append(f"📍 {ub_str}")
+    if business_mgr.telefono:
+        detalles_institucionales.append(f"📞 Teléfono: {business_mgr.telefono}")
 
-contact_frame = tk.Frame(left_frame, bg=COLOR_LOGIN, height=30)
-contact_frame.pack(fill="x", side="bottom")
-contact_frame.pack_propagate(False)
-crear_etiqueta(contact_frame, text=business_mgr.obtener_texto_ubicacion_contacto(), font=(FONT_FAMILY, 8, "bold"), bg=COLOR_LOGIN, fg=FG_LOGIN).pack(pady=6)
+    if not detalles_institucionales:
+        detalles_institucionales = [
+            "🧾 Facturación POS e impresión térmica / A4",
+            "📦 Control de inventario y movimientos en tiempo real",
+            "💰 Gestión de caja, cartera y contabilidad integrada",
+            "👥 Control de personal, comisiones y nómina"
+        ]
+
+    for s in detalles_institucionales[:4]:
+        crear_etiqueta(left_frame, text=s, font=(FONT_FAMILY, 9), bg=t["bg_card"], fg=t["text_primary"], anchor="w", wraplength=300, justify="left").pack(fill="x", padx=25, pady=2)
+
+    tk.Frame(left_frame, bg=t["bg_card"]).pack(expand=True, fill="both")
+
+    contact_frame = tk.Frame(left_frame, bg=c_login, height=30)
+    contact_frame.pack(fill="x", side="bottom")
+    contact_frame.pack_propagate(False)
+    crear_etiqueta(contact_frame, text=business_mgr.obtener_texto_ubicacion_contacto(), font=(FONT_FAMILY, 8, "bold"), bg=c_login, fg=fg_login).pack(pady=6)
+
+
+_renderizar_panel_institucional()
 
 # Panel Derecho de Inicio de Sesión
 right_frame = tk.Frame(main_frame, bg=t["bg_surface"], relief="solid", bd=1)
@@ -403,8 +456,10 @@ btn_net_login.pack(side="right", padx=(0, 4), pady=10)
 login_header_center = tk.Frame(login_header, bg=COLOR_LOGIN)
 login_header_center.pack(side="left", padx=15, pady=10)
 
-crear_etiqueta(login_header_center, text="🔐", font=(FONT_EMOJI, 16), bg=COLOR_LOGIN, fg=FG_LOGIN).pack(side="left")
-crear_etiqueta(login_header_center, text="ACCESO AL SISTEMA", font=(FONT_FAMILY, 12, "bold"), bg=COLOR_LOGIN, fg=FG_LOGIN).pack(side="left", padx=(8, 0))
+lbl_lock_icon = crear_etiqueta(login_header_center, text="🔐", font=(FONT_EMOJI, 16), bg=COLOR_LOGIN, fg=FG_LOGIN)
+lbl_lock_icon.pack(side="left")
+lbl_acceso_txt = crear_etiqueta(login_header_center, text="ACCESO AL SISTEMA", font=(FONT_FAMILY, 12, "bold"), bg=COLOR_LOGIN, fg=FG_LOGIN)
+lbl_acceso_txt.pack(side="left", padx=(8, 0))
 
 login_content = tk.Frame(right_frame, bg=t["bg_surface"])
 login_content.pack(expand=True, fill="both", padx=35, pady=16)
@@ -484,24 +539,56 @@ btn_red_link = tk.Button(
 )
 btn_red_link.pack(fill="x", pady=(4, 0))
 
+
+def recargar_identidad_login():
+    """Refresca en vivo el título, logo, datos comerciales y colores de la ventana de Login."""
+    if not ventana.winfo_exists():
+        return
+    try:
+        nuevo_titulo = f"{business_mgr.nombre} — {business_mgr.subtitulo}" if business_mgr.subtitulo else f"{business_mgr.nombre} — Inicio de Sesión"
+        ventana.title(nuevo_titulo)
+        _renderizar_panel_institucional()
+        c_login = business_mgr.color_login or t["accent"]
+        fg_login = calcular_color_texto_optimo(c_login)
+        login_header.configure(bg=c_login)
+        login_header_center.configure(bg=c_login)
+        lbl_lock_icon.configure(bg=c_login, fg=fg_login)
+        lbl_acceso_txt.configure(bg=c_login, fg=fg_login)
+        btn_theme_login.configure(bg=c_login, fg=fg_login, activebackground=c_login, activeforeground=fg_login, highlightbackground=c_login)
+        btn_net_login.configure(bg=c_login, fg=fg_login, activebackground=c_login, activeforeground=fg_login, highlightbackground=c_login)
+        btn_red_link.configure(fg=c_login if c_login != "#FFFFFF" else t["accent"], activeforeground=c_login)
+    except Exception as e_ref:
+        print(f"Aviso refrescando identidad en login: {e_ref}")
+
+
+business_mgr.agregar_listener(recargar_identidad_login)
+
 ventana.bind("<Return>", validar_usuario)
 ventana.bind("<Escape>", limpiar_campos)
 entry_user.focus()
 
-# Auto-inicio transparente del servidor central si este equipo está configurado como Servidor (Caja Principal)
-def _autoarrancar_servidor_si_es_modo_servidor():
+
+def _autoarrancar_o_sincronizar_red():
     try:
-        from interface.network_manager import obtener_config_red, verificar_puerto_abierto, iniciar_servidor_segundo_plano
+        from interface.network_manager import obtener_config_red, verificar_salud_servidor, iniciar_servidor_segundo_plano
         cfg = obtener_config_red()
-        if cfg.get("modo", "servidor") == "servidor":
-            puerto = int(cfg.get("servidor_puerto", 8000))
-            if not verificar_puerto_abierto("127.0.0.1", puerto, timeout=0.3):
+        modo = cfg.get("modo", "servidor")
+        puerto = int(cfg.get("servidor_puerto", 8000))
+        if modo == "servidor":
+            ok_salud, _, _, _ = verificar_salud_servidor("127.0.0.1", puerto=puerto, timeout=0.8)
+            if not ok_salud:
                 iniciar_servidor_segundo_plano()
+        else:
+            ip_srv = cfg.get("servidor_ip", "127.0.0.1")
+            if business_mgr.sincronizar_desde_servidor(ip=ip_srv, puerto=puerto, notificar=False):
+                if ventana.winfo_exists():
+                    ventana.after(0, recargar_identidad_login)
     except Exception as e_srv:
-        print(f"Aviso auto-arrancando servidor central: {e_srv}")
+        print(f"Aviso en sincronización inicial de red: {e_srv}")
+
 
 import threading
-threading.Thread(target=_autoarrancar_servidor_si_es_modo_servidor, daemon=True).start()
+threading.Thread(target=_autoarrancar_o_sincronizar_red, daemon=True).start()
 
 if __name__ == "__main__":
     ventana.lift()

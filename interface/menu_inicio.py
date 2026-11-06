@@ -467,23 +467,65 @@ class VmPOSDashboard(tk.Tk):
             from interface.network_dialog import abrir_dialogo_red
         except ImportError:
             from network_dialog import abrir_dialogo_red
-        abrir_dialogo_red(parent=self, on_saved=self._actualizar_estado_red)
+        abrir_dialogo_red(parent=self, on_saved=self._on_config_red_guardada)
 
-    def _actualizar_estado_red(self):
-        """Monitorea el estado de conectividad con el servidor y actualiza la píldora superior."""
+    def _on_config_red_guardada(self, _cfg=None):
+        """Callback tras guardar configuración de red: refresca identidad y estado de conexión."""
         try:
-            if hasattr(self, 'lbl_estado_red') and self.lbl_estado_red.winfo_exists():
-                is_online = getattr(api, "servidor_disponible", False)
-                if is_online:
-                    url_clean = str(getattr(api, "base_url", "8000")).replace("http://", "").replace("https://", "").rstrip("/")
-                    self.lbl_estado_red.config(text=f"🟢 En Línea [{url_clean}]", fg="#047857", bg="#D1FAE5")
-                else:
-                    self.lbl_estado_red.config(text="🟡 Modo Local (Sin Servidor)", fg="#92400E", bg="#FEF3C7")
+            self.refrescar_identidad_negocio()
         except Exception:
             pass
-        finally:
-            if self.winfo_exists() and session_mgr.sesion_activa:
-                self.after(10000, self._actualizar_estado_red)
+        self._actualizar_estado_red()
+
+    def _actualizar_estado_red(self, _cfg=None):
+        """Monitorea el estado real de conectividad (/api/health) y sincroniza cambios comerciales del servidor."""
+        def _worker_red():
+            try:
+                from interface.network_manager import obtener_config_red, verificar_salud_servidor
+                cfg = obtener_config_red()
+                modo = cfg.get("modo", "servidor")
+                puerto = int(cfg.get("servidor_puerto", 8000))
+                ip_check = "127.0.0.1" if modo == "servidor" else cfg.get("servidor_ip", "127.0.0.1")
+                ip_mostrar = cfg.get("servidor_ip", "127.0.0.1")
+                ok_salud, datos_h, _msg, _ms = verificar_salud_servidor(ip_check, puerto=puerto, timeout=1.5)
+                api.servidor_disponible = ok_salud
+
+                # Si es Caja Secundaria y el servidor actualizó su nombre o logo, sincronizar en caliente
+                cambio_comercial = False
+                if ok_salud and modo == "cliente":
+                    rem_nombre = datos_h.get("nombre_negocio") or ""
+                    rem_hash = datos_h.get("logo_hash") or ""
+                    if rem_nombre and (rem_nombre != business_mgr.nombre or rem_hash != str(business_mgr.obtener("logo_hash", ""))):
+                        if business_mgr.sincronizar_desde_servidor(ip=ip_check, puerto=puerto, notificar=False):
+                            business_mgr._config["logo_hash"] = rem_hash
+                            cambio_comercial = True
+
+                def _aplicar_ui():
+                    if not self.winfo_exists():
+                        return
+                    if cambio_comercial:
+                        try:
+                            self.refrescar_identidad_negocio()
+                        except Exception:
+                            pass
+                    if hasattr(self, "lbl_estado_red") and self.lbl_estado_red.winfo_exists():
+                        if ok_salud:
+                            etiqueta_modo = "Servidor" if modo == "servidor" else f"Conectado a {ip_mostrar}:{puerto}"
+                            self.lbl_estado_red.config(text=f"🟢 {etiqueta_modo}", fg="#047857", bg="#D1FAE5")
+                        elif modo == "cliente":
+                            self.lbl_estado_red.config(text=f"🔴 Sin conexión [{ip_mostrar}:{puerto}]", fg="#B91C1C", bg="#FEE2E2")
+                        else:
+                            self.lbl_estado_red.config(text="🟡 Modo Local (Servidor detenido)", fg="#92400E", bg="#FEF3C7")
+
+                if self.winfo_exists():
+                    self.after(0, _aplicar_ui)
+            except Exception:
+                pass
+
+        import threading
+        threading.Thread(target=_worker_red, daemon=True).start()
+        if self.winfo_exists() and session_mgr.sesion_activa:
+            self.after(10000, self._actualizar_estado_red)
 
     def _actualizar_notificaciones_admin(self):
         try:

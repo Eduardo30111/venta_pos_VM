@@ -2908,6 +2908,20 @@ class App:
                 )
                 venta_exitosa = True
             else:
+                if getattr(api, "es_modo_cliente", lambda: False)():
+                    try:
+                        detalle_err = resp.json().get("detail", "Sin conexión con el servidor")
+                    except Exception:
+                        detalle_err = "Sin conexión con el servidor"
+                    messagebox.showerror(
+                        "Error de Conexión con el Servidor Central",
+                        f"No se pudo registrar la venta en el Servidor Principal ({api.base_url}):\n\n"
+                        f"• Motivo: {detalle_err}\n\n"
+                        "Por protección contable, una Caja Secundaria no guarda ventas en base de datos local aislada.\n"
+                        "Verifica la conexión de red e intenta nuevamente.",
+                        parent=self.ventana
+                    )
+                    return
                 id_local = guardar_venta_sqlite(
                     doc_cli, total, metodo_pago, detalles_payload,
                     operario_nombre, cliente_id=cliente_id_val,

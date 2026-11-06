@@ -3,7 +3,8 @@
 """
 Archivo: interface/network_dialog.py
 Ventana interactiva de configuración de red y servidor multi-caja para VmPOS.
-Permite visualizar la IP del servidor y conectar terminales clientes con un clic.
+Permite visualizar la IP del servidor, controlar el servicio central con verificación real (/api/health)
+y conectar terminales clientes sincronizando inmediatamente la identidad comercial del servidor.
 """
 
 import os
@@ -16,22 +17,34 @@ try:
     from interface.network_manager import (
         obtener_ips_locales,
         verificar_puerto_abierto,
+        verificar_salud_servidor,
         probar_conexion,
         obtener_config_red,
         guardar_config_red,
         iniciar_servidor_segundo_plano,
-        detener_servidor_segundo_plano
+        detener_servidor_segundo_plano,
+        obtener_estado_control_servidor,
     )
 except ImportError:
     from network_manager import (
         obtener_ips_locales,
         verificar_puerto_abierto,
+        verificar_salud_servidor,
         probar_conexion,
         obtener_config_red,
         guardar_config_red,
         iniciar_servidor_segundo_plano,
-        detener_servidor_segundo_plano
+        detener_servidor_segundo_plano,
+        obtener_estado_control_servidor,
     )
+
+try:
+    from interface.business_manager import business_mgr
+except ImportError:
+    try:
+        from business_manager import business_mgr
+    except ImportError:
+        business_mgr = None
 
 try:
     from interface.theme_manager import aplicar_tema, calcular_color_texto_optimo, crear_boton
@@ -39,15 +52,27 @@ except ImportError:
     try:
         from theme_manager import aplicar_tema, calcular_color_texto_optimo, crear_boton
     except ImportError:
-        def aplicar_tema(v): return {"bg_app": "#F1F5F9", "bg_surface": "#FFFFFF", "bg_card": "#FFFFFF", "accent": "#4F46E5", "text_primary": "#0F172A", "text_secondary": "#64748B", "border": "#E2E8F0"}
-        def calcular_color_texto_optimo(c): return "#FFFFFF"
-        def crear_boton(p, **kw): return tk.Button(p, **kw)
+        def aplicar_tema(v):
+            return {
+                "bg_app": "#F1F5F9",
+                "bg_surface": "#FFFFFF",
+                "bg_card": "#FFFFFF",
+                "accent": "#4F46E5",
+                "text_primary": "#0F172A",
+                "text_secondary": "#64748B",
+                "border": "#E2E8F0",
+            }
+        def calcular_color_texto_optimo(c):
+            return "#FFFFFF"
+        def crear_boton(p, **kw):
+            return tk.Button(p, **kw)
 
 
 class NetworkDialog:
     def __init__(self, parent=None, on_saved=None):
         self.parent = parent
         self.on_saved = on_saved
+        self._operacion_en_curso = False
 
         if parent:
             self.dialog = tk.Toplevel(parent)
@@ -56,32 +81,35 @@ class NetworkDialog:
             self.dialog = tk.Tk()
 
         self.dialog.title("VmPOS — Configuración de Red y Servidor Multi-Caja")
-        self.dialog.geometry("640x660")
-        self.dialog.minsize(580, 580)
+        self.dialog.geometry("650x680")
+        self.dialog.minsize(590, 600)
 
-        # Cargar tema
         self.t = aplicar_tema(self.dialog)
         self.dialog.configure(bg=self.t["bg_app"])
 
-        # Cargar configuración actual
         self.config_actual = obtener_config_red()
 
-        # Variables Tkinter
         self.modo_var = tk.StringVar(master=self.dialog, value=self.config_actual.get("modo", "servidor"))
         self.servidor_ip_var = tk.StringVar(master=self.dialog, value=str(self.config_actual.get("servidor_ip", "127.0.0.1")))
         self.servidor_puerto_var = tk.StringVar(master=self.dialog, value=str(self.config_actual.get("servidor_puerto", 8000)))
         self.terminal_id_var = tk.StringVar(master=self.dialog, value=str(self.config_actual.get("terminal_id", 1)))
         self.terminal_nombre_var = tk.StringVar(master=self.dialog, value=str(self.config_actual.get("terminal_nombre", "CAJA-01")))
 
-        self.estado_servidor_var = tk.StringVar(master=self.dialog, value="Comprobando...")
+        self.estado_servidor_var = tk.StringVar(master=self.dialog, value="⏳ Comprobando estado del servidor...")
+        self.instruccion_servidor_var = tk.StringVar(master=self.dialog, value="")
         self.resultado_prueba_var = tk.StringVar(master=self.dialog, value="")
         self.color_resultado_var = tk.StringVar(master=self.dialog, value=self.t["text_secondary"])
 
         self._construir_ui()
         self._actualizar_vista_modo()
+        self._actualizar_texto_instrucciones()
+
+        # Mantener sincronizado el cuadro de instrucciones al cambiar IP o Puerto
+        self.ip_destacada_var.trace_add("write", lambda *_: self._actualizar_texto_instrucciones())
+        self.servidor_puerto_var.trace_add("write", lambda *_: self._actualizar_texto_instrucciones())
+
         self._verificar_estado_servidor_async()
 
-        # Centrar ventana
         self.dialog.update_idletasks()
         try:
             x = (self.dialog.winfo_screenwidth() - self.dialog.winfo_reqwidth()) // 2
@@ -94,35 +122,30 @@ class NetworkDialog:
             self.dialog.grab_set()
 
     def _construir_ui(self):
-        # 1. Encabezado
         header_frame = tk.Frame(self.dialog, bg=self.t["accent"], height=70)
         header_frame.pack(fill="x")
         header_frame.pack_propagate(False)
 
         fg_header = calcular_color_texto_optimo(self.t["accent"])
-        lbl_titulo = tk.Label(
+        tk.Label(
             header_frame,
             text="🌐 Configuración de Red y Cajas Conectadas",
             font=("Segoe UI", 14, "bold"),
             bg=self.t["accent"],
-            fg=fg_header
-        )
-        lbl_titulo.pack(pady=(12, 2))
+            fg=fg_header,
+        ).pack(pady=(12, 2))
 
-        lbl_sub = tk.Label(
+        tk.Label(
             header_frame,
-            text="Conecta varias computadoras para compartir el mismo inventario y ventas",
+            text="Conecta varias computadoras para compartir inventario, ventas y configuración comercial",
             font=("Segoe UI", 9),
             bg=self.t["accent"],
-            fg=fg_header
-        )
-        lbl_sub.pack()
+            fg=fg_header,
+        ).pack()
 
-        # Contenedor con scroll si es necesario
         content = tk.Frame(self.dialog, bg=self.t["bg_app"], padx=20, pady=15)
         content.pack(fill="both", expand=True)
 
-        # 2. Selector de Modo: Servidor vs Cliente
         selector_card = tk.LabelFrame(
             content,
             text=" ¿Qué función cumple esta computadora? ",
@@ -132,9 +155,11 @@ class NetworkDialog:
             padx=15,
             pady=12,
             relief="solid",
-            bd=1
+            bd=1,
         )
         selector_card.pack(fill="x", pady=(0, 15))
+
+        rb_select_bg = self.t.get("input_bg", self.t["bg_card"])
 
         rb_servidor = tk.Radiobutton(
             selector_card,
@@ -144,19 +169,20 @@ class NetworkDialog:
             font=("Segoe UI", 10, "bold"),
             bg=self.t["bg_card"],
             fg=self.t["text_primary"],
+            selectcolor=rb_select_bg,
             activebackground=self.t["bg_card"],
-            command=self._actualizar_vista_modo
+            activeforeground=self.t["text_primary"],
+            command=self._actualizar_vista_modo,
         )
         rb_servidor.pack(anchor="w", pady=4)
 
-        lbl_desc_servidor = tk.Label(
+        tk.Label(
             selector_card,
-            text="Guarda la base de datos central. Las otras computadoras se conectarán a esta.",
+            text="Guarda la base de datos y configuración comercial central. Las demás cajas se conectarán a esta.",
             font=("Segoe UI", 8),
             bg=self.t["bg_card"],
-            fg=self.t["text_secondary"]
-        )
-        lbl_desc_servidor.pack(anchor="w", padx=25, pady=(0, 8))
+            fg=self.t["text_secondary"],
+        ).pack(anchor="w", padx=25, pady=(0, 8))
 
         rb_cliente = tk.Radiobutton(
             selector_card,
@@ -166,21 +192,21 @@ class NetworkDialog:
             font=("Segoe UI", 10, "bold"),
             bg=self.t["bg_card"],
             fg=self.t["text_primary"],
+            selectcolor=rb_select_bg,
             activebackground=self.t["bg_card"],
-            command=self._actualizar_vista_modo
+            activeforeground=self.t["text_primary"],
+            command=self._actualizar_vista_modo,
         )
         rb_cliente.pack(anchor="w", pady=4)
 
-        lbl_desc_cliente = tk.Label(
+        tk.Label(
             selector_card,
-            text="Se conecta por WiFi o red local a la computadora Servidor.",
+            text="Se conecta por WiFi o cable LAN al Servidor Principal y adopta automáticamente su nombre comercial y logo.",
             font=("Segoe UI", 8),
             bg=self.t["bg_card"],
-            fg=self.t["text_secondary"]
-        )
-        lbl_desc_cliente.pack(anchor="w", padx=25)
+            fg=self.t["text_secondary"],
+        ).pack(anchor="w", padx=25)
 
-        # 3. Contenedor Dinámico para Servidor o Cliente
         self.frame_servidor = tk.LabelFrame(
             content,
             text=" Datos para compartir con las otras computadoras ",
@@ -190,7 +216,7 @@ class NetworkDialog:
             padx=15,
             pady=12,
             relief="solid",
-            bd=1
+            bd=1,
         )
 
         self.frame_cliente = tk.LabelFrame(
@@ -202,17 +228,16 @@ class NetworkDialog:
             padx=15,
             pady=12,
             relief="solid",
-            bd=1
+            bd=1,
         )
 
         self._construir_vista_servidor()
         self._construir_vista_cliente()
 
-        # 4. Botones de acción inferiores
         btn_bar = tk.Frame(self.dialog, bg=self.t["bg_app"], pady=12, padx=20)
         btn_bar.pack(fill="x", side="bottom")
 
-        crear_boton(
+        self.btn_guardar = crear_boton(
             btn_bar,
             text="💾 Guardar y Conectar",
             bg_color="#10B981",
@@ -220,8 +245,9 @@ class NetworkDialog:
             font=("Segoe UI", 10, "bold"),
             command=self._guardar_y_conectar,
             padx=18,
-            pady=6
-        ).pack(side="right", padx=(8, 0))
+            pady=6,
+        )
+        self.btn_guardar.pack(side="right", padx=(8, 0))
 
         crear_boton(
             btn_bar,
@@ -231,11 +257,10 @@ class NetworkDialog:
             font=("Segoe UI", 10),
             command=self.dialog.destroy,
             padx=14,
-            pady=6
+            pady=6,
         ).pack(side="right")
 
     def _construir_vista_servidor(self):
-        # Muestra la IP local destacada
         ips = obtener_ips_locales()
         ip_destacada = ips[0] if ips else "127.0.0.1"
         self.ip_destacada_var = tk.StringVar(master=self.dialog, value=ip_destacada)
@@ -248,7 +273,7 @@ class NetworkDialog:
             text="Dirección IP de esta máquina:",
             font=("Segoe UI", 9, "bold"),
             bg=self.t["bg_card"],
-            fg=self.t["text_primary"]
+            fg=self.t["text_primary"],
         ).pack(anchor="w")
 
         f_ip_box = tk.Frame(f_ip, bg="#E2E8F0", padx=8, pady=6, bd=1, relief="solid")
@@ -261,11 +286,14 @@ class NetworkDialog:
                 values=ips,
                 state="readonly",
                 font=("Segoe UI", 12, "bold"),
-                width=18
+                width=18,
             )
             cb_ips.pack(side="left", padx=5)
+
             def _on_ip_change(e=None):
                 self.servidor_ip_var.set(self.ip_destacada_var.get())
+                self._actualizar_texto_instrucciones()
+
             cb_ips.bind("<<ComboboxSelected>>", _on_ip_change)
         else:
             self.lbl_ip_valor = tk.Label(
@@ -273,7 +301,7 @@ class NetworkDialog:
                 textvariable=self.ip_destacada_var,
                 font=("Segoe UI", 14, "bold"),
                 bg="#E2E8F0",
-                fg="#1E293B"
+                fg="#1E293B",
             )
             self.lbl_ip_valor.pack(side="left", padx=5)
 
@@ -282,21 +310,21 @@ class NetworkDialog:
             text="📋 Copiar IP",
             font=("Segoe UI", 9),
             bg="white",
+            fg="#0F172A",
             relief="groove",
-            command=lambda: self._copiar_al_portapapeles(self.ip_destacada_var.get())
+            command=lambda: self._copiar_al_portapapeles(self.ip_destacada_var.get()),
         )
         btn_copiar.pack(side="right", padx=5)
 
-        # Puerto del servidor
         f_puerto = tk.Frame(self.frame_servidor, bg=self.t["bg_card"])
         f_puerto.pack(fill="x", pady=6)
 
         tk.Label(
             f_puerto,
-            text="Puerto de comunicación:",
+            text="Puerto oficial de comunicación (por defecto: 8000):",
             font=("Segoe UI", 9, "bold"),
             bg=self.t["bg_card"],
-            fg=self.t["text_primary"]
+            fg=self.t["text_primary"],
         ).pack(anchor="w")
 
         entry_p = tk.Entry(
@@ -305,11 +333,10 @@ class NetworkDialog:
             font=("Segoe UI", 10),
             width=10,
             relief="solid",
-            bd=1
+            bd=1,
         )
         entry_p.pack(anchor="w", pady=2)
 
-        # Estado del servicio
         f_estado = tk.Frame(self.frame_servidor, bg=self.t["bg_card"])
         f_estado.pack(fill="x", pady=8)
 
@@ -318,10 +345,10 @@ class NetworkDialog:
             text="Estado del Servicio Central:",
             font=("Segoe UI", 9, "bold"),
             bg=self.t["bg_card"],
-            fg=self.t["text_primary"]
+            fg=self.t["text_primary"],
         ).pack(anchor="w")
 
-        f_status_row = tk.Frame(f_estado, bg=self.t["bg_card"])
+        f_status_row = tk.Frame(self.frame_servidor, bg=self.t["bg_card"])
         f_status_row.pack(fill="x", pady=2)
 
         self.lbl_status = tk.Label(
@@ -329,47 +356,67 @@ class NetworkDialog:
             textvariable=self.estado_servidor_var,
             font=("Segoe UI", 9, "bold"),
             bg=self.t["bg_card"],
-            fg="#64748B"
+            fg="#64748B",
+            wraplength=320,
+            justify="left",
         )
         self.lbl_status.pack(side="left")
 
-        btn_check = tk.Button(
+        self.btn_check_srv = tk.Button(
             f_status_row,
             text="🔄 Actualizar",
             font=("Segoe UI", 8),
-            command=self._verificar_estado_servidor_async
+            command=self._verificar_estado_servidor_async,
         )
-        btn_check.pack(side="right", padx=2)
+        self.btn_check_srv.pack(side="right", padx=2)
+
+        self.btn_detener_srv = tk.Button(
+            f_status_row,
+            text="⏹ Detener",
+            font=("Segoe UI", 8),
+            bg="#EF4444",
+            fg="white",
+            relief="groove",
+            command=self._detener_servidor_click,
+        )
+        self.btn_detener_srv.pack(side="right", padx=2)
 
         self.btn_iniciar_srv = tk.Button(
             f_status_row,
             text="▶ Iniciar Servidor Ahora",
             font=("Segoe UI", 8, "bold"),
             bg="#10B981",
+            fg="white",
             relief="groove",
-            command=self._iniciar_servidor_click
+            command=self._iniciar_servidor_click,
         )
         self.btn_iniciar_srv.pack(side="right", padx=4)
 
-        # Mensaje de ayuda / instrucción
         msg_card = tk.Frame(self.frame_servidor, bg="#FEF3C7", padx=10, pady=10, bd=1, relief="solid")
         msg_card.pack(fill="x", pady=10)
 
-        tk.Label(
+        self.lbl_instrucciones = tk.Label(
             msg_card,
-            text=f"💡 Instrucción para las otras computadoras:\n"
-                 f"1. Abre VmPOS en las otras máquinas.\n"
-                 f"2. Entra a esta misma ventana y selecciona 'Caja Secundaria'.\n"
-                 f"3. Escribe la IP: {ip_destacada} y Puerto: {self.servidor_puerto_var.get()}.\n"
-                 f"4. Presiona 'Probar Conexión' y 'Guardar'.",
+            textvariable=self.instruccion_servidor_var,
             font=("Segoe UI", 9),
             bg="#FEF3C7",
             fg="#92400E",
-            justify="left"
-        ).pack(anchor="w")
+            justify="left",
+        )
+        self.lbl_instrucciones.pack(anchor="w")
+
+    def _actualizar_texto_instrucciones(self):
+        ip_mostrar = self.ip_destacada_var.get().strip() or "127.0.0.1"
+        puerto_mostrar = self.servidor_puerto_var.get().strip() or "8000"
+        self.instruccion_servidor_var.set(
+            f"💡 Instrucción para las otras computadoras:\n"
+            f"1. Abre VmPOS en las demás máquinas.\n"
+            f"2. Entra a esta misma ventana y selecciona 'Caja Secundaria'.\n"
+            f"3. Escribe la IP: {ip_mostrar} y Puerto: {puerto_mostrar}.\n"
+            f"4. Presiona 'Probar Conexión' y luego 'Guardar y Conectar'."
+        )
 
     def _construir_vista_cliente(self):
-        # IP del Servidor
         f_ip = tk.Frame(self.frame_cliente, bg=self.t["bg_card"])
         f_ip.pack(fill="x", pady=4)
 
@@ -378,7 +425,7 @@ class NetworkDialog:
             text="Dirección IP de la Computadora Servidor:",
             font=("Segoe UI", 9, "bold"),
             bg=self.t["bg_card"],
-            fg=self.t["text_primary"]
+            fg=self.t["text_primary"],
         ).pack(anchor="w")
 
         entry_ip = tk.Entry(
@@ -386,28 +433,27 @@ class NetworkDialog:
             textvariable=self.servidor_ip_var,
             font=("Segoe UI", 11),
             relief="solid",
-            bd=1
+            bd=1,
         )
         entry_ip.pack(fill="x", pady=2)
 
         tk.Label(
             f_ip,
-            text="Ejemplo: 192.168.1.50 (la IP que muestra la PC Servidor en pantalla)",
+            text="Ejemplo: 192.168.1.14 (la IP que muestra la computadora Servidor en pantalla)",
             font=("Segoe UI", 8),
             bg=self.t["bg_card"],
-            fg=self.t["text_secondary"]
+            fg=self.t["text_secondary"],
         ).pack(anchor="w")
 
-        # Puerto del Servidor
         f_p = tk.Frame(self.frame_cliente, bg=self.t["bg_card"])
         f_p.pack(fill="x", pady=4)
 
         tk.Label(
             f_p,
-            text="Puerto:",
+            text="Puerto del Servidor (por defecto: 8000):",
             font=("Segoe UI", 9, "bold"),
             bg=self.t["bg_card"],
-            fg=self.t["text_primary"]
+            fg=self.t["text_primary"],
         ).pack(anchor="w")
 
         entry_p = tk.Entry(
@@ -416,11 +462,10 @@ class NetworkDialog:
             font=("Segoe UI", 10),
             width=10,
             relief="solid",
-            bd=1
+            bd=1,
         )
         entry_p.pack(anchor="w", pady=2)
 
-        # Nombre y número de esta caja
         f_caja = tk.Frame(self.frame_cliente, bg=self.t["bg_card"])
         f_caja.pack(fill="x", pady=4)
 
@@ -432,7 +477,7 @@ class NetworkDialog:
             text="Nombre de esta Caja:",
             font=("Segoe UI", 9, "bold"),
             bg=self.t["bg_card"],
-            fg=self.t["text_primary"]
+            fg=self.t["text_primary"],
         ).pack(anchor="w")
 
         entry_nom = tk.Entry(
@@ -440,7 +485,7 @@ class NetworkDialog:
             textvariable=self.terminal_nombre_var,
             font=("Segoe UI", 10),
             relief="solid",
-            bd=1
+            bd=1,
         )
         entry_nom.pack(fill="x", pady=2)
 
@@ -452,7 +497,7 @@ class NetworkDialog:
             text="Número / ID de Caja:",
             font=("Segoe UI", 9, "bold"),
             bg=self.t["bg_card"],
-            fg=self.t["text_primary"]
+            fg=self.t["text_primary"],
         ).pack(anchor="w")
 
         cb_id = ttk.Combobox(
@@ -460,11 +505,10 @@ class NetworkDialog:
             textvariable=self.terminal_id_var,
             values=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
             state="readonly",
-            font=("Segoe UI", 10)
+            font=("Segoe UI", 10),
         )
         cb_id.pack(fill="x", pady=2)
 
-        # Botón de Prueba de Conexión
         f_btn_test = tk.Frame(self.frame_cliente, bg=self.t["bg_card"])
         f_btn_test.pack(fill="x", pady=10)
 
@@ -476,19 +520,18 @@ class NetworkDialog:
             font=("Segoe UI", 9, "bold"),
             command=self._ejecutar_prueba_conexion,
             padx=12,
-            pady=5
+            pady=5,
         )
         self.btn_probar.pack(anchor="w")
 
-        # Cartel con resultado de prueba
         self.lbl_resultado = tk.Label(
             self.frame_cliente,
             textvariable=self.resultado_prueba_var,
             font=("Segoe UI", 9, "bold"),
             bg=self.t["bg_card"],
             fg=self.color_resultado_var.get(),
-            wraplength=520,
-            justify="left"
+            wraplength=540,
+            justify="left",
         )
         self.lbl_resultado.pack(anchor="w", pady=4)
 
@@ -497,116 +540,246 @@ class NetworkDialog:
         if modo == "servidor":
             self.frame_cliente.pack_forget()
             self.frame_servidor.pack(fill="both", expand=True, pady=(0, 10))
-            # Ajustar valores a localhost o IP local
             ips = obtener_ips_locales()
             self.servidor_ip_var.set(ips[0] if ips else "127.0.0.1")
+            if int(self.terminal_id_var.get() or 1) == 1:
+                self.terminal_nombre_var.set("CAJA-01")
         else:
             self.frame_servidor.pack_forget()
             self.frame_cliente.pack(fill="both", expand=True, pady=(0, 10))
+            if int(self.terminal_id_var.get() or 1) == 1:
+                self.terminal_id_var.set("2")
+                self.terminal_nombre_var.set("CAJA-02")
 
     def _copiar_al_portapapeles(self, texto):
         try:
             self.dialog.clipboard_clear()
             self.dialog.clipboard_append(texto)
-            messagebox.showinfo("Copiado", f"Dirección IP {texto} copiada al portapapeles.")
+            messagebox.showinfo("Copiado", f"Dirección IP {texto} copiada al portapapeles.", parent=self.dialog)
         except Exception:
             pass
 
+    def _aplicar_estado_visual_botones(self, estado: str, puerto: int, detalle: str = ""):
+        """Actualiza los botones e indicadores según el estado real: detenido, iniciando, activo, error, deteniendo."""
+        if not self.dialog.winfo_exists():
+            return
+        if estado == "iniciando":
+            self.estado_servidor_var.set("⏳ Iniciando servidor y verificando /api/health...")
+            self.lbl_status.config(fg="#3B82F6")
+            self.btn_iniciar_srv.config(text="⏳ Iniciando...", state="disabled", bg="#94A3B8")
+            self.btn_detener_srv.config(state="disabled")
+        elif estado == "deteniendo":
+            self.estado_servidor_var.set("⏳ Deteniendo servicio central...")
+            self.lbl_status.config(fg="#F59E0B")
+            self.btn_iniciar_srv.config(state="disabled")
+            self.btn_detener_srv.config(state="disabled")
+        elif estado == "activo":
+            extra = f" — {detalle}" if detalle else ""
+            self.estado_servidor_var.set(f"🟢 Servidor ACTIVO (Puerto {puerto}{extra})")
+            self.lbl_status.config(fg="#10B981")
+            self.btn_iniciar_srv.config(text="🟢 Servidor Activo", state="disabled", bg="#10B981")
+            self.btn_detener_srv.config(state="normal")
+        elif estado == "error":
+            self.estado_servidor_var.set(f"🔴 Error en puerto {puerto}: {detalle or 'No responde /api/health'}")
+            self.lbl_status.config(fg="#EF4444")
+            self.btn_iniciar_srv.config(text="▶ Reintentar Inicio", state="normal", bg="#10B981")
+            self.btn_detener_srv.config(state="normal")
+        else:
+            self.estado_servidor_var.set(f"🟡 Servidor Detenido (Puerto {puerto})")
+            self.lbl_status.config(fg="#F59E0B")
+            self.btn_iniciar_srv.config(text="▶ Iniciar Servidor Ahora", state="normal", bg="#10B981")
+            self.btn_detener_srv.config(state="disabled")
+
     def _verificar_estado_servidor_async(self):
         def _check():
-            self.estado_servidor_var.set("⏳ Comprobando servicio...")
-            puerto = int(self.servidor_puerto_var.get() or 8000)
-            activo = verificar_puerto_abierto("127.0.0.1", puerto, timeout=0.8)
-            if activo:
-                self.estado_servidor_var.set(f"🟢 Servidor ACTIVO (Escuchando en el puerto {puerto})")
-                self.lbl_status.config(fg="#10B981")
-            else:
-                self.estado_servidor_var.set(f"🟡 Servidor no detectado en el puerto local {puerto}")
-                self.lbl_status.config(fg="#F59E0B")
+            try:
+                puerto = int(self.servidor_puerto_var.get().strip() or 8000)
+            except Exception:
+                puerto = 8000
+            ok, datos_h, _msg, _ms = verificar_salud_servidor("127.0.0.1", puerto=puerto, timeout=1.2)
+            def _ui():
+                if ok:
+                    neg = datos_h.get("nombre_negocio") or "VmPOS"
+                    self._aplicar_estado_visual_botones("activo", puerto, neg)
+                else:
+                    ctrl_st = obtener_estado_control_servidor()
+                    if ctrl_st == "iniciando":
+                        self._aplicar_estado_visual_botones("iniciando", puerto)
+                    elif ctrl_st == "error":
+                        self._aplicar_estado_visual_botones("error", puerto, "Revisa logs/server.log")
+                    else:
+                        self._aplicar_estado_visual_botones("detenido", puerto)
+            if self.dialog.winfo_exists():
+                self.dialog.after(0, _ui)
 
         threading.Thread(target=_check, daemon=True).start()
 
     def _iniciar_servidor_click(self):
-        self.estado_servidor_var.set("⏳ Levantando servidor en segundo plano...")
-        self.lbl_status.config(fg="#3B82F6")
+        if self._operacion_en_curso:
+            return
+        self._operacion_en_curso = True
+        try:
+            puerto = int(self.servidor_puerto_var.get().strip() or 8000)
+        except Exception:
+            puerto = 8000
+
+        # Persistir puerto antes de iniciar para que iniciar_servidor_segundo_plano use el puerto elegido
+        guardar_config_red({"servidor_puerto": puerto})
+        self._aplicar_estado_visual_botones("iniciando", puerto)
+
         def _start():
             ok, msg = iniciar_servidor_segundo_plano()
             def _done():
+                self._operacion_en_curso = False
+                if not self.dialog.winfo_exists():
+                    return
                 if ok:
+                    self._aplicar_estado_visual_botones("activo", puerto)
                     messagebox.showinfo(
-                        "Servidor Activo",
-                        f"{msg}\n\nLas demás computadoras de la red local ya pueden conectarse a la IP: {self.ip_destacada_var.get()}:{self.servidor_puerto_var.get()}",
-                        parent=self.dialog
+                        "Servidor Activo y Verificado",
+                        f"{msg}\n\n"
+                        f"Las demás computadoras ya pueden conectarse a:\n"
+                        f"IP: {self.ip_destacada_var.get()}  •  Puerto: {puerto}",
+                        parent=self.dialog,
                     )
                 else:
-                    messagebox.showwarning("Aviso de Inicio", msg, parent=self.dialog)
+                    self._aplicar_estado_visual_botones("error", puerto)
+                    messagebox.showerror("Error al Iniciar Servidor", msg, parent=self.dialog)
                 self._verificar_estado_servidor_async()
-            self.dialog.after(0, _done)
+            if self.dialog.winfo_exists():
+                self.dialog.after(0, _done)
+
         threading.Thread(target=_start, daemon=True).start()
+
+    def _detener_servidor_click(self):
+        if self._operacion_en_curso:
+            return
+        try:
+            puerto = int(self.servidor_puerto_var.get().strip() or 8000)
+        except Exception:
+            puerto = 8000
+        self._aplicar_estado_visual_botones("deteniendo", puerto)
+
+        def _stop():
+            detener_servidor_segundo_plano()
+            if self.dialog.winfo_exists():
+                self.dialog.after(0, lambda: self._aplicar_estado_visual_botones("detenido", puerto))
+
+        threading.Thread(target=_stop, daemon=True).start()
 
     def _ejecutar_prueba_conexion(self):
         ip = self.servidor_ip_var.get().strip()
-        puerto = int(self.servidor_puerto_var.get() or 8000)
+        try:
+            puerto = int(self.servidor_puerto_var.get().strip() or 8000)
+        except Exception:
+            puerto = 8000
 
-        self.resultado_prueba_var.set("⏳ Probando conexión con el servidor...")
+        self.resultado_prueba_var.set("⏳ Verificando servidor y base de datos (/api/health)...")
         self.lbl_resultado.config(fg="#64748B")
         self.btn_probar.config(state="disabled")
 
         def _test():
-            ok, msg, ms = probar_conexion(ip, puerto, timeout=3.5)
+            ok, datos_h, msg, ms = verificar_salud_servidor(ip, puerto=puerto, timeout=3.5)
             def _update():
+                if not self.dialog.winfo_exists():
+                    return
                 self.btn_probar.config(state="normal")
                 if ok:
-                    self.resultado_prueba_var.set(f"✅ ¡Conexión Exitosa! Servidor en línea (Latencia: {ms} ms)")
+                    neg = datos_h.get("nombre_negocio") or "VmPOS"
+                    self.resultado_prueba_var.set(f"✅ ¡Conexión Exitosa con '{neg}'! API y Base de Datos en línea ({ms} ms)")
                     self.lbl_resultado.config(fg="#10B981")
                 else:
                     self.resultado_prueba_var.set(f"❌ {msg}")
                     self.lbl_resultado.config(fg="#EF4444")
-            self.dialog.after(0, _update)
+            if self.dialog.winfo_exists():
+                self.dialog.after(0, _update)
 
         threading.Thread(target=_test, daemon=True).start()
 
     def _guardar_y_conectar(self):
+        if self._operacion_en_curso:
+            return
         modo = self.modo_var.get()
         ip = self.servidor_ip_var.get().strip()
-        puerto = int(self.servidor_puerto_var.get().strip() or 8000)
-        t_id = int(self.terminal_id_var.get().strip() or 1)
+        try:
+            puerto = int(self.servidor_puerto_var.get().strip() or 8000)
+        except Exception:
+            messagebox.showerror("Puerto Inválido", "Ingresa un número de puerto válido (por ejemplo: 8000).", parent=self.dialog)
+            return
+
+        try:
+            t_id = int(self.terminal_id_var.get().strip() or 1)
+        except Exception:
+            t_id = 1
         t_nombre = self.terminal_nombre_var.get().strip() or f"CAJA-{t_id:02d}"
 
         if not ip:
-            messagebox.showerror("Error", "Debes ingresar una dirección IP válida.")
+            messagebox.showerror("Error", "Debes ingresar una dirección IP válida.", parent=self.dialog)
             return
+
+        # Si es Caja Secundaria, verificar primero la salud del servidor central
+        if modo == "cliente":
+            ok_salud, datos_salud, msg_salud, _ms = verificar_salud_servidor(ip, puerto=puerto, timeout=3.0)
+            if not ok_salud:
+                continuar = messagebox.askyesno(
+                    "Servidor Central No Responde",
+                    f"No se pudo verificar el servidor en http://{ip}:{puerto}/api/health:\n\n"
+                    f"{msg_salud}\n\n"
+                    "¿Deseas guardar esta configuración de todos modos?",
+                    parent=self.dialog,
+                )
+                if not continuar:
+                    return
 
         nueva_config = {
             "modo": modo,
             "servidor_ip": ip,
             "servidor_puerto": puerto,
             "terminal_id": t_id,
-            "terminal_nombre": t_nombre
+            "terminal_nombre": t_nombre,
         }
 
         ok = guardar_config_red(nueva_config)
-        if ok:
-            # Si se configuró como Servidor Principal y el puerto no está activo, iniciarlo automáticamente
-            if modo == "servidor" and not verificar_puerto_abierto("127.0.0.1", puerto, timeout=0.4):
-                iniciar_servidor_segundo_plano()
+        if not ok:
+            messagebox.showerror("Error", "No se pudo guardar la configuración de red.", parent=self.dialog)
+            return
 
-            messagebox.showinfo(
-                "Configuración Guardada",
-                f"La configuración de red ha sido guardada exitosamente.\n\n"
-                f"Modo: {modo.upper()}\n"
-                f"Servidor: http://{ip}:{puerto}\n"
-                f"Terminal: {t_nombre} (ID: {t_id})\n\n"
-                "La aplicación se conectará automáticamente a esta dirección."
-            )
-            if callable(self.on_saved):
-                try:
-                    self.on_saved(nueva_config)
-                except Exception:
-                    pass
-            self.dialog.destroy()
-        else:
-            messagebox.showerror("Error", "No se pudo guardar la configuración de red.")
+        if modo == "servidor":
+            salud_actual, _, _, _ = verificar_salud_servidor("127.0.0.1", puerto=puerto, timeout=0.8)
+            if not salud_actual:
+                ok_ini, msg_ini = iniciar_servidor_segundo_plano()
+                if not ok_ini:
+                    messagebox.showwarning("Aviso del Servidor", msg_ini, parent=self.dialog)
+
+        # Recargar y sincronizar inmediatamente la configuración comercial (Nombre, NIT, Dirección, Teléfono, Logo)
+        if business_mgr is not None:
+            try:
+                if modo == "cliente":
+                    business_mgr.sincronizar_desde_servidor(ip=ip, puerto=puerto, notificar=True)
+                else:
+                    business_mgr.recargar()
+                    business_mgr.notificar_cambio()
+            except Exception as e_sync:
+                print(f"Aviso sincronizando configuración comercial: {e_sync}")
+
+        nombre_negocio_activo = business_mgr.nombre if business_mgr is not None else "VmPOS"
+
+        messagebox.showinfo(
+            "Configuración Guardada y Sincronizada",
+            f"La configuración de red se aplicó correctamente.\n\n"
+            f"• Modo: {'CAJA SECUNDARIA (Cliente)' if modo == 'cliente' else 'SERVIDOR PRINCIPAL'}\n"
+            f"• Servidor: http://{ip}:{puerto}\n"
+            f"• Terminal: {t_nombre} (ID: {t_id})\n"
+            f"• Negocio Activo: {nombre_negocio_activo}",
+            parent=self.dialog,
+        )
+
+        if callable(self.on_saved):
+            try:
+                self.on_saved(nueva_config)
+            except Exception:
+                pass
+        self.dialog.destroy()
 
 
 def abrir_dialogo_red(parent=None, on_saved=None):

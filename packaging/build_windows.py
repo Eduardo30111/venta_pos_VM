@@ -37,7 +37,16 @@ DEPENDENCIAS = [
     "pydantic",
     "pydantic-settings",
     "python-barcode",
-    "python-escpos"
+    "python-escpos",
+    "fastapi",
+    "uvicorn",
+    "sqlalchemy",
+    "aiosqlite",
+    "asyncpg",
+    "python-jose[cryptography]",
+    "passlib[bcrypt]",
+    "bcrypt==3.2.2",
+    "python-multipart",
 ]
 
 cmd_pip = [sys.executable, "-m", "pip", "install", "--upgrade"] + DEPENDENCIAS
@@ -119,10 +128,31 @@ hidden_imports = [
     "server.main",
     "server.config",
     "server.database",
+    "server.aiosqlite_compat",
+    "server.models.configuracion",
+    "server.routers.configuracion",
     "uvicorn",
+    "uvicorn.logging",
+    "uvicorn.loops",
+    "uvicorn.loops.auto",
+    "uvicorn.protocols",
+    "uvicorn.protocols.http",
+    "uvicorn.protocols.http.auto",
+    "uvicorn.protocols.websockets",
+    "uvicorn.protocols.websockets.auto",
+    "uvicorn.lifespan",
+    "uvicorn.lifespan.on",
     "fastapi",
     "sqlalchemy",
-    "asyncpg"
+    "sqlalchemy.dialects.sqlite.aiosqlite",
+    "sqlalchemy.dialects.postgresql.asyncpg",
+    "aiosqlite",
+    "asyncpg",
+    "jose",
+    "passlib",
+    "passlib.handlers.bcrypt",
+    "bcrypt",
+    "multipart",
 ]
 
 if sys.platform.startswith("win"):
@@ -134,6 +164,9 @@ pyinstaller_args = [
     "--noconfirm",
     "--clean",
     "--collect-all=escpos",
+    "--collect-submodules=server",
+    "--collect-submodules=uvicorn",
+    "--collect-submodules=passlib",
 ]
 
 icon_path = os.path.join(PROJECT_ROOT, "assets", "Salome.ico")

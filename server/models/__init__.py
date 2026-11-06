@@ -13,4 +13,6 @@ from .nomina import Comision, Liquidacion, Asistencia
 from .finanzas import CuentaPorCobrar, Abono, CuentaPorPagar, Gasto, MovimientoCuentaCliente
 from .auditoria import AuditLog
 from .turno import CicloTurno, ColaTurno, AtencionTurno, AlmuerzoTurno, EventoTurno
+from .configuracion import ConfiguracionNegocio
+
 
