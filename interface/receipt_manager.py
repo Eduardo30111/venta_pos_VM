@@ -19,6 +19,8 @@ Responsabilidades:
   logo, bordes de ancho de papel y corte automático opcional.
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import json

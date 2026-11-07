@@ -34,6 +34,7 @@ jobs:
       - name: Compilar VmPOS.exe e Instalador Setup
         shell: bash
         run: |
+          set -eo pipefail
           python packaging/build_windows.py 2>&1 | tee build.log
 
       - name: Diagnostico en caso de error
@@ -74,15 +75,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v4.0.0
-          name: "VmPOS v4.0.0 — Instalador Oficial Windows y macOS"
+          tag_name: v4.0.2
+          name: "VmPOS v4.0.2 — Instalador Oficial Windows y macOS"
           body: |
-            ## 🚀 VmPOS v4.0.0 — Instaladores Oficiales
+            ## 🚀 VmPOS v4.0.2 — Instaladores Oficiales
 
             ### 📦 Descargas Disponibles:
-            - **Windows (Instalador Setup .exe)**: `VmPOS_Setup_v4.0.exe` (Instalación guiada con acceso directo y firewall)
+            - **Windows (Instalador Setup .exe)**: `VmPOS_Setup_v4.0.2.exe` (Instalación limpia con reemplazo total de runtime, acceso directo y firewall en puerto 8000)
             - **Windows (Portable .zip)**: `VmPOS_Windows_Portable.zip` (Descomprimir y usar de inmediato)
-            - **macOS (Instalador DMG)**: `dist/VmPOS_macOS_Instalador.dmg` (Arrastrar a Aplicaciones)
+            - **macOS (Instalador DMG)**: `VmPOS_macOS_Instalador.dmg` (Arrastrar a Aplicaciones)
 
             ---
             ### ✨ Novedades:

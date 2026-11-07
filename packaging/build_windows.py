@@ -173,6 +173,25 @@ hidden_imports = [
     "server.aiosqlite_compat",
     "server.models.configuracion",
     "server.routers.configuracion",
+    "interface.config",
+    "interface.business_manager",
+    "interface.network_manager",
+    "interface.network_dialog",
+    "interface.receipt_manager",
+    "interface.generador_codigo_barras",
+    "interface.configuracion_menu",
+    "interface.ventas_admin_dialog",
+    "interface.menu_inicio",
+    "interface.ventas_menu",
+    "interface.caja_menu",
+    "interface.clientes_menu",
+    "interface.inventario_menu",
+    "interface.gastos_menu",
+    "interface.nomina_menu",
+    "interface.reportes_menu",
+    "interface.contabilidad_menu",
+    "interface.turnos_menu",
+    "interface.usuarios_menu",
     "uvicorn",
     "uvicorn.logging",
     "uvicorn.loops",
@@ -241,6 +260,17 @@ pyinstaller_args.append(os.path.join("interface", "inicio_sesion.py"))
 
 pyinstaller_cmd = [sys.executable, "-m", "PyInstaller"] + pyinstaller_args
 
+# Limpiar todos los __pycache__ previos para impedir que entren .pyc antiguos al paquete
+for _dir_clean in ("interface", "client", "server"):
+    _base_clean = os.path.join(PROJECT_ROOT, _dir_clean)
+    if os.path.isdir(_base_clean):
+        for _r, _dirs, _ in os.walk(_base_clean):
+            if "__pycache__" in _dirs:
+                try:
+                    shutil.rmtree(os.path.join(_r, "__pycache__"))
+                except Exception:
+                    pass
+
 print("Ejecutando PyInstaller...")
 try:
     subprocess.run(pyinstaller_cmd, check=True)
@@ -256,6 +286,19 @@ exe_path = os.path.join(PROJECT_ROOT, "dist", "VmPOS", "VmPOS.exe")
 bin_test_path = exe_path if sys.platform.startswith("win") else os.path.join(PROJECT_ROOT, "dist", "VmPOS", "VmPOS")
 if os.path.exists(bin_test_path):
     print("\n[OK] Ejecutable generado con exito!")
+    print("\n[3.4/4] Ejecutando auto-prueba de importacion del Dashboard dentro del ejecutable congelado (--self-test-imports)...")
+    res_frozen_imp = subprocess.run([bin_test_path, "--self-test-imports"], capture_output=True, text=True)
+    if os.path.exists(os.path.join(PROJECT_ROOT, "vmpos.log")):
+        try:
+            os.remove(os.path.join(PROJECT_ROOT, "vmpos.log"))
+        except Exception:
+            pass
+    if res_frozen_imp.returncode != 0:
+        print(f"\n[ERROR] Fallo en --self-test-imports del ejecutable congelado (codigo {res_frozen_imp.returncode}):")
+        print(res_frozen_imp.stderr)
+        print(res_frozen_imp.stdout)
+        sys.exit(1)
+    print("  [OK] El ejecutable congelado importo Dashboard, Receipt Manager y todos los menus sin errores!")
     print("\n[3.5/4] Ejecutando prueba real de arranque del servidor empaquetado (--run-server)...")
     import time
     import urllib.request
@@ -330,10 +373,11 @@ if iscc_bin and os.path.exists(iss_script):
     print(f"\nCompilando instalador Setup con Inno Setup ({iscc_bin})...")
     try:
         subprocess.run(f'"{iscc_bin}" "{iss_script}"', shell=True, check=True)
-        setup_exe = os.path.join(PROJECT_ROOT, "dist", "VmPOS_Setup_v4.0.exe")
+        setup_exe = os.path.join(PROJECT_ROOT, "dist", "VmPOS_Setup_v4.0.2.exe")
         print(f"[OK] Instalador Setup generado con exito en: {setup_exe}!")
     except Exception as e:
-        print(f"[AVISO] Error al ejecutar Inno Setup: {e}")
+        print(f"[ERROR] Error al ejecutar Inno Setup: {e}")
+        sys.exit(1)
 else:
     print("\n[INFO] Nota sobre Inno Setup:")
     print("  Inno Setup no esta instalado en la ruta por defecto.")

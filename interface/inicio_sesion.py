@@ -26,6 +26,43 @@ if "--run-server" in sys.argv:
     uvicorn.run(_fastapi_app, host=_host, port=_port, log_level="info")
     sys.exit(0)
 
+if "--self-test-imports" in sys.argv:
+    import importlib
+    import traceback
+    _root_st = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _intf_st = os.path.join(_root_st, "interface")
+    for _p_st in (_root_st, _intf_st):
+        if _p_st not in sys.path:
+            sys.path.insert(0, _p_st)
+    _mods_st = [
+        "interface.config",
+        "interface.business_manager",
+        "interface.network_manager",
+        "interface.network_dialog",
+        "interface.receipt_manager",
+        "interface.generador_codigo_barras",
+        "interface.configuracion_menu",
+        "interface.ventas_admin_dialog",
+        "interface.menu_inicio",
+        "interface.ventas_menu",
+        "interface.caja_menu",
+        "interface.clientes_menu",
+        "interface.inventario_menu",
+        "interface.gastos_menu",
+        "interface.nomina_menu",
+        "interface.reportes_menu",
+        "interface.contabilidad_menu",
+        "interface.turnos_menu",
+        "interface.usuarios_menu",
+    ]
+    for _m_st in _mods_st:
+        try:
+            importlib.import_module(_m_st)
+        except Exception:
+            sys.stderr.write(f"[SELF-TEST ERROR] {_m_st}:\n{traceback.format_exc()}\n")
+            sys.exit(2)
+    sys.exit(0)
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 import io
@@ -180,6 +217,14 @@ def _iniciar_flujo_principal_ejecutar(datos_usuario, usuario_actual):
         from interface.menu_inicio import iniciar_dashboard
         iniciar_dashboard(usuario_actual, datos_usuario)
     except Exception as e:
+        import traceback
+        try:
+            from interface.config import LOGS_DIR
+            os.makedirs(LOGS_DIR, exist_ok=True)
+            with open(os.path.join(LOGS_DIR, "dashboard_error.log"), "a", encoding="utf-8") as _ef:
+                _ef.write(traceback.format_exc() + "\n")
+        except Exception:
+            pass
         messagebox.showerror("Error", f"Fallo al abrir dashboard: {e}")
 
 def mostrar_alerta_bonita(titulo, mensaje, tipo="error"):
@@ -305,7 +350,7 @@ def limpiar_campos(event=None):
 
 ventana = tk.Tk()
 business_mgr.recargar()
-titulo_login = f"{business_mgr.nombre} — {business_mgr.subtitulo}" if business_mgr.subtitulo else f"{business_mgr.nombre} — Inicio de Sesión"
+titulo_login = f"{business_mgr.nombre} — {business_mgr.subtitulo} (v4.0.2)" if business_mgr.subtitulo else f"{business_mgr.nombre} — Inicio de Sesión (v4.0.2)"
 ventana.title(titulo_login)
 
 t = aplicar_tema(ventana)
@@ -545,7 +590,7 @@ def recargar_identidad_login():
     if not ventana.winfo_exists():
         return
     try:
-        nuevo_titulo = f"{business_mgr.nombre} — {business_mgr.subtitulo}" if business_mgr.subtitulo else f"{business_mgr.nombre} — Inicio de Sesión"
+        nuevo_titulo = f"{business_mgr.nombre} — {business_mgr.subtitulo} (v4.0.2)" if business_mgr.subtitulo else f"{business_mgr.nombre} — Inicio de Sesión (v4.0.2)"
         ventana.title(nuevo_titulo)
         _renderizar_panel_institucional()
         c_login = business_mgr.color_login or t["accent"]
