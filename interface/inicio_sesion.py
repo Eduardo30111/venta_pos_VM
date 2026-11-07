@@ -378,13 +378,15 @@ def crear_etiqueta(parent, text="", font=None, bg=None, fg=None, **kwargs):
 
 # Color de acento / identidad corporativa configurada
 COLOR_LOGIN = business_mgr.color_login or t["accent"]
+if not COLOR_LOGIN or COLOR_LOGIN.strip().upper() in ("#FFFFFF", "#FFF", "WHITE"):
+    COLOR_LOGIN = "#1E40AF"
 FG_LOGIN = calcular_color_texto_optimo(COLOR_LOGIN)
 
 main_frame = tk.Frame(ventana, bg=t["bg_app"])
 main_frame.pack(fill="both", expand=True, padx=12, pady=12)
 main_frame.rowconfigure(0, weight=1)
-main_frame.columnconfigure(0, weight=1, minsize=320)
-main_frame.columnconfigure(1, weight=1, minsize=320)
+main_frame.columnconfigure(0, weight=1, minsize=320, uniform="cols")
+main_frame.columnconfigure(1, weight=1, minsize=320, uniform="cols")
 
 # Panel Izquierdo Promocional / Institucional
 left_frame = tk.Frame(main_frame, bg=t["bg_card"], relief="solid", bd=1)
@@ -400,6 +402,8 @@ def _renderizar_panel_institucional():
             pass
 
     c_login = business_mgr.color_login or t["accent"]
+    if not c_login or c_login.strip().upper() in ("#FFFFFF", "#FFF", "WHITE"):
+        c_login = "#1E40AF"
     fg_login = calcular_color_texto_optimo(c_login)
 
     header_frame = tk.Frame(left_frame, bg=c_login, height=52)
@@ -594,6 +598,8 @@ def recargar_identidad_login():
         ventana.title(nuevo_titulo)
         _renderizar_panel_institucional()
         c_login = business_mgr.color_login or t["accent"]
+        if not c_login or c_login.strip().upper() in ("#FFFFFF", "#FFF", "WHITE"):
+            c_login = "#1E40AF"
         fg_login = calcular_color_texto_optimo(c_login)
         login_header.configure(bg=c_login)
         login_header_center.configure(bg=c_login)
@@ -611,6 +617,28 @@ business_mgr.agregar_listener(recargar_identidad_login)
 ventana.bind("<Return>", validar_usuario)
 ventana.bind("<Escape>", limpiar_campos)
 entry_user.focus()
+
+def forzar_repintado_mac(event=None):
+    if sys.platform != "darwin":
+        return
+    try:
+        if not ventana.winfo_exists():
+            return
+        ventana.update_idletasks()
+        w = ventana.winfo_width()
+        h = ventana.winfo_height()
+        if w > 50 and h > 50:
+            ventana.geometry(f"{w+1}x{h}")
+            ventana.update_idletasks()
+            ventana.geometry(f"{w}x{h}")
+            ventana.update_idletasks()
+        ventana.lift()
+        ventana.focus_force()
+    except Exception:
+        pass
+
+if sys.platform == "darwin":
+    ventana.bind("<Map>", lambda e: ventana.after(80, forzar_repintado_mac))
 
 
 def _autoarrancar_o_sincronizar_red():
@@ -636,6 +664,10 @@ import threading
 threading.Thread(target=_autoarrancar_o_sincronizar_red, daemon=True).start()
 
 if __name__ == "__main__":
+    if sys.platform == "darwin":
+        ventana.after(50, forzar_repintado_mac)
+        ventana.after(200, forzar_repintado_mac)
+        ventana.after(500, forzar_repintado_mac)
     ventana.lift()
     ventana.focus_force()
     ventana.mainloop()

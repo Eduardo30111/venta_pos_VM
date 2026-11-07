@@ -862,6 +862,31 @@ def calcular_geometria_segura(ventana, target_w=1120, target_h=700, min_w=840, m
     ventana.minsize(min(min_w, w), min(min_h, h))
     ventana.resizable(True, True)
 
+    # Salvaguarda de repintado Cocoa para macOS (Tk 8.5 / Aqua en macOS Sequoia y Sonoma)
+    if sys.platform == "darwin":
+        def _forzar_repintado_cocoa():
+            try:
+                if not ventana.winfo_exists():
+                    return
+                ventana.update_idletasks()
+                cw = ventana.winfo_width()
+                ch = ventana.winfo_height()
+                if cw > 50 and ch > 50:
+                    ventana.geometry(f"{cw + 1}x{ch}")
+                    ventana.update_idletasks()
+                    ventana.geometry(f"{cw}x{ch}")
+                    ventana.update_idletasks()
+                ventana.lift()
+            except Exception:
+                pass
+
+        try:
+            ventana.after(60, _forzar_repintado_cocoa)
+            ventana.after(250, _forzar_repintado_cocoa)
+            ventana.after(600, _forzar_repintado_cocoa)
+        except Exception:
+            pass
+
     return w, h
 
 
