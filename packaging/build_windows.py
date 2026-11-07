@@ -40,7 +40,8 @@ DEPENDENCIAS = [
     "python-escpos",
     "fastapi",
     "uvicorn",
-    "sqlalchemy",
+    "sqlalchemy[asyncio]",
+    "greenlet",
     "aiosqlite",
     "asyncpg",
     "python-jose[cryptography]",
@@ -143,12 +144,20 @@ hidden_imports = [
     "uvicorn.lifespan",
     "uvicorn.lifespan.on",
     "fastapi",
+    "starlette",
+    "anyio",
+    "sniffio",
+    "h11",
+    "greenlet",
+    "greenlet._greenlet",
     "sqlalchemy",
+    "sqlalchemy.ext.asyncio",
     "sqlalchemy.dialects.sqlite.aiosqlite",
     "sqlalchemy.dialects.postgresql.asyncpg",
     "aiosqlite",
     "asyncpg",
     "jose",
+    "cryptography",
     "passlib",
     "passlib.handlers.bcrypt",
     "bcrypt",
@@ -164,8 +173,16 @@ pyinstaller_args = [
     "--noconfirm",
     "--clean",
     "--collect-all=escpos",
+    "--collect-all=greenlet",
+    "--collect-all=bcrypt",
+    "--collect-all=aiosqlite",
     "--collect-submodules=server",
     "--collect-submodules=uvicorn",
+    "--collect-submodules=fastapi",
+    "--collect-submodules=starlette",
+    "--collect-submodules=anyio",
+    "--collect-submodules=sqlalchemy",
+    "--collect-submodules=jose",
     "--collect-submodules=passlib",
 ]
 
@@ -193,12 +210,53 @@ except Exception as e:
     print(f"\n[ERROR] Excepcion durante PyInstaller: {e}")
     sys.exit(1)
 
-# Verificar ejecutable generado
+# Verificar ejecutable generado y realizar prueba real de humo del servidor empaquetado
 exe_path = os.path.join(PROJECT_ROOT, "dist", "VmPOS", "VmPOS.exe")
-if os.path.exists(exe_path) or (not sys.platform.startswith("win") and os.path.exists(os.path.join(PROJECT_ROOT, "dist", "VmPOS", "VmPOS"))):
+bin_test_path = exe_path if sys.platform.startswith("win") else os.path.join(PROJECT_ROOT, "dist", "VmPOS", "VmPOS")
+if os.path.exists(bin_test_path):
     print("\n[OK] Ejecutable generado con exito!")
+    print("\n[3.5/4] Ejecutando prueba real de arranque del servidor empaquetado (--run-server)...")
+    import time
+    import urllib.request
+    smoke_log = os.path.join(PROJECT_ROOT, "build", "smoke_server.log")
+    os.makedirs(os.path.dirname(smoke_log), exist_ok=True)
+    with open(smoke_log, "w", encoding="utf-8") as sf:
+        proc_test = subprocess.Popen(
+            [bin_test_path, "--run-server", "--host", "127.0.0.1", "--port", "18089"],
+            stdout=sf,
+            stderr=sf,
+        )
+    salud_ok = False
+    for _ in range(25):
+        time.sleep(0.4)
+        if proc_test.poll() is not None:
+            break
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:18089/api/health", timeout=1.0) as resp:
+                if resp.getcode() == 200:
+                    body = resp.read().decode("utf-8", errors="replace")
+                    print(f"  [OK] /api/health respondio 200 OK: {body}")
+                    salud_ok = True
+                    break
+        except Exception:
+            pass
+    try:
+        proc_test.terminate()
+        proc_test.wait(timeout=3)
+    except Exception:
+        try:
+            proc_test.kill()
+        except Exception:
+            pass
+    if not salud_ok:
+        print("\n[ERROR] El servidor empaquetado fallo en la prueba de arranque (--run-server)!")
+        if os.path.exists(smoke_log):
+            with open(smoke_log, "r", encoding="utf-8", errors="replace") as sf_in:
+                print(sf_in.read())
+        sys.exit(1)
 else:
-    print(f"\n[AVISO] No se encontro el ejecutable en: {exe_path}")
+    print(f"\n[ERROR] No se encontro el ejecutable en: {bin_test_path}")
+    sys.exit(1)
 
 # Generar archivo comprimido ZIP para distribución directa
 print("\n[4/4] Generando paquete ZIP distribuible...")

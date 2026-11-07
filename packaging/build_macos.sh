@@ -39,7 +39,7 @@ export MPLCONFIGDIR="$PROJECT_ROOT/build/matplotlib_cache"
 mkdir -p "$PYINSTALLER_CONFIG_DIR" "$MPLCONFIGDIR"
 
 echo "Verificando dependencias de compilación..."
-$PYTHON_BIN -m pip install --quiet pyinstaller pillow reportlab matplotlib pandas openpyxl httpx pydantic pydantic_settings python-barcode babel python-escpos pyusb fastapi uvicorn sqlalchemy aiosqlite asyncpg "python-jose[cryptography]" "passlib[bcrypt]" "bcrypt==3.2.2" python-multipart
+$PYTHON_BIN -m pip install --quiet pyinstaller pillow reportlab matplotlib pandas openpyxl httpx pydantic pydantic_settings python-barcode babel python-escpos pyusb fastapi uvicorn "sqlalchemy[asyncio]" greenlet aiosqlite asyncpg "python-jose[cryptography]" "passlib[bcrypt]" "bcrypt==3.2.2" python-multipart
 
 # 2. Generar archivo .icns si no existe
 ICNS_PATH="$PROJECT_ROOT/assets/Salome.icns"
@@ -98,12 +98,23 @@ $PYTHON_BIN -m PyInstaller \
     --add-data="server:server" \
     $NETWORK_DATA_FLAG \
     --collect-all="escpos" \
+    --collect-all="greenlet" \
+    --collect-all="bcrypt" \
+    --collect-all="aiosqlite" \
     --collect-submodules="server" \
     --collect-submodules="uvicorn" \
+    --collect-submodules="fastapi" \
+    --collect-submodules="starlette" \
+    --collect-submodules="anyio" \
+    --collect-submodules="sqlalchemy" \
+    --collect-submodules="jose" \
     --collect-submodules="passlib" \
     --hidden-import="fastapi" \
     --hidden-import="uvicorn" \
+    --hidden-import="greenlet" \
+    --hidden-import="greenlet._greenlet" \
     --hidden-import="sqlalchemy" \
+    --hidden-import="sqlalchemy.ext.asyncio" \
     --hidden-import="sqlalchemy.dialects.sqlite.aiosqlite" \
     --hidden-import="sqlalchemy.dialects.postgresql.asyncpg" \
     --hidden-import="aiosqlite" \
