@@ -4,7 +4,7 @@ from ..database import Base
 
 class AuditLog(Base):
     __tablename__ = "audit_log"
-    id = Column(BigInteger, primary_key=True, index=True)
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, index=True, autoincrement=True)
     usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
     usuario_nombre = Column(String, nullable=False)
     terminal_id = Column(Integer, ForeignKey("terminales.id"), nullable=True)

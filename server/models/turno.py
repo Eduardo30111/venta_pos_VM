@@ -66,7 +66,7 @@ class AlmuerzoTurno(Base):
 class EventoTurno(Base):
     __tablename__ = "eventos_turno"
 
-    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, index=True, autoincrement=True)
     ciclo_id = Column(Integer, ForeignKey("ciclos_turno.id"), index=True, nullable=False)
     usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=True)  # Operario afectado
     autor_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False)  # Quien ejecutó la acción

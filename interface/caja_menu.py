@@ -366,39 +366,61 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
                  f"Responsable: {activa.get('usuario_apertura', 'Administrador')}"
         )
 
-        # Cargar movimientos desde movimientos_financieros / movimientos_caja
-        conn = conectar_db()
-        if conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT id, hora, tipo, monto, cuenta_afectada, usuario, concepto
-                FROM movimientos_financieros
-                WHERE sesion_caja_id = ? OR fecha = ?
-                ORDER BY id DESC
-            """, (activa["id"], activa.get("fecha_apertura")))
-            rows = cur.fetchall()
+        # Cargar movimientos desde servidor central FastAPI (/caja/movimientos-sesion)
+        cargado_api = False
+        try:
+            from client.api_client import api
+            resp_m = api.get(f"/caja/movimientos-sesion/{activa['id']}", timeout=3.5)
+            if resp_m.status_code == 200:
+                items_srv = resp_m.json()
+                for item in items_srv:
+                    movimientos_cache.append({
+                        "id": item.get("id"),
+                        "hora": item.get("hora") or "",
+                        "tipo": item.get("tipo") or "",
+                        "monto": float(item.get("monto") or 0.0),
+                        "cuenta": item.get("cuenta") or item.get("cuenta_afectada") or "CAJA_FISICA",
+                        "usuario": item.get("usuario") or "",
+                        "descripcion": item.get("descripcion") or item.get("concepto") or "",
+                    })
+                cargado_api = True
+        except Exception:
+            cargado_api = False
 
-            if not rows:
-                # Fallback a movimientos_caja
+        if not cargado_api:
+            # Fallback local a SQLite
+            conn = conectar_db()
+            if conn:
+                cur = conn.cursor()
                 cur.execute("""
-                    SELECT id, hora, tipo, monto, 'CAJA_FISICA', usuario, descripcion
-                    FROM movimientos_caja
-                    WHERE sesion_caja_id = ?
+                    SELECT id, hora, tipo, monto, cuenta_afectada, usuario, concepto
+                    FROM movimientos_financieros
+                    WHERE sesion_caja_id = ? OR fecha = ?
                     ORDER BY id DESC
-                """, (activa["id"],))
+                """, (activa["id"], activa.get("fecha_apertura")))
                 rows = cur.fetchall()
 
-            for r in rows:
-                movimientos_cache.append({
-                    "id": r[0],
-                    "hora": r[1],
-                    "tipo": r[2],
-                    "monto": float(r[3] or 0.0),
-                    "cuenta": r[4],
-                    "usuario": r[5],
-                    "descripcion": r[6]
-                })
-            conn.close()
+                if not rows:
+                    # Fallback a movimientos_caja
+                    cur.execute("""
+                        SELECT id, hora, tipo, monto, 'CAJA_FISICA', usuario, descripcion
+                        FROM movimientos_caja
+                        WHERE sesion_caja_id = ?
+                        ORDER BY id DESC
+                    """, (activa["id"],))
+                    rows = cur.fetchall()
+
+                for r in rows:
+                    movimientos_cache.append({
+                        "id": r[0],
+                        "hora": r[1],
+                        "tipo": r[2],
+                        "monto": float(r[3] or 0.0),
+                        "cuenta": r[4],
+                        "usuario": r[5],
+                        "descripcion": r[6]
+                    })
+                conn.close()
 
         refrescar_tabla()
 
@@ -771,6 +793,24 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         bot_f.pack(fill="x", padx=14, pady=8)
         crear_boton(bot_f, "Cerrar", dlg_h.destroy, tipo="secondary", tam_fuente=9).pack(side="right")
         tk.Label(bot_f, text=f"Total de turnos cerrados consultados: {len(cierres)}", font=("Segoe UI", 9), bg=t_h["bg_surface"], fg=t_h["text_muted"]).pack(side="left")
+
+    _last_focusin = [0.0]
+
+    def _on_focusin(event):
+        try:
+            if event.widget == ventana:
+                import time
+                now = time.time()
+                if now - _last_focusin[0] > 2.5:
+                    _last_focusin[0] = now
+                    ventana.after(100, refrescar_vista)
+        except Exception:
+            pass
+
+    try:
+        ventana.bind("<FocusIn>", _on_focusin, add="+")
+    except Exception:
+        pass
 
     refrescar_vista()
     if not parent:

@@ -237,9 +237,110 @@ def guardar_snapshot_venta_sqlite(
 
 def reconstruir_datos_venta_historica(id_venta):
     """
-    Reconstruye todos los datos de una venta histórica desde SQLite,
-    respetando el snapshot de identidad del negocio con el que fue emitida.
+    Reconstruye todos los datos de una venta histórica consultando primero el Servidor Central
+    (`/ventas/{id}`) y usando SQLite local únicamente como respaldo para registros legados.
+    Respeta el snapshot de identidad del negocio con el que fue emitida la venta.
     """
+    # 1. Consultar Servidor Central primero (Fuente Única de Verdad)
+    try:
+        from client.api_client import api
+        resp = api.get(f"/ventas/{int(id_venta)}")
+        if resp.status_code == 200:
+            v = resp.json()
+            snapshot_negocio = None
+            if v.get("datos_negocio_json"):
+                try:
+                    parsed = json.loads(v["datos_negocio_json"])
+                    if isinstance(parsed, dict) and parsed.get("nombre_negocio"):
+                        snapshot_negocio = parsed
+                except Exception:
+                    pass
+
+            cliente_info = {
+                "nombre": v.get("cliente_nombre") or v.get("cliente_documento") or "Consumidor Final",
+                "documento": v.get("cliente_documento") or "",
+                "telefono": "",
+                "direccion": "",
+            }
+            if v.get("cliente_id"):
+                try:
+                    rc = api.get(f"/clientes/{int(v['cliente_id'])}")
+                    if rc.status_code == 200:
+                        c_data = rc.json()
+                        cliente_info["nombre"] = c_data.get("nombre") or cliente_info["nombre"]
+                        cliente_info["documento"] = c_data.get("documento") or cliente_info["documento"]
+                        cliente_info["telefono"] = c_data.get("telefono") or ""
+                        cliente_info["direccion"] = c_data.get("direccion") or ""
+                except Exception:
+                    pass
+
+            items = []
+            for d in v.get("detalles") or []:
+                items.append({
+                    "codigo": d.get("item_codigo") or "",
+                    "nombre": d.get("item_nombre") or "Producto",
+                    "cantidad": d.get("cantidad") or 1,
+                    "unidad": "Und",
+                    "precio_unitario": float(d.get("precio_vendido") or d.get("precio_original") or 0.0),
+                    "descuento": float(d.get("descuento") or 0.0),
+                    "impuesto_pct": 0.0,
+                    "impuesto_monto": 0.0,
+                    "subtotal": float(d.get("subtotal") or 0.0),
+                })
+
+            pagos_rows = []
+            for p in v.get("pagos") or []:
+                pagos_rows.append({
+                    "metodo_pago": p.get("metodo") or "Efectivo",
+                    "monto": float(p.get("monto") or 0.0),
+                    "referencia": p.get("referencia") or "",
+                })
+
+            total_venta = float(v.get("total") or 0.0)
+            metodo_pago = v.get("metodo_pago_principal") or (
+                pagos_rows[0]["metodo_pago"] if pagos_rows else "Efectivo"
+            )
+            recibido = float(v.get("recibido") or 0.0)
+            if recibido <= 0 and str(metodo_pago).lower() != "fiado":
+                recibido = total_venta
+            cambio = float(v.get("cambio") or max(0.0, recibido - total_venta))
+            saldo_pendiente = float(
+                v.get("saldo_pendiente")
+                if v.get("saldo_pendiente") is not None
+                else (total_venta if str(metodo_pago).lower() == "fiado" else 0.0)
+            )
+            fecha_str = v.get("fecha") or str(v.get("creado_en") or "")[:10]
+            hora_str = v.get("hora") or (
+                str(v.get("creado_en") or "")[11:19] if len(str(v.get("creado_en") or "")) >= 19 else ""
+            )
+
+            datos_api = {
+                "id_venta": int(v.get("id") or id_venta),
+                "factura": v.get("numero") or f"FAC-{int(id_venta):05d}",
+                "fecha": fecha_str,
+                "hora": hora_str,
+                "vendedor": v.get("operario_nombre") or "Administrador",
+                "estado": v.get("estado") or "Completada",
+                "cliente": cliente_info.get("nombre") or "Consumidor Final",
+                "cliente_documento": cliente_info.get("documento") or "",
+                "cliente_telefono": cliente_info.get("telefono") or "",
+                "cliente_direccion": cliente_info.get("direccion") or "",
+                "items": items,
+                "total": total_venta,
+                "descuento_total": float(v.get("descuento") or 0.0),
+                "impuesto_total": 0.0,
+                "metodo_pago": metodo_pago,
+                "pagos": pagos_rows,
+                "recibido": recibido,
+                "cambio": cambio,
+                "saldo_pendiente": saldo_pendiente,
+                "snapshot_negocio": snapshot_negocio,
+            }
+            return normalizar_datos_factura(datos_api)
+    except Exception as e_api:
+        print(f"Aviso consultando venta #{id_venta} en API central: {e_api}")
+
+    # 2. Respaldo legado en SQLite local únicamente si no existe en API central
     try:
         try:
             from database_manager import conectar_db
@@ -1825,39 +1926,87 @@ def mostrar_dialogo_factura(
     acciones.pack(fill="x", padx=14, side="bottom")
 
     if modo_confirmacion_venta and callable(on_confirmar_venta):
-        def confirmar_con_impresion():
-            fmt_sel = var_formato.get()
-            dlg.destroy()
-            on_confirmar_venta(imprimir=True, formato_seleccionado=fmt_sel)
+        import inspect
+        estado_envio = {"en_curso": False}
 
-        def confirmar_sin_impresion():
-            fmt_sel = var_formato.get()
-            dlg.destroy()
-            on_confirmar_venta(imprimir=False, formato_seleccionado=fmt_sel)
-
-        crear_boton(
+        btn_reg_imp = crear_boton(
             acciones,
             text="🖨️ Imprimir y Registrar Venta",
-            command=confirmar_con_impresion,
+            command=lambda: _disparar_confirmacion(True),
             tipo="success",
             tam_fuente=10
-        ).pack(side="right", padx=4)
+        )
+        btn_reg_imp.pack(side="right", padx=4)
 
-        crear_boton(
+        btn_reg_sin = crear_boton(
             acciones,
             text="✅ Registrar sin Imprimir",
-            command=confirmar_sin_impresion,
+            command=lambda: _disparar_confirmacion(False),
             tipo="primary",
             tam_fuente=10
-        ).pack(side="right", padx=4)
+        )
+        btn_reg_sin.pack(side="right", padx=4)
 
-        crear_boton(
+        btn_cancel_dlg = crear_boton(
             acciones,
             text="✖ Cancelar",
             command=dlg.destroy,
             tipo="secondary",
             tam_fuente=10
-        ).pack(side="left", padx=4)
+        )
+        btn_cancel_dlg.pack(side="left", padx=4)
+
+        def _restaurar_botones_dlg():
+            estado_envio["en_curso"] = False
+            try:
+                if dlg.winfo_exists():
+                    btn_reg_imp.config(state="normal", text="🖨️ Imprimir y Registrar Venta")
+                    btn_reg_sin.config(state="normal", text="✅ Registrar sin Imprimir")
+                    btn_cancel_dlg.config(state="normal")
+            except Exception:
+                pass
+
+        def _disparar_confirmacion(con_impresion: bool):
+            if estado_envio["en_curso"]:
+                return
+            estado_envio["en_curso"] = True
+            fmt_sel = var_formato.get()
+            try:
+                btn_reg_imp.config(
+                    state="disabled",
+                    text="⏳ Registrando venta..." if con_impresion else "🖨️ Imprimir y Registrar Venta",
+                )
+                btn_reg_sin.config(
+                    state="disabled",
+                    text="⏳ Registrando venta..." if not con_impresion else "✅ Registrar sin Imprimir",
+                )
+                btn_cancel_dlg.config(state="disabled")
+                dlg.update_idletasks()
+            except Exception:
+                pass
+
+            try:
+                sig = inspect.signature(on_confirmar_venta)
+                acepta_extras = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD or p.name in ("dialog_ref", "on_error_restore")
+                    for p in sig.parameters.values()
+                )
+            except Exception:
+                acepta_extras = False
+
+            if acepta_extras:
+                on_confirmar_venta(
+                    imprimir=con_impresion,
+                    formato_seleccionado=fmt_sel,
+                    dialog_ref=dlg,
+                    on_error_restore=_restaurar_botones_dlg,
+                )
+            else:
+                try:
+                    dlg.destroy()
+                except Exception:
+                    pass
+                on_confirmar_venta(imprimir=con_impresion, formato_seleccionado=fmt_sel)
     else:
         def accion_imprimir_ahora():
             cfg_local = dict(cfg)

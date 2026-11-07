@@ -26,6 +26,17 @@ from typing import Dict, Any, List, Optional, Tuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
+    from client.api_client import api
+except ImportError:
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+    try:
+        from client.api_client import api
+    except ImportError:
+        api = None
+
+try:
     from interface.database_manager import conectar_db, inicializar_base_datos
 except ImportError:
     try:
@@ -383,6 +394,33 @@ def obtener_resumen_proveedores(
     - Total de Comisiones descontadas
     - Total Liquidado / Pagado
     """
+    if conn is None and api is not None:
+        try:
+            params = {}
+            if filtro:
+                params["search"] = filtro
+            if solo_activos:
+                params["activo"] = "true"
+            resp = api.get("/proveedores", params=params, timeout=4.0)
+            if resp.status_code == 200:
+                provs = resp.json()
+                res = []
+                for p in provs:
+                    res.append({
+                        "id": p.get("id"),
+                        "nombre": p.get("nombre") or "",
+                        "nit": p.get("documento_nit") or "",
+                        "telefono": p.get("telefono") or "",
+                        "saldo_acumulado": float(p.get("saldo_acumulado") or 0.0),
+                        "total_ventas": float(p.get("total_ventas") or 0.0),
+                        "total_comisiones": float(p.get("total_comisiones") or 0.0),
+                        "total_pagado": float(p.get("total_pagado") or 0.0),
+                        "estado": p.get("estado") or "Activo",
+                    })
+                return res
+        except Exception:
+            pass
+
     cerrar_conn = False
     if conn is None:
         conn = conectar_db()
@@ -559,6 +597,30 @@ def liquidar_proveedor_db(
         usuario = kwargs["usuario_nombre"]
     if not observaciones:
         observaciones = kwargs.get("notas", "")
+
+    if conn is None and api is not None:
+        try:
+            resp = api.post(
+                f"/proveedores/{proveedor_id}/liquidar",
+                json={
+                    "monto": float(monto) if monto is not None else None,
+                    "metodo_pago": metodo_pago,
+                    "referencia": referencia or "",
+                    "observaciones": observaciones or "",
+                    "sesion_caja_id": sesion_caja_id,
+                },
+                timeout=6.0,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            elif resp.status_code in (400, 404):
+                return {
+                    "exito": False,
+                    "ok": False,
+                    "mensaje": resp.json().get("detail", "Error liquidando proveedor en servidor"),
+                }
+        except Exception:
+            pass
 
     if proveedor_id in _PAGOS_EN_PROCESO:
         return {

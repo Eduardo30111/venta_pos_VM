@@ -2,11 +2,16 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 
+
 class ServicioBase(BaseModel):
     codigo: Optional[str] = None
     nombre: str
     descripcion: Optional[str] = None
     categoria_id: Optional[int] = None
+    categoria: Optional[str] = "Servicios"
+    marca: Optional[str] = ""
+    codigo_barras: Optional[str] = None
+    unidad_medida: Optional[str] = "Servicio"
     precio_venta: float
     tipo_servicio: Optional[str] = "Interno"
     proveedor_id: Optional[int] = None
@@ -17,14 +22,20 @@ class ServicioBase(BaseModel):
     solo_operarios: Optional[bool] = False
     estado: Optional[str] = "Activo"
 
+
 class ServicioCreate(ServicioBase):
     pass
+
 
 class ServicioUpdate(BaseModel):
     codigo: Optional[str] = None
     nombre: Optional[str] = None
     descripcion: Optional[str] = None
     categoria_id: Optional[int] = None
+    categoria: Optional[str] = None
+    marca: Optional[str] = None
+    codigo_barras: Optional[str] = None
+    unidad_medida: Optional[str] = None
     precio_venta: Optional[float] = None
     tipo_servicio: Optional[str] = None
     proveedor_id: Optional[int] = None
@@ -35,9 +46,10 @@ class ServicioUpdate(BaseModel):
     solo_operarios: Optional[bool] = None
     estado: Optional[str] = None
 
+
 class ServicioResponse(ServicioBase):
     id: int
-    created_at: datetime
+    created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     creado_por_operario_id: Optional[int] = None
 

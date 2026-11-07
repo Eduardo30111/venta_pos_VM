@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List, Any
 from datetime import datetime
 
+
 class ClienteBase(BaseModel):
     documento: str
     nombre: str
@@ -11,6 +12,7 @@ class ClienteBase(BaseModel):
     permite_fiado: Optional[bool] = False
     limite_credito: Optional[float] = 0.0
     estado: Optional[str] = "Activo"
+
 
 class ClienteCreate(ClienteBase):
     cedula: Optional[str] = None
@@ -24,6 +26,7 @@ class ClienteCreate(ClienteBase):
             elif "documento" in data and ("cedula" not in data or not data.get("cedula")):
                 data["cedula"] = data["documento"]
         return data
+
 
 class ClienteUpdate(BaseModel):
     documento: Optional[str] = None
@@ -44,12 +47,14 @@ class ClienteUpdate(BaseModel):
                 data["documento"] = data["cedula"]
         return data
 
+
 class ClienteResponse(ClienteBase):
     id: int
-    created_at: datetime
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
 
 class ClienteListItemResponse(BaseModel):
     id: int
@@ -66,6 +71,7 @@ class ClienteListItemResponse(BaseModel):
     deuda_total: float = 0.0
     estado: str = "Activo"
 
+
 class MovimientoClienteResponse(BaseModel):
     id: int
     cliente_id: int
@@ -81,19 +87,21 @@ class MovimientoClienteResponse(BaseModel):
     terminal_id: Optional[int] = None
     motivo: Optional[str] = None
     observacion: Optional[str] = None
-    created_at: datetime
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
 
+
 class CuentaPendienteInfo(BaseModel):
     id: int
-    venta_id: int
+    venta_id: Optional[int] = None
     numero_venta: Optional[str] = None
     monto_original: float
     saldo_pendiente: float
     estado: str
-    created_at: datetime
+    created_at: Optional[datetime] = None
+
 
 class ClienteDeudaDetalleResponse(BaseModel):
     cliente: ClienteResponse
@@ -103,6 +111,7 @@ class ClienteDeudaDetalleResponse(BaseModel):
     deuda_actual: float
     cuentas_pendientes: List[CuentaPendienteInfo]
     movimientos: List[MovimientoClienteResponse]
+
 
 class FiadoResumenItem(BaseModel):
     cliente_id: int
@@ -119,13 +128,16 @@ class FiadoResumenItem(BaseModel):
 
 
 class AbonoCreate(BaseModel):
+    idempotency_key: Optional[str] = None
     monto: float
-    metodo: str = "Efectivo" # Efectivo / Transferencia
+    metodo: str = "Efectivo"  # Efectivo / Transferencia
     cuenta_id: Optional[int] = None
+    sesion_caja_id: Optional[int] = None
+    terminal_id: Optional[int] = None
     observacion: Optional[str] = None
+
 
 class AjusteDeudaCreate(BaseModel):
-    monto: float # Monto positivo para incrementar deuda, negativo para reducir
+    monto: float
     motivo: str
     observacion: Optional[str] = None
-

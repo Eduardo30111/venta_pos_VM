@@ -373,7 +373,7 @@ if iscc_bin and os.path.exists(iss_script):
     print(f"\nCompilando instalador Setup con Inno Setup ({iscc_bin})...")
     try:
         subprocess.run(f'"{iscc_bin}" "{iss_script}"', shell=True, check=True)
-        setup_exe = os.path.join(PROJECT_ROOT, "dist", "VmPOS_Setup_v4.0.2.exe")
+        setup_exe = os.path.join(PROJECT_ROOT, "dist", "VmPOS_Setup_v4.1.0.exe")
         print(f"[OK] Instalador Setup generado con exito en: {setup_exe}!")
     except Exception as e:
         print(f"[ERROR] Error al ejecutar Inno Setup: {e}")

@@ -49,6 +49,7 @@ try:
         obtener_sesion_activa,
         calcular_arqueo_sesion,
         cerrar_sesion_caja,
+        obtener_cierres_anteriores,
         calcular_metricas_contables,
         generar_alertas_recomendaciones,
         procesar_gastos_recurrentes
@@ -59,6 +60,7 @@ except ImportError:
         obtener_sesion_activa,
         calcular_arqueo_sesion,
         cerrar_sesion_caja,
+        obtener_cierres_anteriores,
         calcular_metricas_contables,
         generar_alertas_recomendaciones,
         procesar_gastos_recurrentes
@@ -1237,40 +1239,23 @@ class ContabilidadApp:
 
         # Cargar historial
         self.tree_hist_cierres.delete(*self.tree_hist_cierres.get_children())
-        conn = conectar_db()
-        if conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute("PRAGMA table_info(sesiones_caja)")
-            cols = [c[1] for c in cur.fetchall()]
-            col_u = "usuario" if "usuario" in cols else ("usuario_apertura" if "usuario_apertura" in cols else "''")
-            col_esp = "monto_esperado_efectivo" if "monto_esperado_efectivo" in cols else ("monto_esperado" if "monto_esperado" in cols else "0.0")
-            col_real = "monto_real_contado" if "monto_real_contado" in cols else ("monto_real_efectivo" if "monto_real_efectivo" in cols else ("monto_cierre" if "monto_cierre" in cols else "0.0"))
-            col_dif_banco = "diferencia_banco" if "diferencia_banco" in cols else "0.0"
-
-            cur.execute(f"""
-                SELECT 
-                    id, {col_u} as responsable, fecha_apertura, fecha_cierre, monto_inicial,
-                    COALESCE({col_esp}, 0.0) as esp_ef,
-                    COALESCE({col_real}, 0.0) as real_ef,
-                    COALESCE(diferencia, 0.0) as dif_ef,
-                    COALESCE({col_dif_banco}, 0.0) as dif_bc,
-                    COALESCE(estado, 'CERRADA') as estado
-                FROM sesiones_caja
-                WHERE fecha_cierre IS NOT NULL
-                ORDER BY id DESC LIMIT 15
-            """)
-            for r in cur.fetchall():
+        try:
+            cierres_list = obtener_cierres_anteriores(limit=15)
+            for r in cierres_list:
                 self.tree_hist_cierres.insert("", "end", values=(
-                    r["id"], r["responsable"], r["fecha_apertura"] or "-", r["fecha_cierre"] or "-",
-                    f"${float(r['monto_inicial'] or 0.0):,.0f}",
-                    f"${float(r['esp_ef'] or 0.0):,.0f}",
-                    f"${float(r['real_ef'] or 0.0):,.0f}",
-                    f"${float(r['dif_ef'] or 0.0):,.0f}",
-                    f"${float(r['dif_bc'] or 0.0):,.0f}",
-                    r["estado"]
+                    r.get("id"),
+                    r.get("usuario_cierre") or r.get("usuario_apertura") or r.get("responsable") or "-",
+                    r.get("fecha_apertura") or "-",
+                    r.get("fecha_cierre") or "-",
+                    f"${float(r.get('base_inicial') or r.get('monto_inicial') or 0.0):,.0f}",
+                    f"${float(r.get('monto_esperado') or r.get('esp_ef') or 0.0):,.0f}",
+                    f"${float(r.get('monto_real_contado') or r.get('real_ef') or 0.0):,.0f}",
+                    f"${float(r.get('diferencia') or r.get('dif_ef') or 0.0):,.0f}",
+                    f"${float(r.get('diferencia_banco') or r.get('dif_bc') or 0.0):,.0f}",
+                    r.get("estado") or "CERRADA"
                 ))
-            conn.close()
+        except Exception as e_hist:
+            print(f"Aviso cargando historial de cierres: {e_hist}")
 
     def _ejecutar_cierre_caja(self):
         if not getattr(self, "sesion_activa_id", None):

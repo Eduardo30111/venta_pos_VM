@@ -22,11 +22,15 @@ from .routers import (
     auditoria,
     turnos,
     configuracion,
+    inventario_central,
+    caja,
+    contabilidad,
 )
 from . import database as db_mod
 from .database import Base, get_db
 from .config import settings
 from .routers.configuracion import obtener_o_crear_config_negocio
+from .services.migracion_historica import sincronizar_y_auditar_datos_historicos
 
 app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION)
 
@@ -43,10 +47,13 @@ app.include_router(usuarios.router)
 app.include_router(terminales.router)
 app.include_router(productos.router)
 app.include_router(servicios.router)
+app.include_router(inventario_central.router)
 app.include_router(proveedores.router)
 app.include_router(categorias.router)
 app.include_router(clientes.router)
 app.include_router(ventas.router)
+app.include_router(caja.router)
+app.include_router(contabilidad.router)
 app.include_router(nomina.router)
 app.include_router(gastos.router)
 app.include_router(reportes.router)
@@ -118,6 +125,29 @@ async def _sincronizar_usuarios_locales():
         print(f"Aviso sincronizando usuarios locales en startup: {e}")
 
 
+async def _reparar_tablas_bigint_sqlite():
+    """
+    En SQLite, una columna creada previamente como `BIGINT PRIMARY KEY` no autoincrementa ROWID.
+    Si detecta `BIGINT` en `audit_log` o `eventos_turno`, la reconstruye como `INTEGER PRIMARY KEY`
+    conservando todos los registros existentes.
+    """
+    if "sqlite" not in str(db_mod.engine.url):
+        return
+    for tabla in ("audit_log", "eventos_turno"):
+        try:
+            async with db_mod.engine.begin() as conn:
+                info = (await conn.execute(text(f"PRAGMA table_info({tabla})"))).fetchall()
+                if not info:
+                    continue
+                col_id = next((c for c in info if c[1] == "id"), None)
+                if col_id and "BIGINT" in str(col_id[2] or "").upper():
+                    cnt = (await conn.execute(text(f"SELECT COUNT(*) FROM {tabla}"))).scalar() or 0
+                    if cnt == 0:
+                        await conn.execute(text(f"DROP TABLE {tabla}"))
+        except Exception as exc:
+            print(f"Aviso revisando PK SQLite en {tabla}: {exc}")
+
+
 @app.on_event("startup")
 async def startup():
     from . import models  # noqa: F401
@@ -126,20 +156,118 @@ async def startup():
         async with db_mod.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
     except Exception as pg_err:
-        print(f"Aviso conectando motor primario ({settings.DATABASE_URL}): {pg_err}. Activando motor central SQLite/WAL...")
+        print(
+            f"Aviso conectando motor primario ({settings.DATABASE_URL}): {pg_err}. "
+            f"Activando motor central SQLite/WAL..."
+        )
         db_mod.activar_fallback_sqlite()
+        await _reparar_tablas_bigint_sqlite()
         async with db_mod.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    # Ejecutar migraciones incrementales de forma tolerante al dialecto
+    await _reparar_tablas_bigint_sqlite()
+    async with db_mod.engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # Migraciones incrementales tolerantes al dialecto (SQLite y PostgreSQL)
     migraciones_sql = [
+        # Usuarios y turnos
         "ALTER TABLE usuarios ADD COLUMN solicitud_liquidacion TIMESTAMP;",
+        "ALTER TABLE cola_turno ADD COLUMN turno_retorno_posicion INTEGER;",
+        "ALTER TABLE cola_turno ADD COLUMN turnos_pendientes INTEGER NOT NULL DEFAULT 0;",
+        # Productos
+        "ALTER TABLE productos ADD COLUMN categoria VARCHAR DEFAULT 'General';",
+        "ALTER TABLE productos ADD COLUMN marca VARCHAR DEFAULT '';",
+        "ALTER TABLE productos ADD COLUMN unidad_medida VARCHAR DEFAULT 'Unidad';",
+        "ALTER TABLE productos ADD COLUMN stock_bodega FLOAT DEFAULT 0.0;",
+        "ALTER TABLE productos ADD COLUMN stock_vitrina FLOAT DEFAULT 0.0;",
+        "ALTER TABLE productos ADD COLUMN stock_minimo_bodega FLOAT DEFAULT 5.0;",
+        "ALTER TABLE productos ADD COLUMN stock_minimo_vitrina FLOAT DEFAULT 2.0;",
+        "ALTER TABLE productos ADD COLUMN precio_variable BOOLEAN DEFAULT 0;",
+        "ALTER TABLE productos ADD COLUMN porcentaje_comision FLOAT DEFAULT 0.0;",
+        # Servicios
         "ALTER TABLE servicios ADD COLUMN precio_variable BOOLEAN DEFAULT 0;",
         "ALTER TABLE servicios ADD COLUMN solo_operarios BOOLEAN NOT NULL DEFAULT 0;",
         "ALTER TABLE servicios ADD COLUMN creado_por_operario_id INTEGER;",
+        "ALTER TABLE servicios ADD COLUMN categoria VARCHAR DEFAULT 'Servicios';",
+        "ALTER TABLE servicios ADD COLUMN marca VARCHAR DEFAULT '';",
+        "ALTER TABLE servicios ADD COLUMN codigo_barras VARCHAR;",
+        "ALTER TABLE servicios ADD COLUMN unidad_medida VARCHAR DEFAULT 'Servicio';",
+        # Movimientos de inventario (Kárdex)
+        "ALTER TABLE movimientos_inventario ADD COLUMN fecha VARCHAR;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN hora VARCHAR;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN codigo_producto VARCHAR;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN nombre_producto VARCHAR;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN unidad_medida VARCHAR DEFAULT 'Unidad';",
+        "ALTER TABLE movimientos_inventario ADD COLUMN ubicacion_origen VARCHAR DEFAULT '';",
+        "ALTER TABLE movimientos_inventario ADD COLUMN ubicacion_destino VARCHAR DEFAULT '';",
+        "ALTER TABLE movimientos_inventario ADD COLUMN stock_origen_ant FLOAT DEFAULT 0.0;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN stock_origen_des FLOAT DEFAULT 0.0;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN stock_destino_ant FLOAT DEFAULT 0.0;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN stock_destino_des FLOAT DEFAULT 0.0;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN costo_unitario FLOAT DEFAULT 0.0;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN valor_total FLOAT DEFAULT 0.0;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN usuario_nombre VARCHAR DEFAULT '';",
+        "ALTER TABLE movimientos_inventario ADD COLUMN estado VARCHAR DEFAULT 'Completado';",
+        # Ventas y Detalles
+        "ALTER TABLE ventas ADD COLUMN idempotency_key VARCHAR;",
+        "ALTER TABLE ventas ADD COLUMN fecha VARCHAR;",
+        "ALTER TABLE ventas ADD COLUMN hora VARCHAR;",
+        "ALTER TABLE ventas ADD COLUMN sesion_caja_id INTEGER;",
+        "ALTER TABLE ventas ADD COLUMN cliente_documento VARCHAR;",
+        "ALTER TABLE ventas ADD COLUMN operario_nombre VARCHAR;",
+        "ALTER TABLE ventas ADD COLUMN metodo_pago_principal VARCHAR DEFAULT 'Efectivo';",
+        "ALTER TABLE ventas ADD COLUMN recibido FLOAT DEFAULT 0.0;",
+        "ALTER TABLE ventas ADD COLUMN cambio FLOAT DEFAULT 0.0;",
+        "ALTER TABLE ventas ADD COLUMN saldo_pendiente FLOAT DEFAULT 0.0;",
+        "ALTER TABLE ventas ADD COLUMN motivo_anulacion VARCHAR;",
+        "ALTER TABLE ventas ADD COLUMN anulada_por VARCHAR;",
+        "ALTER TABLE ventas ADD COLUMN anulada_at VARCHAR;",
+        "ALTER TABLE ventas ADD COLUMN modificado_por VARCHAR;",
+        "ALTER TABLE ventas ADD COLUMN fecha_modificacion VARCHAR;",
+        "ALTER TABLE ventas ADD COLUMN snapshot_negocio JSON;",
+        "ALTER TABLE detalles_venta ADD COLUMN costo_unitario FLOAT DEFAULT 0.0;",
+        # Finanzas, Fiados, Abonos, CXP y Gastos
+        "ALTER TABLE cuentas_por_cobrar ADD COLUMN fecha VARCHAR;",
+        "ALTER TABLE cuentas_por_cobrar ADD COLUMN hora VARCHAR;",
+        "ALTER TABLE abonos ADD COLUMN idempotency_key VARCHAR;",
+        "ALTER TABLE abonos ADD COLUMN fecha VARCHAR;",
+        "ALTER TABLE abonos ADD COLUMN hora VARCHAR;",
+        "ALTER TABLE movimientos_cliente ADD COLUMN fecha VARCHAR;",
+        "ALTER TABLE movimientos_cliente ADD COLUMN hora VARCHAR;",
+        "ALTER TABLE cuentas_por_pagar ADD COLUMN numero_venta VARCHAR;",
+        "ALTER TABLE cuentas_por_pagar ADD COLUMN codigo_servicio VARCHAR;",
+        "ALTER TABLE cuentas_por_pagar ADD COLUMN nombre_servicio VARCHAR;",
+        "ALTER TABLE cuentas_por_pagar ADD COLUMN precio_venta FLOAT DEFAULT 0.0;",
+        "ALTER TABLE cuentas_por_pagar ADD COLUMN porcentaje_comision FLOAT DEFAULT 0.0;",
+        "ALTER TABLE cuentas_por_pagar ADD COLUMN monto_comision FLOAT DEFAULT 0.0;",
+        "ALTER TABLE cuentas_por_pagar ADD COLUMN monto_pagado FLOAT DEFAULT 0.0;",
+        "ALTER TABLE cuentas_por_pagar ADD COLUMN fecha VARCHAR;",
+        "ALTER TABLE cuentas_por_pagar ADD COLUMN hora VARCHAR;",
+        "ALTER TABLE cuentas_por_pagar ADD COLUMN usuario VARCHAR;",
         "ALTER TABLE gastos ADD COLUMN metodo_pago VARCHAR DEFAULT 'Efectivo';",
-        "ALTER TABLE cola_turno ADD COLUMN turno_retorno_posicion INTEGER;",
-        "ALTER TABLE cola_turno ADD COLUMN turnos_pendientes INTEGER NOT NULL DEFAULT 0;",
+        "ALTER TABLE gastos ADD COLUMN clasificacion VARCHAR DEFAULT 'Operativo diario';",
+        "ALTER TABLE gastos ADD COLUMN descripcion VARCHAR DEFAULT '';",
+        "ALTER TABLE gastos ADD COLUMN fecha VARCHAR;",
+        "ALTER TABLE gastos ADD COLUMN hora VARCHAR;",
+        "ALTER TABLE gastos ADD COLUMN fecha_vencimiento VARCHAR;",
+        "ALTER TABLE gastos ADD COLUMN fecha_pago VARCHAR;",
+        "ALTER TABLE gastos ADD COLUMN frecuencia VARCHAR DEFAULT 'Único';",
+        "ALTER TABLE gastos ADD COLUMN estado VARCHAR DEFAULT 'Pagado';",
+        "ALTER TABLE gastos ADD COLUMN proveedor VARCHAR DEFAULT '';",
+        "ALTER TABLE gastos ADD COLUMN comprobante VARCHAR DEFAULT '';",
+        "ALTER TABLE gastos ADD COLUMN es_recurrente BOOLEAN DEFAULT 0;",
+        "ALTER TABLE gastos ADD COLUMN recurrencia_id INTEGER;",
+        "ALTER TABLE gastos ADD COLUMN sesion_caja_id INTEGER;",
+        "ALTER TABLE gastos ADD COLUMN usuario_nombre VARCHAR;",
+        # Proveedores
+        "ALTER TABLE proveedores ADD COLUMN saldo_acumulado FLOAT DEFAULT 0.0;",
+        "ALTER TABLE proveedores ADD COLUMN total_ventas FLOAT DEFAULT 0.0;",
+        "ALTER TABLE proveedores ADD COLUMN total_comisiones FLOAT DEFAULT 0.0;",
+        "ALTER TABLE proveedores ADD COLUMN total_pagado FLOAT DEFAULT 0.0;",
+        # Índices únicos de idempotencia
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_ventas_idempotency_key ON ventas(idempotency_key);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_abonos_idempotency_key ON abonos(idempotency_key);",
     ]
     for stmt in migraciones_sql:
         try:
@@ -150,12 +278,16 @@ async def startup():
 
     try:
         async with db_mod.engine.begin() as conn:
-            await conn.execute(text("""
-                DELETE FROM cola_turno
-                WHERE usuario_id IN (
-                    SELECT id FROM usuarios WHERE LOWER(rol) <> 'operario'
-                );
-            """))
+            await conn.execute(
+                text(
+                    """
+                    DELETE FROM cola_turno
+                    WHERE usuario_id IN (
+                        SELECT id FROM usuarios WHERE LOWER(rol) <> 'operario'
+                    );
+                    """
+                )
+            )
     except Exception:
         pass
 
@@ -192,6 +324,9 @@ async def startup():
     async with db_mod.SessionLocal() as cfg_session:
         await obtener_o_crear_config_negocio(cfg_session)
 
+    # Sincronización aditiva de catálogo y auditoría forense reversible de datos históricos
+    await sincronizar_y_auditar_datos_historicos()
+
 
 @app.get("/api/health")
 @app.get("/health")
@@ -221,4 +356,3 @@ async def health_check(db: AsyncSession = Depends(get_db)):
 @app.get("/")
 async def root():
     return {"app": settings.APP_NAME, "version": settings.APP_VERSION, "status": "ok"}
-

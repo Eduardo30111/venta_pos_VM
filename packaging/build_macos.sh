@@ -17,7 +17,12 @@ echo "🚀 INICIANDO EMPAQUETADO DE VmPOS PARA macOS"
 echo "=================================================================="
 
 # 1. Asegurar entorno virtual y dependencias compatibles con macOS (Tk >= 9.0)
-if [ -x "/Users/eduardosanchez/miniconda3/bin/python3" ]; then
+if [ -x "$PROJECT_ROOT/venv/bin/python" ] && [ -x "$PROJECT_ROOT/venv/bin/pyinstaller" ]; then
+    PYTHON_BIN="$PROJECT_ROOT/venv/bin/python"
+    export PYTHONPATH="$PROJECT_ROOT/.venv/lib/python3.9/site-packages:$PROJECT_ROOT/venv/lib/python3.9/site-packages:$PYTHONPATH"
+elif [ -x "$PROJECT_ROOT/.venv/bin/python3" ]; then
+    PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python3"
+elif [ -x "/Users/eduardosanchez/miniconda3/bin/python3" ]; then
     PYTHON_BIN="/Users/eduardosanchez/miniconda3/bin/python3"
 elif [ -x "$HOME/miniconda3/bin/python3" ]; then
     PYTHON_BIN="$HOME/miniconda3/bin/python3"
@@ -39,8 +44,8 @@ export MPLCONFIGDIR="$PROJECT_ROOT/build/matplotlib_cache"
 mkdir -p "$PYINSTALLER_CONFIG_DIR" "$MPLCONFIGDIR"
 
 echo "Verificando dependencias de compilación..."
-if ! $PYTHON_BIN -c "import PyInstaller, PIL, reportlab, matplotlib, pandas, openpyxl, httpx, pydantic, pydantic_settings, barcode, babel, escpos, usb, fastapi, uvicorn, sqlalchemy, greenlet, aiosqlite, asyncpg, jose, bcrypt, multipart" 2>/dev/null; then
-    $PYTHON_BIN -m pip install --quiet pyinstaller pillow reportlab matplotlib pandas openpyxl httpx pydantic pydantic_settings python-barcode babel python-escpos pyusb fastapi uvicorn "sqlalchemy[asyncio]" greenlet aiosqlite asyncpg "python-jose[cryptography]" bcrypt python-multipart
+if ! $PYTHON_BIN -c "import PyInstaller, PIL, reportlab, matplotlib, pandas, openpyxl, httpx, pydantic, pydantic_settings, barcode, escpos, fastapi, uvicorn, sqlalchemy, greenlet, asyncpg, jose, bcrypt, multipart" 2>/dev/null; then
+    $PYTHON_BIN -m pip install --quiet pyinstaller pillow reportlab matplotlib pandas openpyxl httpx pydantic pydantic_settings python-barcode python-escpos pyusb fastapi uvicorn "sqlalchemy[asyncio]" greenlet aiosqlite asyncpg "python-jose[cryptography]" bcrypt python-multipart
 fi
 
 # 2. Generar archivo .icns si no existe
@@ -144,8 +149,6 @@ $PYTHON_BIN -m PyInstaller \
     --hidden-import="barcode.codex" \
     --hidden-import="barcode.ean" \
     --hidden-import="barcode.writer" \
-    --hidden-import="babel" \
-    --hidden-import="babel.numbers" \
     interface/inicio_sesion.py
 
 # Ajustar Info.plist para alta resolución Retina y forzar apariencia Aqua (evita texto blanco invisible en Dark Mode)
@@ -180,6 +183,11 @@ if hdiutil makehybrid -hfs -joliet -iso -default-volume-name "Instalador VmPOS" 
 fi
 rm -f "$STAGE_ISO" "$PROJECT_ROOT/VmPOS.spec"
 rm -rf "$DMG_STAGE"
+
+if [ -d "dist/VmPOS.app" ]; then
+    echo "Intentando actualizar /Applications/VmPOS.app..."
+    (rm -rf "/Applications/VmPOS.app" && cp -R "dist/VmPOS.app" "/Applications/VmPOS.app") 2>/dev/null || echo "Aviso: Para actualizar /Applications/VmPOS.app se puede copiar manualmente dist/VmPOS.app o montar el DMG."
+fi
 
 echo "=================================================================="
 echo "🎉 ¡EMPAQUETADO PARA macOS COMPLETADO CON ÉXITO!"

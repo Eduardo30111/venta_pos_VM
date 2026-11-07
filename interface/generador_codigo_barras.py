@@ -278,64 +278,50 @@ class BarcodeEngine:
 # 2. INTEGRACIÓN CON INVENTARIO (InventoryBarcodeManager)
 # ==============================================================================
 class InventoryBarcodeManager:
-    """Gestiona la búsqueda, autogeneración y persistencia de códigos de barras en SQLite."""
+    """Gestiona la búsqueda, autogeneración y persistencia de códigos de barras en el servidor central."""
 
     @staticmethod
     def obtener_productos(filtro: str = "") -> list[dict]:
-        """Obtiene la lista de productos activos desde ventas.db."""
+        """Obtiene la lista de productos activos desde el catálogo central."""
         productos = []
         try:
-            conn = conectar_db()
-            cur = conn.cursor()
-            query = """
-                SELECT id, codigo, nombre, precio, codigo_barras, categoria, tipo_producto, stock
-                FROM productos
-                WHERE estado = 'Activo'
-            """
-            params = []
-            if filtro:
-                f = f"%{filtro.strip()}%"
-                query += " AND (codigo LIKE ? OR nombre LIKE ? OR codigo_barras LIKE ?)"
-                params.extend([f, f, f])
-            query += " ORDER BY nombre ASC LIMIT 100"
-
-            cur.execute(query, params)
-            for row in cur.fetchall():
-                productos.append({
-                    "id": row[0],
-                    "codigo": str(row[1] or ""),
-                    "nombre": str(row[2] or ""),
-                    "precio": float(row[3] or 0.0),
-                    "codigo_barras": str(row[4] or "").strip(),
-                    "categoria": str(row[5] or ""),
-                    "tipo_producto": str(row[6] or ""),
-                    "stock": float(row[7] or 0.0)
-                })
-            conn.close()
+            from client.api_client import api
+            params = {"solo_activos": True}
+            if filtro and filtro.strip():
+                params["filtro"] = filtro.strip()
+            resp = api.get("/inventario/catalogo", params=params)
+            if resp.status_code == 200:
+                for row in (resp.json() or [])[:100]:
+                    productos.append({
+                        "id": row.get("id"),
+                        "codigo": str(row.get("codigo") or ""),
+                        "nombre": str(row.get("nombre") or ""),
+                        "precio": float(row.get("precio") or 0.0),
+                        "codigo_barras": str(row.get("codigo_barras") or "").strip(),
+                        "categoria": str(row.get("categoria") or ""),
+                        "tipo_producto": str(row.get("tipo_producto") or ""),
+                        "stock": float(row.get("stock") or 0.0),
+                    })
         except Exception as e:
-            print(f"Error al obtener productos de inventario: {e}")
+            print(f"Error al obtener productos de inventario central: {e}")
         return productos
 
     @staticmethod
     def existe_codigo_barras(codigo_barras: str, excluir_id: int = None) -> bool:
-        """Verifica si un código de barras ya está registrado en otro producto."""
+        """Verifica si un código de barras ya está registrado en otro artículo central."""
         if not codigo_barras:
             return False
         try:
-            conn = conectar_db()
-            cur = conn.cursor()
+            from client.api_client import api
+            params = {"codigo_barras": codigo_barras.strip()}
             if excluir_id is not None:
-                cur.execute("SELECT id FROM productos WHERE codigo_barras = ? AND id != ? LIMIT 1",
-                            (codigo_barras.strip(), excluir_id))
-            else:
-                cur.execute("SELECT id FROM productos WHERE codigo_barras = ? LIMIT 1",
-                            (codigo_barras.strip(),))
-            existe = cur.fetchone() is not None
-            conn.close()
-            return existe
+                params["excluir_id"] = int(excluir_id)
+            resp = api.get("/inventario/existe-codigo-barras", params=params)
+            if resp.status_code == 200:
+                return bool(resp.json().get("existe", False))
         except Exception as e:
             print(f"Error al verificar unicidad de código: {e}")
-            return False
+        return False
 
     @classmethod
     def generar_codigo_unico(cls, producto_id: int = None, formato: str = "CODE128") -> str:
@@ -381,17 +367,12 @@ class InventoryBarcodeManager:
             return False, f"El código '{cod}' ya está asignado a otro producto."
 
         try:
-            conn = conectar_db()
-            cur = conn.cursor()
-            ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            cur.execute("""
-                UPDATE productos
-                SET codigo_barras = ?, fecha_modificacion = ?
-                WHERE id = ?
-            """, (cod, ahora, producto_id))
-            conn.commit()
-            conn.close()
-            return True, f"Código '{cod}' guardado correctamente en el inventario."
+            from client.api_client import api
+            resp = api.put(f"/inventario/articulo/{producto_id}", json={"codigo_barras": cod})
+            if resp.status_code in (200, 201):
+                return True, f"Código '{cod}' guardado correctamente en el inventario central."
+            det = resp.json().get("detail", resp.text) if resp.text else f"HTTP {resp.status_code}"
+            return False, f"Error al actualizar en servidor central: {det}"
         except Exception as e:
             return False, f"Error al actualizar base de datos: {e}"
 

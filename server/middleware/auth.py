@@ -60,7 +60,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
 def require_permission(permiso: str):
     async def permission_checker(current_user: Usuario = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
         from ..models.permiso import PermisoUsuario
-        if current_user.rol == "Administrador":
+        rol_norm = (current_user.rol or "").strip().lower()
+        if rol_norm in ("administrador", "admin", "gerente"):
             return current_user
         
         result = await db.execute(

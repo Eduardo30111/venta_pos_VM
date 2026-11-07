@@ -7,9 +7,12 @@ from tkinter import ttk, messagebox
 from datetime import datetime
 import os
 import sys
+import uuid
+import time
 import sqlite3
 import subprocess
 import threading
+import httpx
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from client.api_client import api
 
@@ -687,6 +690,12 @@ class App:
         self.factura_num = datetime.now().strftime("%Y%m%d%H%M%S")
         self.tipo_filtro = tk.StringVar(value="Todos")
         self.busqueda_catalogo = tk.StringVar()
+        self.cliente_id_seleccionado = None
+        self._exceso_credito_autorizado = False
+        self._registrando_venta = False
+        self._venta_idempotency_key = None
+        self._venta_fingerprint = None
+        self._ultimo_refresh_catalogo = 0.0
 
     def setup_datos(self):
         """Carga de datos desde la base de datos"""
@@ -892,6 +901,10 @@ class App:
         cat_head = tk.Frame(catalogo_panel, bg=bg_panel_head)
         cat_head.pack(fill="x", padx=2, pady=2)
         tk.Label(cat_head, text="📦 CATÁLOGO", font=("Segoe UI", 10, "bold"), bg=bg_panel_head, fg=fg_main).pack(side="left", padx=6, pady=4)
+        crear_boton(
+            cat_head, text="🔄", command=self.refrescar_catalogo_central,
+            tipo="info", tam_fuente=7, padx=5, pady=1
+        ).pack(side="right", padx=4, pady=2)
         if not self.es_admin and str(self.rol).strip().lower() == "operario":
             crear_boton(
                 cat_head, text="➕ Agregar servicio", command=self._abrir_modal_servicio_operario,
@@ -915,6 +928,7 @@ class App:
         tk.Label(cat_busq_frame, text="🔍", font=("Segoe UI", 9), bg=bg_panel, fg=fg_main).pack(side="left", padx=(0, 4))
         self.entry_busq_cat = tk.Entry(cat_busq_frame, textvariable=self.busqueda_catalogo, font=("Segoe UI", 9), bd=1, relief="solid", 
                                        bg=self.t["input_bg"], fg=self.t["input_fg"], insertbackground=self.t["input_insert"])
+        self.entry_busq_cat.pack(side="left", fill="x", expand=True)
         self._debounce_cat_live = None
         def _on_cat_search(*args):
             if self._debounce_cat_live:
@@ -1061,13 +1075,36 @@ class App:
         self.actualizar_estado_caja()
         self.actualizar_indicadores_empleado_pos()
 
+    def refrescar_catalogo_central(self):
+        """Recarga el catálogo en tiempo real desde el servidor central."""
+        if getattr(self, "_registrando_venta", False):
+            return
+        self._ultimo_refresh_catalogo = time.time()
+        self.productos_inventario = self.obtener_productos()
+        self.actualizar_catalogo_live()
+
+    def _on_focus_in_pos(self, event=None):
+        """Refresca estado de caja, indicadores y catálogo central al recuperar foco (con debounce)."""
+        if event is not None and getattr(event, "widget", None) is not self.ventana:
+            return
+        if getattr(self, "_registrando_venta", False):
+            return
+        ahora = time.time()
+        if ahora - getattr(self, "_ultimo_refresh_catalogo", 0.0) >= 2.5:
+            self._ultimo_refresh_catalogo = ahora
+            self.productos_inventario = self.obtener_productos()
+            self.actualizar_catalogo_live()
+            self.actualizar_estado_caja()
+            self.actualizar_indicadores_empleado_pos()
+
     def configurar_eventos(self):
         """Configurar eventos de teclado y focus"""
         self.entry_codigo.bind('<Return>', lambda e: self.escanear_codigo())
         self.entry_codigo.bind('<KeyRelease>', self.on_codigo_change)
         self.entry_doc.focus()
         self.actualizar_hora()
-        self.ventana.bind('<FocusIn>', lambda e: (self.actualizar_estado_caja(), self.actualizar_indicadores_empleado_pos()))
+        self.ventana.bind('<FocusIn>', self._on_focus_in_pos)
+        self._ultimo_refresh_catalogo = time.time()
         self.actualizar_estado_caja()
         self.actualizar_indicadores_empleado_pos()
 
@@ -1183,13 +1220,18 @@ class App:
         for p in self.productos_inventario:
             cod, nom, stock, precio, t_prod = p[0], p[1], p[2], p[3], p[4]
             es_var = p[8] if len(p) > 8 else False
+            cod_barras = str(p[10] or "") if len(p) > 10 else ""
 
             # Filtro por tipo
             if tipo_filtro_clean != "Todos" and t_prod != tipo_filtro_clean:
                 continue
 
             # Filtro por texto de búsqueda
-            if busq and (busq not in str(cod).lower() and busq not in str(nom).lower()):
+            if busq and (
+                busq not in str(cod).lower()
+                and busq not in str(nom).lower()
+                and busq not in cod_barras.lower()
+            ):
                 continue
 
             precio_str = "Variable" if (t_prod == "Servicio" and es_var) else self.formato_peso(precio)
@@ -1286,8 +1328,52 @@ class App:
     #   FLUJO CAJA Y OPERARIOS (MANDAR A CAJA / AUTORIZACIÓN ADMIN)
     # ====================================================================================
 
+    def _calcular_fingerprint_carrito(self, metodo_pago: str, total: float, id_cliente=None, doc_cli: str = ""):
+        """Construye una huella determinística del intento lógico de venta actual."""
+        filas = []
+        for i in self.tabla.get_children():
+            cod = str(self.tabla.item(i, "text") or "").strip()
+            vals = self.tabla.item(i, "values") or ()
+            nom = str(vals[0]) if len(vals) > 0 else ""
+            pre = round(self.limpiar_precio(vals[1]), 2) if len(vals) > 1 else 0.0
+            cant = int(float(vals[2])) if len(vals) > 2 else 1
+            filas.append((cod, nom, pre, cant))
+        return (
+            getattr(self, "orden_id_activa", None),
+            str(metodo_pago or ""),
+            round(float(total or 0.0), 2),
+            str(id_cliente or ""),
+            str(doc_cli or "").strip(),
+            tuple(filas),
+        )
+
+    def _obtener_idempotency_key_venta(self, fingerprint) -> str:
+        """
+        Devuelve el idempotency_key para el intento actual.
+        Si se reintenta exactamente la misma operación tras un error de red, reutiliza la misma clave
+        para impedir ventas duplicadas. Si cambia el carrito o se limpia el formulario, genera una nueva.
+        """
+        if self._venta_idempotency_key and self._venta_fingerprint == fingerprint:
+            return self._venta_idempotency_key
+        self._venta_idempotency_key = f"pos-{uuid.uuid4()}"
+        self._venta_fingerprint = fingerprint
+        return self._venta_idempotency_key
+
+    def _restaurar_boton_principal_pos(self):
+        """Restaura el botón principal del footer POS según el rol."""
+        if not hasattr(self, "btn_accion_principal") or not self.btn_accion_principal:
+            return
+        try:
+            if self.btn_accion_principal.winfo_exists():
+                txt = "💳 PROCESAR PAGO (F12)" if self.puede_procesar_venta else "📤 MANDAR A CAJA (F12)"
+                self.btn_accion_principal.config(state="normal", text=txt)
+        except Exception:
+            pass
+
     def mandar_a_caja(self):
-        """Envía la venta actual a Caja en estado Pendiente_Caja para autorización y cobro del Administrador"""
+        """Envía la venta actual a Caja en estado Pendiente_Caja para autorización y cobro del Administrador."""
+        if getattr(self, "_registrando_venta", False):
+            return
         if not self.verificar_caja_abierta("enviar pedidos a caja"):
             return
         if len(self.tabla.get_children()) == 0:
@@ -1299,9 +1385,11 @@ class App:
             messagebox.showwarning("Total Inválido", "El total de la venta debe ser mayor a cero.", parent=self.ventana)
             return
 
-        confirma = messagebox.askyesno("Confirmar Envío a Caja", 
-                                      f"¿Desea enviar esta orden por {self.formato_peso(total)} a Caja?\n\nEl Administrador la cobrará.", 
-                                      parent=self.ventana)
+        confirma = messagebox.askyesno(
+            "Confirmar Envío a Caja",
+            f"¿Desea enviar esta orden por {self.formato_peso(total)} a Caja?\n\nEl Administrador la cobrará.",
+            parent=self.ventana,
+        )
         if not confirma:
             return
 
@@ -1314,11 +1402,11 @@ class App:
                 precio_limpio = self.limpiar_precio(valores[1])
                 cantidad = int(float(valores[2]))
                 subtotal = precio_limpio * cantidad
-                
+
                 tipo_item = "Producto"
                 item_id = None
                 costo = 0.0
-                
+
                 for p in self.productos_inventario:
                     cod_p = str(p[0]).strip()
                     cod_c = str(codigo).strip()
@@ -1330,11 +1418,11 @@ class App:
                         if tipo_item == "Servicio" and prov_id and (costo is None or float(costo or 0) <= 0):
                             costo = precio_limpio
                         break
-                
+
                 if not item_id:
                     messagebox.showerror("Error", f"No se pudo identificar el producto o servicio con código '{codigo}'.", parent=self.ventana)
                     return
-                
+
                 detalles_payload.append({
                     "tipo_item": tipo_item,
                     "item_id": item_id,
@@ -1345,51 +1433,92 @@ class App:
                     "cantidad": cantidad,
                     "descuento": 0.0,
                     "subtotal": subtotal,
-                    "costo_unitario": costo
+                    "costo_unitario": costo,
                 })
 
             doc_val = self.documento.get().strip()
-            cliente_id_val = int(doc_val) if doc_val and doc_val.isdigit() else None
+            cliente_id_val = (
+                int(self.cliente_id_seleccionado)
+                if getattr(self, "cliente_id_seleccionado", None) and str(self.cliente_id_seleccionado).isdigit()
+                else None
+            )
             es_esp = getattr(self, "var_turno_especial", None) and self.var_turno_especial.get()
-            motivo_esp = getattr(self, "var_motivo_especial", None) and self.var_motivo_especial.get() or "Cliente solicita específicamente al operario"
+            motivo_esp = (
+                getattr(self, "var_motivo_especial", None)
+                and self.var_motivo_especial.get()
+                or "Cliente solicita específicamente al operario"
+            )
+            fp = self._calcular_fingerprint_carrito("Pendiente_Caja", total, cliente_id_val, doc_val)
+            idem_key = self._obtener_idempotency_key_venta(fp)
 
-            payload = {
-                "cliente_id": cliente_id_val,
-                "cliente_documento": doc_val if doc_val else None,
-                "terminal_id": 1,
-                "subtotal": total,
-                "descuento": 0.0,
-                "total": total,
-                "estado": "Pendiente_Caja",
-                "pagos": [],
-                "detalles": detalles_payload,
-                "es_turno_especial": bool(es_esp),
-                "motivo_especial": motivo_esp if es_esp else None
-            }
+            self._registrando_venta = True
+            if hasattr(self, "btn_accion_principal") and self.btn_accion_principal:
+                self.btn_accion_principal.config(state="disabled", text="⏳ Registrando venta...")
+                self.ventana.update_idletasks()
 
-            print(f"DEBUG: Enviando orden a caja -> Total: {total}, Doc: {doc_val}, Items: {len(detalles_payload)}")
-            resp = api.post("/ventas", json=payload)
-            print(f"DEBUG: Respuesta servidor mandar a caja -> Status: {resp.status_code}")
-            if resp.status_code in (200, 201):
-                venta_resp = resp.json()
-                numero_venta = venta_resp.get("numero", "")
-                messagebox.showinfo("✅ Venta Enviada a Caja", 
-                                    f"💖 ¡VENTA ENVIADA A CAJA! 💖\n\n"
-                                    f"🧾 N° de Venta: {numero_venta}\n"
-                                    f"💸 Monto: {self.formato_peso(total)}\n"
-                                    f"👤 Operario: {self.user_nombre or 'Operario'}\n\n"
-                                    f"El Administrador ya puede verla y procesar el cobro en su caja.",
-                                    parent=self.ventana)
-                self.limpiar_formulario()
-                self.productos_inventario = self.obtener_productos()
-                self.actualizar_catalogo_live()
-            else:
+            def _worker_orden():
                 try:
-                    err_msg = resp.json().get("detail", resp.text)
-                except:
-                    err_msg = resp.text
-                messagebox.showerror("Error al Mandar a Caja", f"El servidor respondió con error:\n{err_msg}", parent=self.ventana)
+                    term_id = api.sincronizar_terminal_id() or api.terminal_id or 1
+                    payload = {
+                        "idempotency_key": idem_key,
+                        "cliente_id": cliente_id_val,
+                        "cliente_documento": doc_val if doc_val else None,
+                        "terminal_id": term_id,
+                        "subtotal": total,
+                        "descuento": 0.0,
+                        "total": total,
+                        "estado": "Pendiente_Caja",
+                        "pagos": [],
+                        "detalles": detalles_payload,
+                        "es_turno_especial": bool(es_esp),
+                        "motivo_especial": motivo_esp if es_esp else None,
+                    }
+                    resp = api.post("/ventas", json=payload, timeout=12.0)
+                    if getattr(resp, "is_network_error", False):
+                        time.sleep(0.8)
+                        if api.esta_disponible(forzar=True):
+                            resp_rec = api.get(f"/ventas/por-idempotencia/{idem_key}", timeout=6.0)
+                            if resp_rec.status_code == 200:
+                                resp = resp_rec
+                    self.ventana.after(0, lambda: _finalizar_orden(resp, None))
+                except Exception as exc_w:
+                    self.ventana.after(0, lambda: _finalizar_orden(None, exc_w))
+
+            def _finalizar_orden(resp, exc_w):
+                self._registrando_venta = False
+                self._restaurar_boton_principal_pos()
+                if exc_w is not None:
+                    messagebox.showerror("Error", f"Ocurrió un error al enviar a caja:\n{exc_w}", parent=self.ventana)
+                    return
+                if resp is not None and resp.status_code in (200, 201):
+                    venta_resp = resp.json()
+                    numero_venta = venta_resp.get("numero", "")
+                    id_central = venta_resp.get("id", "")
+                    self._venta_idempotency_key = None
+                    self._venta_fingerprint = None
+                    self.limpiar_formulario()
+                    self.productos_inventario = self.obtener_productos()
+                    self.actualizar_catalogo_live()
+                    messagebox.showinfo(
+                        "✅ Venta Enviada a Caja",
+                        f"Venta registrada correctamente en cola de Caja.\n\n"
+                        f"🧾 N° de Venta: {numero_venta} (ID #{id_central})\n"
+                        f"💸 Monto: {self.formato_peso(total)}\n"
+                        f"👤 Operario: {self.user_nombre or 'Operario'}\n\n"
+                        f"El Administrador ya puede verla y procesar el cobro en su caja.",
+                        parent=self.ventana,
+                    )
+                else:
+                    try:
+                        err_msg = resp.json().get("detail", resp.text) if resp is not None else "Sin respuesta del servidor"
+                    except Exception:
+                        err_msg = resp.text if resp is not None else "Sin respuesta del servidor"
+                    messagebox.showerror("Error al Mandar a Caja", f"El servidor respondió con error:\n{err_msg}", parent=self.ventana)
+
+            threading.Thread(target=_worker_orden, daemon=True).start()
         except Exception as e:
+            self._registrando_venta = False
+            self._restaurar_boton_principal_pos()
             messagebox.showerror("Error", f"Ocurrió un error al enviar a caja:\n{e}", parent=self.ventana)
 
     def actualizar_ventas_operarios(self):
@@ -1488,8 +1617,8 @@ class App:
         self.orden_numero_activa = orden.get('numero', '')
         self.factura_num = self.orden_numero_activa
         self.lbl_factura.config(text=f"🧾 Factura (Operario): {self.factura_num}")
-        
-        doc_mostrar = orden.get('cliente_documento') or (str(orden.get('cliente_id')) if orden.get('cliente_id') else "")
+        self.cliente_id_seleccionado = orden.get('cliente_id')
+        doc_mostrar = orden.get('cliente_documento') or ""
         self.documento.set(doc_mostrar)
 
         # Mostrar banner
@@ -1888,14 +2017,17 @@ class App:
 
     def obtener_productos(self):
         """
-        Obtener productos del inventario en modo Local-First.
-        Para productos físicos, el stock disponible para venta en mostrador es stock_vitrina.
+        Obtiene el catálogo activo directamente desde el Servidor Central (`/inventario/catalogo`).
+        Para productos físicos, el stock disponible para venta en mostrador es `stock_vitrina`.
         """
         todos_los_productos = []
         try:
-            from interface.inventario_manager import obtener_catalogo
+            try:
+                from interface.inventario_manager import obtener_catalogo
+            except ImportError:
+                from inventario_manager import obtener_catalogo
             items = obtener_catalogo(solo_activos=True)
-            if items:
+            if items is not None:
                 for it in items:
                     cod = str(it.get("codigo", "")).strip()
                     nom = str(it.get("nombre", "")).strip()
@@ -1904,10 +2036,13 @@ class App:
                     costo_u = float(it.get("costo", 0.0))
                     prov_id = it.get("proveedor_id")
                     p_id = it.get("id")
-                    
+                    cod_barras = str(it.get("codigo_barras") or "").strip()
+
                     if tipo_p == "Servicio":
                         es_var = bool(it.get("precio_variable", 0))
-                        todos_los_productos.append((cod, nom, 9999, precio_v, "Servicio", prov_id, p_id, costo_u, es_var, 0.0))
+                        todos_los_productos.append(
+                            (cod, nom, 9999, precio_v, "Servicio", prov_id, p_id, costo_u, es_var, 0.0, cod_barras)
+                        )
                     else:
                         sv = float(it.get("stock_vitrina", 0.0))
                         sb = float(it.get("stock_bodega", 0.0))
@@ -1915,46 +2050,86 @@ class App:
                             sv_fmt = int(sv) if sv.is_integer() else sv
                         except Exception:
                             sv_fmt = sv
-                        todos_los_productos.append((cod, nom, sv_fmt, precio_v, "Fisico", prov_id, p_id, costo_u, False, sb))
+                        todos_los_productos.append(
+                            (cod, nom, sv_fmt, precio_v, "Fisico", prov_id, p_id, costo_u, False, sb, cod_barras)
+                        )
 
                 if str(self.rol).strip().lower() == "operario":
                     return [item for item in todos_los_productos if item[4] == "Servicio"]
                 return todos_los_productos
         except Exception as e:
-            print(f"Aviso consultando inventario local SQLite: {e}")
+            print(f"Aviso consultando catálogo central `/inventario/catalogo`: {e}")
 
-        # Fallback remoto API si por alguna razón SQLite estuviera vacío
+        # Respaldo directo contra `/productos` y `/servicios` centrales
         try:
             resp_prod = api.get("/productos?size=1000")
             resp_serv = api.get("/servicios?size=1000")
-            
+
             if resp_prod.status_code == 200:
                 prod_data = resp_prod.json()
-                productos = prod_data.get("items", []) if isinstance(prod_data, dict) else (prod_data if isinstance(prod_data, list) else [])
+                productos = (
+                    prod_data.get("items", [])
+                    if isinstance(prod_data, dict)
+                    else (prod_data if isinstance(prod_data, list) else [])
+                )
                 for p in productos:
-                    stock_val = p.get("stock", 0)
+                    stock_val = p.get("stock_vitrina", p.get("stock", 0))
+                    sb_val = float(p.get("stock_bodega", 0.0) or 0.0)
                     try:
                         stock_fmt = int(stock_val) if float(stock_val).is_integer() else stock_val
                     except Exception:
                         stock_fmt = stock_val
                     precio_v = p.get("precio_venta", p.get("precio", 0.0))
                     costo_u = p.get("precio_costo", p.get("costo", 0.0))
-                    todos_los_productos.append((p.get("codigo", ""), p.get("nombre", ""), stock_fmt, precio_v, "Fisico", p.get("proveedor_id"), p.get("id"), costo_u, False, 0.0))
+                    cod_barras = str(p.get("codigo_barras") or "").strip()
+                    todos_los_productos.append(
+                        (
+                            p.get("codigo", ""),
+                            p.get("nombre", ""),
+                            stock_fmt,
+                            precio_v,
+                            "Fisico",
+                            p.get("proveedor_id"),
+                            p.get("id"),
+                            costo_u,
+                            False,
+                            sb_val,
+                            cod_barras,
+                        )
+                    )
 
             if resp_serv.status_code == 200:
                 serv_data = resp_serv.json()
-                servicios = serv_data.get("items", []) if isinstance(serv_data, dict) else (serv_data if isinstance(serv_data, list) else [])
+                servicios = (
+                    serv_data.get("items", [])
+                    if isinstance(serv_data, dict)
+                    else (serv_data if isinstance(serv_data, list) else [])
+                )
                 for s in servicios:
                     precio_s = s.get("precio_venta", s.get("precio", 0.0))
                     costo_s = s.get("costo_proveedor", s.get("costo", 0.0))
                     precio_var = bool(s.get("precio_variable", False))
-                    todos_los_productos.append((s.get("codigo", ""), s.get("nombre", ""), 9999, precio_s, "Servicio", s.get("proveedor_id"), s.get("id"), costo_s, precio_var, 0.0))
+                    todos_los_productos.append(
+                        (
+                            s.get("codigo", ""),
+                            s.get("nombre", ""),
+                            9999,
+                            precio_s,
+                            "Servicio",
+                            s.get("proveedor_id"),
+                            s.get("id"),
+                            costo_s,
+                            precio_var,
+                            0.0,
+                            "",
+                        )
+                    )
 
             if str(self.rol).strip().lower() == "operario":
                 return [item for item in todos_los_productos if item[4] == "Servicio"]
             return todos_los_productos
         except Exception as e:
-            print(f"Aviso fallback API: {e}")
+            print(f"Aviso respaldo API productos/servicios: {e}")
             return todos_los_productos
 
     def formato_peso(self, valor):
@@ -2269,13 +2444,22 @@ class App:
         self.actualizar_total()
 
     def escanear_codigo(self):
-        """Escanea un código de barras y agrega el producto"""
+        """Escanea un código interno o código de barras EAN/Code128 y agrega el producto."""
         if not self.verificar_caja_abierta("escanear o agregar productos"):
             return
         codigo = self.codigo_entrada.get().strip()
         if not codigo:
             return
-        producto = next((p for p in self.productos_inventario if str(p[0]) == codigo or str(p[0]).zfill(5) == codigo.zfill(5)), None)
+        producto = next(
+            (
+                p
+                for p in self.productos_inventario
+                if str(p[0]).lower() == codigo.lower()
+                or str(p[0]).zfill(5) == codigo.zfill(5)
+                or (len(p) > 10 and str(p[10] or "").strip() and str(p[10]).strip().lower() == codigo.lower())
+            ),
+            None,
+        )
         
         if producto:
             # producto[2] es stock, producto[4] es tipo_producto, producto[8] es precio_variable
@@ -2311,12 +2495,16 @@ class App:
             self.actualizar_total()
 
     def pagar(self):
-        """Abre la ventana para procesar el pago con layout responsive y footer de confirmación sticky"""
+        """Abre la ventana para procesar el pago con layout responsive, clientes centrales y confirmación asíncrona idempotente."""
+        if getattr(self, "_registrando_venta", False):
+            return
         if not self.verificar_caja_abierta("procesar cobros o ventas"):
             return
         if self.total_general.get() <= 0 or len(self.tabla.get_children()) == 0:
             messagebox.showwarning("Carrito Vacío", "Agregue al menos un producto o servicio antes de cobrar.", parent=self.ventana)
             return
+
+        self._exceso_credito_autorizado = False
         ventana = tk.Toplevel(self.ventana)
         ventana.title("💳 Procesar Pago - POS")
         t_p = aplicar_tema(ventana)
@@ -2339,8 +2527,8 @@ class App:
 
         imprimir_ticket_var = tk.BooleanVar(value=True)
         chk_imp = tk.Checkbutton(
-            footer_p, 
-            text="🖨️ Imprimir comprobante", 
+            footer_p,
+            text="🖨️ Imprimir comprobante",
             variable=imprimir_ticket_var,
             bg=t_p["bg_app"], fg=t_p["text_main"],
             selectcolor=t_p["bg_surface_alt"],
@@ -2350,40 +2538,75 @@ class App:
         chk_imp.pack(side="left", padx=5)
 
         def abrir_preview_recibo():
+            if getattr(self, "_registrando_venta", False):
+                return
             metodo = metodo_var.get()
             monto_ef = entry_efectivo.get_value() if metodo == "Efectivo" else (0 if metodo == "Fiado" else total_val)
             cid = None
             if metodo == "Fiado":
                 sel = combo_clientes.get()
-                if sel:
-                    cid = sel.split(" - ")[0].strip()
+                if not sel:
+                    messagebox.showerror("Error", "Debe seleccionar un cliente registrado para fiado antes de la vista previa.", parent=ventana)
+                    return
+                cid = sel.split(" - ")[0].strip()
+                cli_info = clientes_fiado_map.get(cid)
+                if cli_info:
+                    lim = float(cli_info.get("limite_credito") or 0.0)
+                    saldo_act = float(cli_info.get("saldo_pendiente") or 0.0)
+                    if lim > 0 and (saldo_act + total_val > lim) and not self._exceso_credito_autorizado:
+                        if not self.autorizar_exceso_credito_admin(
+                            parent=ventana,
+                            cliente_nombre=cli_info.get("nombre", "Cliente"),
+                            lim=lim,
+                            saldo=saldo_act,
+                            total_val=total_val,
+                            exceso=(saldo_act + total_val) - lim,
+                        ):
+                            return
+                    doc_of = str(cli_info.get("documento") or "").strip()
+                    if doc_of:
+                        self.documento.set(doc_of)
+                    self.cliente_id_seleccionado = int(cid) if cid.isdigit() else None
             self._abrir_dialogo_recibo(ventana, monto_ef, total_val, metodo, cid)
 
         def completar():
+            if getattr(self, "_registrando_venta", False):
+                return
             metodo = metodo_var.get()
             imprimir_ticket = bool(imprimir_ticket_var.get())
+            texto_btn_prev = btn_confirmar.cget("text")
             try:
                 if metodo == "Efectivo":
                     monto_ef = entry_efectivo.get_value()
-                    if monto_ef >= total_val:
-                        ventana.destroy()
-                        self.procesar_venta_completa(
-                            recibido=monto_ef,
-                            total=total_val,
-                            metodo_pago="Efectivo",
-                            id_cliente=None,
-                            imprimir_recibo=imprimir_ticket
+                    if monto_ef < total_val:
+                        messagebox.showwarning(
+                            "Efectivo insuficiente",
+                            f"El monto recibido (${monto_ef:,.0f}) es menor al total a pagar (${total_val:,.0f}).",
+                            parent=ventana,
                         )
-                    else:
-                        messagebox.showwarning("Efectivo insuficiente", f"El monto recibido (${monto_ef:,.0f}) es menor al total a pagar (${total_val:,.0f}).", parent=ventana)
+                        return
+                    self.procesar_venta_completa(
+                        recibido=monto_ef,
+                        total=total_val,
+                        metodo_pago="Efectivo",
+                        id_cliente=self.cliente_id_seleccionado,
+                        imprimir_recibo=imprimir_ticket,
+                        dialogo_pago=ventana,
+                        botones_modal=[btn_confirmar, btn_preview, btn_cancelar],
+                        boton_principal_modal=btn_confirmar,
+                        texto_original_modal=texto_btn_prev,
+                    )
                 elif metodo == "Transferencia":
-                    ventana.destroy()
                     self.procesar_venta_completa(
                         recibido=total_val,
                         total=total_val,
                         metodo_pago="Transferencia",
-                        id_cliente=None,
-                        imprimir_recibo=imprimir_ticket
+                        id_cliente=self.cliente_id_seleccionado,
+                        imprimir_recibo=imprimir_ticket,
+                        dialogo_pago=ventana,
+                        botones_modal=[btn_confirmar, btn_preview, btn_cancelar],
+                        boton_principal_modal=btn_confirmar,
+                        texto_original_modal=texto_btn_prev,
                     )
                 elif metodo == "Fiado":
                     seleccion = combo_clientes.get()
@@ -2393,15 +2616,18 @@ class App:
                     cid_str = seleccion.split(" - ")[0].strip()
                     cli_info = clientes_fiado_map.get(cid_str)
                     if not cli_info:
-                        messagebox.showerror("Error", f"No se pudo cargar la información del cliente #{cid_str}.", parent=ventana)
+                        messagebox.showerror("Error", f"No se pudo cargar la información central del cliente #{cid_str}.", parent=ventana)
                         return
-                    
+                    if not cli_info.get("permite_fiado", True):
+                        messagebox.showerror("Crédito no habilitado", f"El cliente '{cli_info.get('nombre')}' no tiene habilitado el permiso para comprar fiado.", parent=ventana)
+                        return
+
                     # Validar Límite de Crédito
                     lim = float(cli_info.get("limite_credito") or 0.0)
                     saldo_act = float(cli_info.get("saldo_pendiente") or 0.0)
                     nuevo_saldo = saldo_act + total_val
-                    
-                    if lim > 0 and (nuevo_saldo > lim):
+
+                    if lim > 0 and (nuevo_saldo > lim) and not self._exceso_credito_autorizado:
                         exceso = nuevo_saldo - lim
                         if not self.autorizar_exceso_credito_admin(
                             parent=ventana,
@@ -2409,23 +2635,27 @@ class App:
                             lim=lim,
                             saldo=saldo_act,
                             total_val=total_val,
-                            exceso=exceso
+                            exceso=exceso,
                         ):
                             return
 
-                    # Auto-rellenar y vincular el documento del cliente seleccionado
+                    # Auto-rellenar y vincular el documento e ID oficial del cliente seleccionado
                     doc_oficial = str(cli_info.get("documento") or "").strip()
                     if doc_oficial:
-                        self.documento.delete(0, tk.END)
-                        self.documento.insert(0, doc_oficial)
+                        self.documento.set(doc_oficial)
+                    self.cliente_id_seleccionado = int(cid_str) if cid_str.isdigit() else None
 
-                    ventana.destroy()
                     self.procesar_venta_completa(
                         recibido=0.0,
                         total=total_val,
                         metodo_pago="Fiado",
-                        id_cliente=cid_str,
-                        imprimir_recibo=imprimir_ticket
+                        id_cliente=int(cid_str),
+                        imprimir_recibo=imprimir_ticket,
+                        nombre_cliente_display=cli_info.get("nombre") or doc_oficial,
+                        dialogo_pago=ventana,
+                        botones_modal=[btn_confirmar, btn_preview, btn_cancelar],
+                        boton_principal_modal=btn_confirmar,
+                        texto_original_modal=texto_btn_prev,
                     )
             except (tk.TclError, ValueError) as err:
                 messagebox.showerror("Error", f"Error en los datos ingresados: {err}", parent=ventana)
@@ -2436,7 +2666,14 @@ class App:
         btn_preview = crear_boton(footer_p, "Vista Previa", command=abrir_preview_recibo, tipo="info", icono="🧾", tam_fuente=10)
         btn_preview.pack(side="right", padx=5)
 
-        btn_cancelar = crear_boton(footer_p, "Cancelar", command=ventana.destroy, tipo="secondary", icono="❌", tam_fuente=10)
+        btn_cancelar = crear_boton(
+            footer_p,
+            "Cancelar",
+            command=lambda: None if getattr(self, "_registrando_venta", False) else ventana.destroy(),
+            tipo="secondary",
+            icono="❌",
+            tam_fuente=10,
+        )
         btn_cancelar.pack(side="right", padx=5)
 
         # 3. CUERPO CENTRAL (Selección de método y campos)
@@ -2446,24 +2683,24 @@ class App:
         metodo_var = tk.StringVar(value="Efectivo")
 
         tk.Label(body_p, text="Seleccione Método de Pago:", font=("Segoe UI", 11, "bold"), bg=t_p["bg_app"], fg=t_p["text_main"]).pack(anchor="w", pady=(0, 5))
-        
+
         frame_metodos = tk.Frame(body_p, bg=t_p["bg_app"])
         frame_metodos.pack(fill="x", pady=5)
-        
-        tk.Radiobutton(frame_metodos, text="💵 Efectivo", variable=metodo_var, value="Efectivo", 
+
+        tk.Radiobutton(frame_metodos, text="💵 Efectivo", variable=metodo_var, value="Efectivo",
                        bg=t_p["bg_app"], fg=t_p["text_main"], selectcolor=t_p["bg_surface_alt"], activebackground=t_p["bg_app"], activeforeground=t_p["text_main"], font=("Segoe UI", 11)).pack(anchor="w", pady=2)
-        tk.Radiobutton(frame_metodos, text="💳 Transferencia", variable=metodo_var, value="Transferencia", 
+        tk.Radiobutton(frame_metodos, text="💳 Transferencia", variable=metodo_var, value="Transferencia",
                        bg=t_p["bg_app"], fg=t_p["text_main"], selectcolor=t_p["bg_surface_alt"], activebackground=t_p["bg_app"], activeforeground=t_p["text_main"], font=("Segoe UI", 11)).pack(anchor="w", pady=2)
-        tk.Radiobutton(frame_metodos, text="📝 Fiado (Crédito)", variable=metodo_var, value="Fiado", 
+        tk.Radiobutton(frame_metodos, text="📝 Fiado (Crédito)", variable=metodo_var, value="Fiado",
                        bg=t_p["bg_app"], fg=t_p["text_main"], selectcolor=t_p["bg_surface_alt"], activebackground=t_p["bg_app"], activeforeground=t_p["text_main"], font=("Segoe UI", 11)).pack(anchor="w", pady=2)
-        
+
         frame_dinamico = tk.Frame(body_p, bg=t_p["bg_surface"], bd=1, relief="solid", padx=10, pady=10)
         frame_dinamico.pack(fill="both", expand=True, pady=10)
-        
+
         # Efectivo widgets
         lbl_efectivo = tk.Label(frame_dinamico, text="💵 Efectivo recibido:", font=("Segoe UI", 11, "bold"), bg=t_p["bg_surface"], fg=t_p["text_main"])
         lbl_cambio = tk.Label(frame_dinamico, text="💰 Cambio: $ 0 COP", font=("Segoe UI", 12, "bold"), bg=t_p["bg_surface"], fg="#059669")
-        
+
         def al_cambiar_efectivo(val_recibido):
             cambio = max(0, val_recibido - total_val)
             lbl_cambio.config(text=f"💰 Cambio: {formatear_cop(cambio)} COP")
@@ -2482,11 +2719,11 @@ class App:
             bd=1
         )
         entry_efectivo.bind("<Return>", lambda e: completar())
-        
+
         # Fiado widgets & Card de Límites de Crédito
-        lbl_fiado = tk.Label(frame_dinamico, text="Cliente Autorizado para Fiado:", font=("Segoe UI", 10, "bold"), bg=t_p["bg_surface"], fg=t_p["text_main"])
-        combo_clientes = ttk.Combobox(frame_dinamico, state="readonly", width=34, font=("Segoe UI", 10))
-        
+        lbl_fiado = tk.Label(frame_dinamico, text="Cliente Autorizado para Fiado (Servidor Central):", font=("Segoe UI", 10, "bold"), bg=t_p["bg_surface"], fg=t_p["text_main"])
+        combo_clientes = ttk.Combobox(frame_dinamico, state="readonly", width=36, font=("Segoe UI", 10))
+
         card_credito = tk.Frame(frame_dinamico, bg=t_p["bg_card"], bd=1, relief="solid", padx=12, pady=8)
         lbl_cc_cli = tk.Label(card_credito, text="Cliente: —", font=("Segoe UI", 9, "bold"), bg=t_p["bg_card"], fg=t_p["text_main"])
         lbl_cc_cli.pack(anchor="w", pady=1)
@@ -2505,12 +2742,12 @@ class App:
             c_info = clientes_fiado_map.get(cid_str)
             if not c_info:
                 return
-            
-            # Sincronizar documento oficial en la venta principal
-            doc = c_info.get("documento") or ""
+
+            self._exceso_credito_autorizado = False
+            self.cliente_id_seleccionado = int(cid_str) if cid_str.isdigit() else None
+            doc = str(c_info.get("documento") or "").strip()
             if doc:
-                self.documento.delete(0, tk.END)
-                self.documento.insert(0, doc)
+                self.documento.set(doc)
 
             lim = float(c_info.get("limite_credito") or 0.0)
             saldo = float(c_info.get("saldo_pendiente") or 0.0)
@@ -2519,24 +2756,29 @@ class App:
 
             lbl_cc_cli.config(text=f"👤 {c_info.get('nombre')} | Doc: {doc or '—'} | Tel: {c_info.get('telefono') or '—'}")
             lbl_cc_limites.config(text=f"Límite Total: ${lim:,.0f} COP | Saldo Pendiente: ${saldo:,.0f} COP")
-            lbl_cc_cupo.config(text=f"Cupo Disponible: {cupo_str}", fg=t_p["btn_success_bg"] if (lim == 0 or cupo >= total_val) else t_p["btn_danger_bg"])
+            lbl_cc_cupo.config(
+                text=f"Cupo Disponible: {cupo_str}",
+                fg=t_p["btn_success_bg"] if (lim == 0 or cupo >= total_val) else t_p["btn_danger_bg"],
+            )
 
             if lim > 0 and (saldo + total_val > lim):
                 exceso = (saldo + total_val) - lim
                 lbl_cc_alerta.config(text=f"⚠️ VENTA SUPERA EL LÍMITE POR ${exceso:,.0f} COP", fg="#DC2626")
-                btn_confirmar.config(text="⚠️ Cupo Excedido")
+                btn_confirmar.config(text="⚠️ Autorizar y Confirmar")
             else:
                 lbl_cc_alerta.config(text="✅ Cupo disponible para procesar la venta", fg="#059669")
-                btn_confirmar.config(text="Confirmar Venta")
+                btn_confirmar.config(text="✅ Confirmar Venta")
 
         combo_clientes.bind("<<ComboboxSelected>>", al_seleccionar_cliente)
-        
+
         def actualizar_vista(*args):
+            if getattr(self, "_registrando_venta", False):
+                return
             for w in frame_dinamico.winfo_children():
                 w.pack_forget()
-                
+
             metodo = metodo_var.get()
-            btn_confirmar.config(text="Confirmar Venta")
+            btn_confirmar.config(text="✅ Confirmar Venta")
             if metodo == "Efectivo":
                 lbl_efectivo.pack(pady=(4, 2))
                 entry_efectivo.pack(pady=4)
@@ -2546,141 +2788,78 @@ class App:
                 lbl_fiado.pack(pady=(4, 2))
                 combo_clientes.pack(pady=(2, 6))
                 card_credito.pack(fill="x", pady=6)
-                
+
                 clientes_fiado_map.clear()
                 valores_fiado = []
-                seen_docs = set()
-                seen_ids = set()
+                doc_previo = self.documento.get().strip()
+                idx_preseleccion = 0
 
-                # 1. Cargar desde base de datos local SQLite primero (Offline-First)
-                try:
-                    conn_c = conectar_db()
-                    if conn_c:
-                        cur_c = conn_c.cursor()
-                        cur_c.execute("""
-                            SELECT id, nombre, cedula, limite_credito, saldo_pendiente, telefono, permite_fiado, estado 
-                            FROM clientes 
-                            WHERE (estado IS NULL OR LOWER(estado) != 'inactivo')
-                            ORDER BY nombre ASC
-                        """)
-                        for r in cur_c.fetchall():
-                            cid = str(r[0])
-                            nom = str(r[1] or "").strip()
-                            doc = str(r[2] or "").strip()
-                            lim = float(r[3] or 0.0)
-                            sal = float(r[4] or 0.0)
-                            tel = str(r[5] or "").strip()
-                            clientes_fiado_map[cid] = {
-                                "id": cid,
-                                "nombre": nom,
-                                "documento": doc,
-                                "limite_credito": lim,
-                                "saldo_pendiente": sal,
-                                "telefono": tel
-                            }
-                            if doc:
-                                seen_docs.add(doc)
-                            seen_ids.add(cid)
-                            valores_fiado.append(f"{cid} - {nom} ({doc or 'Sin Doc'})")
-                        conn_c.close()
-                except Exception as e_sql:
-                    print(f"Aviso cargando clientes Fiado SQLite: {e_sql}")
-
-                # 2. Sincronizar y enriquecer desde Servidor API Central si está disponible
+                # Consultar exclusivamente al Servidor Central (/clientes)
                 try:
                     resp = api.get("/clientes")
                     if resp.status_code == 200:
                         clientes_api = resp.json()
-                        conn_sync = conectar_db()
-                        cur_sync = conn_sync.cursor() if conn_sync else None
-
                         for c in clientes_api:
+                            est = str(c.get("estado", "Activo") or "Activo").lower()
                             permite = c.get("permite_fiado") in (True, 1, "1", "true", "True", "t", "T")
-                            deuda_val = float(c.get("saldo_pendiente") or c.get("deuda_total") or 0.0)
-                            est = str(c.get("estado", "Activo")).lower()
-
-                            # Mostrar todos los clientes activos del sistema
-                            if est != "inactivo":
+                            if est != "inactivo" and permite:
                                 cid = str(c.get("id"))
                                 doc = str(c.get("documento") or c.get("cedula") or "").strip()
                                 nom = str(c.get("nombre") or "").strip()
                                 lim = float(c.get("limite_credito") or 0.0)
-                                sal = deuda_val
+                                sal = float(c.get("deuda_total") or c.get("saldo_pendiente") or 0.0)
                                 tel = str(c.get("telefono") or "").strip()
-
-                                # Persistir en SQLite local para disponibilidad offline permanente
-                                if cur_sync and doc:
-                                    try:
-                                        cur_sync.execute("SELECT id FROM clientes WHERE cedula = ?", (doc,))
-                                        r_sync = cur_sync.fetchone()
-                                        if r_sync:
-                                            cur_sync.execute("""
-                                                UPDATE clientes 
-                                                SET nombre = ?, telefono = ?, limite_credito = ?, saldo_pendiente = ?, permite_fiado = 1, estado = 'Activo'
-                                                WHERE cedula = ?
-                                            """, (nom, tel, lim, sal, doc))
-                                        else:
-                                            cur_sync.execute("""
-                                                INSERT INTO clientes (cedula, nombre, telefono, limite_credito, permite_fiado, saldo_pendiente, estado, fecha_registro)
-                                                VALUES (?, ?, ?, ?, 1, ?, 'Activo', ?)
-                                            """, (doc, nom, tel, lim, sal, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                                    except Exception:
-                                        pass
-
-                                # Actualizar o insertar en el mapa de fiados
-                                if doc and doc in seen_docs:
-                                    for key, val in clientes_fiado_map.items():
-                                        if val.get("documento") == doc:
-                                            val["saldo_pendiente"] = sal
-                                            val["limite_credito"] = lim
-                                            val["nombre"] = nom
-                                            break
-                                elif cid not in seen_ids:
-                                    clientes_fiado_map[cid] = {
-                                        "id": cid,
-                                        "nombre": nom,
-                                        "documento": doc,
-                                        "limite_credito": lim,
-                                        "saldo_pendiente": sal,
-                                        "telefono": tel
-                                    }
-                                    if doc:
-                                        seen_docs.add(doc)
-                                    seen_ids.add(cid)
-                                    valores_fiado.append(f"{cid} - {nom} ({doc or 'Sin Doc'})")
-
-                        if conn_sync:
-                            conn_sync.commit()
-                            conn_sync.close()
+                                clientes_fiado_map[cid] = {
+                                    "id": cid,
+                                    "nombre": nom,
+                                    "documento": doc,
+                                    "limite_credito": lim,
+                                    "saldo_pendiente": sal,
+                                    "telefono": tel,
+                                    "permite_fiado": permite,
+                                }
+                                etiqueta = f"{cid} - {nom} ({doc or 'Sin Doc'})"
+                                if (doc_previo and doc == doc_previo) or (
+                                    self.cliente_id_seleccionado and str(self.cliente_id_seleccionado) == cid
+                                ):
+                                    idx_preseleccion = len(valores_fiado)
+                                valores_fiado.append(etiqueta)
+                    else:
+                        lbl_cc_cli.config(text="⚠️ Error consultando clientes en el servidor central.")
                 except Exception as e_api:
-                    print(f"Aviso cargando clientes Fiado API: {e_api}")
+                    print(f"Error consultando clientes Fiado en servidor central: {e_api}")
 
-                combo_clientes['values'] = valores_fiado
+                combo_clientes["values"] = valores_fiado
                 if valores_fiado:
-                    combo_clientes.current(0)
+                    combo_clientes.current(idx_preseleccion)
                     al_seleccionar_cliente()
                 else:
-                    lbl_cc_cli.config(text="No hay clientes habilitados para fiado.")
-                    lbl_cc_limites.config(text="Cree clientes con permiso de crédito en el módulo Clientes y Fiado.")
+                    lbl_cc_cli.config(text="No hay clientes habilitados para fiado en el servidor central.")
+                    lbl_cc_limites.config(text="Cree o autorice clientes con crédito en el módulo Clientes y Fiado.")
                     lbl_cc_cupo.config(text="")
                     lbl_cc_alerta.config(text="")
             elif metodo == "Transferencia":
-                tk.Label(frame_dinamico, text="📱 Pago inmediato por Transferencia\n(Nequi, Daviplata, Bancolombia)", 
-                         font=("Segoe UI", 10, "italic"), bg="#FFE4E1", fg="#2D3436").pack(pady=15)
-        
+                tk.Label(
+                    frame_dinamico,
+                    text="📱 Pago inmediato por Transferencia\n(Nequi, Daviplata, Bancolombia)",
+                    font=("Segoe UI", 10, "italic"),
+                    bg="#FFE4E1",
+                    fg="#2D3436",
+                ).pack(pady=15)
+
         metodo_var.trace_add("write", actualizar_vista)
         actualizar_vista()
-        ventana.bind('<Escape>', lambda e: ventana.destroy())
+        ventana.bind("<Escape>", lambda e: None if getattr(self, "_registrando_venta", False) else ventana.destroy())
+        ventana.protocol("WM_DELETE_WINDOW", lambda: None if getattr(self, "_registrando_venta", False) else ventana.destroy())
 
     def autorizar_exceso_credito_admin(self, parent, cliente_nombre, lim, saldo, total_val, exceso) -> bool:
         """
-        Permite validar excepciones de crédito cuando una venta fiada supera el cupo asignado.
-        Si el usuario en sesión es Administrador, solicita confirmación explícita.
-        Si es Operario/Vendedor, solicita la clave de un Administrador para autorizar la excepción.
+        Permite validar excepciones de crédito cuando una venta fiada supera el cupo asignado
+        autenticando contra el Servidor Central (`/auth/login`) sin sobrescribir la sesión activa.
         """
-        es_admin_actual = getattr(self, 'es_admin', False) or (getattr(self, 'rol', "") or "").lower() == "administrador"
+        es_admin_actual = getattr(self, "es_admin", False) or (getattr(self, "rol", "") or "").lower() in ("administrador", "admin", "gerente")
         if es_admin_actual:
-            return messagebox.askyesno(
+            autorizado = messagebox.askyesno(
                 "⚠️ Límite de Crédito Excedido — Autorización Administrador",
                 f"El cliente '{cliente_nombre}' ha excedido su límite de crédito:\n\n"
                 f"• Límite total asignado: ${lim:,.0f} COP\n"
@@ -2689,40 +2868,53 @@ class App:
                 f"• Nuevo saldo proyectado: ${saldo + total_val:,.0f} COP\n"
                 f"• Exceso sobre el límite: ${exceso:,.0f} COP\n\n"
                 f"Como Administrador del sistema, ¿desea autorizar excepcionalmente esta venta a crédito?",
-                parent=parent
+                parent=parent,
             )
-        else:
-            from tkinter import simpledialog
-            import hashlib
-            pwd = simpledialog.askstring(
-                "Autorización Requerida",
-                f"⚠️ Venta supera el cupo de crédito por ${exceso:,.0f} COP.\n\n"
-                f"Requiere autorización de Administrador.\n"
-                f"Ingrese contraseña de Administrador:",
-                show="*",
-                parent=parent
-            )
-            if not pwd:
-                return False
-            try:
-                conn_u = sqlite3.connect("database/usuarios.db")
-                cur_u = conn_u.cursor()
-                cur_u.execute("SELECT password FROM usuarios WHERE LOWER(rol) = 'administrador' LIMIT 1")
-                row_u = cur_u.fetchone()
-                conn_u.close()
-                if row_u:
-                    pwd_hash = row_u[0]
-                    h = hashlib.sha256(pwd.encode('utf-8')).hexdigest()
-                    if pwd == pwd_hash or h == pwd_hash or pwd == "admin123":
-                        messagebox.showinfo("Autorizado", "Excepción de crédito autorizada por Administrador.", parent=parent)
-                        return True
-            except Exception as e:
-                print(f"Aviso validando clave admin para fiado: {e}")
-            messagebox.showerror("Autorización Denegada", "Contraseña de Administrador incorrecta.", parent=parent)
+            if autorizado:
+                self._exceso_credito_autorizado = True
+            return bool(autorizado)
+
+        from tkinter import simpledialog
+        usuario_adm = simpledialog.askstring(
+            "Autorización Administrador Requerida",
+            f"⚠️ La venta supera el cupo de crédito por ${exceso:,.0f} COP.\n\n"
+            f"Ingrese el usuario Administrador del servidor central:",
+            initialvalue="admin",
+            parent=parent,
+        )
+        if not usuario_adm:
             return False
+        pwd = simpledialog.askstring(
+            "Autorización Administrador Requerida",
+            f"Ingrese la contraseña del Administrador '{usuario_adm.strip()}':",
+            show="*",
+            parent=parent,
+        )
+        if not pwd:
+            return False
+        try:
+            resp_auth = httpx.post(
+                f"{api.base_url}/auth/login",
+                data={"username": usuario_adm.strip(), "password": pwd},
+                timeout=6.0,
+            )
+            if resp_auth.status_code == 200:
+                datos_auth = resp_auth.json()
+                rol_auth = str((datos_auth.get("usuario") or {}).get("rol") or "").strip().lower()
+                if rol_auth in ("administrador", "admin", "gerente"):
+                    self._exceso_credito_autorizado = True
+                    messagebox.showinfo("Autorizado", "Excepción de crédito autorizada en el servidor central.", parent=parent)
+                    return True
+                messagebox.showerror("Autorización Denegada", "El usuario ingresado no posee rol de Administrador.", parent=parent)
+                return False
+        except Exception as e:
+            messagebox.showerror("Error de Red", f"No se pudo verificar credenciales con el servidor central:\n{e}", parent=parent)
+            return False
+        messagebox.showerror("Autorización Denegada", "Credenciales de Administrador incorrectas.", parent=parent)
+        return False
 
     def _abrir_dialogo_recibo(self, parent, recibido, total, metodo_pago, id_cliente):
-        """Confirma impresión y muestra el comprobante completo (con logo, 58mm/80mm/A4 y PDF) después del pago."""
+        """Confirma impresión y muestra el comprobante completo (con logo, 58mm/80mm/A4 y PDF) antes del registro."""
         try:
             from receipt_manager import mostrar_dialogo_factura
         except ImportError:
@@ -2742,7 +2934,7 @@ class App:
                 "unidad": "Und",
                 "precio_unitario": precio_u,
                 "descuento": 0.0,
-                "subtotal": precio_u * cant
+                "subtotal": precio_u * cant,
             })
 
         cliente_txt = self.documento.get().strip() or "Consumidor Final"
@@ -2761,45 +2953,79 @@ class App:
             "recibido": float(recibido),
             "cambio": max(0.0, float(recibido) - float(total)) if not es_fiado else 0.0,
             "saldo_pendiente": float(total) if es_fiado else 0.0,
-            "snapshot_negocio": business_mgr.obtener_snapshot_factura()
+            "snapshot_negocio": business_mgr.obtener_snapshot_factura(),
         }
 
-        def al_confirmar(imprimir=False, formato_seleccionado=None):
-            try:
-                if parent and parent.winfo_exists():
-                    parent.destroy()
-            except Exception:
-                pass
+        def al_confirmar(imprimir=False, formato_seleccionado=None, dialog_ref=None, on_error_restore=None):
             self.procesar_venta_completa(
                 recibido,
                 total,
                 metodo_pago,
                 id_cliente=id_cliente,
                 imprimir_recibo=imprimir,
-                formato_impresion=formato_seleccionado
+                formato_impresion=formato_seleccionado,
+                dialogo_pago=parent,
+                dialogo_recibo=dialog_ref,
+                on_error_restore=on_error_restore,
             )
 
         mostrar_dialogo_factura(
             parent,
             datos_preview,
             modo_confirmacion_venta=True,
-            on_confirmar_venta=al_confirmar
+            on_confirmar_venta=al_confirmar,
         )
 
     def _mostrar_vista_previa_recibo(self, parent):
         """Compatibilidad para llamadas antiguas al botón de vista previa."""
         self._abrir_dialogo_recibo(parent, self.total_general.get(), self.total_general.get(), "Efectivo", None)
 
-    def procesar_venta_completa(self, recibido, total, metodo_pago="Efectivo", id_cliente=None, imprimir_recibo=False, formato_impresion=None):
-        """Procesa la venta, guarda el snapshot histórico del negocio e imprime o exporta el comprobante."""
+    def procesar_venta_completa(
+        self,
+        recibido,
+        total,
+        metodo_pago="Efectivo",
+        id_cliente=None,
+        imprimir_recibo=False,
+        formato_impresion=None,
+        nombre_cliente_display=None,
+        dialogo_pago=None,
+        dialogo_recibo=None,
+        botones_modal=None,
+        boton_principal_modal=None,
+        texto_original_modal="Confirmar Venta",
+        on_error_restore=None,
+        ejecutar_sincrono=False,
+    ):
+        """
+        Procesa la venta exclusivamente contra la API Central de forma asíncrona, no bloqueante e idempotente.
+        - Deshabilita inmediatamente el botón y muestra 'Registrando venta...'
+        - Impide dobles clics y envíos duplicados mediante bloqueo en memoria + `idempotency_key` único
+        - Recupera automáticamente la venta mediante `/ventas/por-idempotencia/{key}` ante micro-cortes de red
+        - Nunca registra copias paralelas ni falsos positivos en SQLite local
+        """
+        if getattr(self, "_registrando_venta", False):
+            return None
         if not self.verificar_caja_abierta("registrar o procesar la venta"):
-            return
+            if callable(on_error_restore):
+                on_error_restore()
+            return None
+
+        parent_err = (
+            dialogo_recibo
+            if (dialogo_recibo is not None and getattr(dialogo_recibo, "winfo_exists", lambda: False)())
+            else (
+                dialogo_pago
+                if (dialogo_pago is not None and getattr(dialogo_pago, "winfo_exists", lambda: False)())
+                else self.ventana
+            )
+        )
+
         try:
             business_mgr.recargar()
             snapshot_actual = business_mgr.obtener_snapshot_factura()
             detalles_payload = []
-            
-            # Obtener datos de productos
+
             for i in self.tabla.get_children():
                 codigo = self.tabla.item(i, "text")
                 valores = self.tabla.item(i, "values")
@@ -2807,11 +3033,11 @@ class App:
                 precio_limpio = self.limpiar_precio(valores[1])
                 cantidad = int(float(valores[2]))
                 subtotal = precio_limpio * cantidad
-                
+
                 tipo_item = "Producto"
                 item_id = None
                 costo = 0.0
-                
+
                 for p in self.productos_inventario:
                     cod_p = str(p[0]).strip()
                     cod_c = str(codigo).strip()
@@ -2823,11 +3049,17 @@ class App:
                         if tipo_item == "Servicio" and prov_id and (costo is None or float(costo or 0) <= 0):
                             costo = precio_limpio
                         break
-                
-                if not item_id and not getattr(self, 'orden_id_activa', None):
-                    messagebox.showerror("Error", f"No se pudo identificar el producto o servicio con código '{codigo}'.")
-                    return
-                
+
+                if not item_id and not getattr(self, "orden_id_activa", None):
+                    if callable(on_error_restore):
+                        on_error_restore()
+                    messagebox.showerror(
+                        "Error",
+                        f"No se pudo identificar en el catálogo central el producto o servicio con código '{codigo}'.",
+                        parent=parent_err,
+                    )
+                    return None
+
                 detalles_payload.append({
                     "tipo_item": tipo_item,
                     "item_id": item_id,
@@ -2838,190 +3070,310 @@ class App:
                     "cantidad": cantidad,
                     "descuento": 0.0,
                     "subtotal": subtotal,
-                    "costo_unitario": costo
+                    "costo_unitario": costo,
                 })
 
-            doc_cli = self.documento.get().strip()
-            cliente_id_val = int(id_cliente) if id_cliente and str(id_cliente).isdigit() else (int(doc_cli) if doc_cli and doc_cli.isdigit() else None)
+            if not detalles_payload and not getattr(self, "orden_id_activa", None):
+                if callable(on_error_restore):
+                    on_error_restore()
+                messagebox.showwarning("Carrito Vacío", "Agregue al menos un artículo antes de registrar la venta.", parent=parent_err)
+                return None
 
-            # Para ventas a crédito (Fiado), garantizar que el documento nunca quede vacío ni como 'Consumidor Final'
-            if str(metodo_pago) == "Fiado":
-                if (not doc_cli or doc_cli == "Consumidor Final") and cliente_id_val:
-                    try:
-                        conn_doc = conectar_db()
-                        if conn_doc:
-                            cur_doc = conn_doc.cursor()
-                            cur_doc.execute("SELECT cedula FROM clientes WHERE id = ?", (cliente_id_val,))
-                            row_doc = cur_doc.fetchone()
-                            if row_doc and row_doc[0]:
-                                doc_cli = str(row_doc[0]).strip()
-                            conn_doc.close()
-                    except Exception:
-                        pass
-                if not doc_cli:
-                    doc_cli = f"CLI-{cliente_id_val}"
+            doc_cli = self.documento.get().strip()
+            # NUNCA convertir la cédula/documento en `cliente_id`: usar únicamente el ID real de la tabla `clientes`
+            cliente_id_val = None
+            if id_cliente is not None and str(id_cliente).strip().isdigit():
+                cliente_id_val = int(str(id_cliente).strip())
+            elif getattr(self, "cliente_id_seleccionado", None) and str(self.cliente_id_seleccionado).strip().isdigit():
+                cliente_id_val = int(str(self.cliente_id_seleccionado).strip())
+
+            if str(metodo_pago) == "Fiado" and not cliente_id_val and (not doc_cli or doc_cli == "Consumidor Final"):
+                if callable(on_error_restore):
+                    on_error_restore()
+                messagebox.showerror(
+                    "Cliente Requerido",
+                    "Para registrar una venta FIADA debe seleccionar un cliente válido del servidor central.",
+                    parent=parent_err,
+                )
+                return None
 
             recibido_payload = 0.0 if str(metodo_pago) == "Fiado" else float(recibido)
             cambio_payload = 0.0 if str(metodo_pago) == "Fiado" else max(0.0, float(recibido) - float(total))
+            orden_id_actual = getattr(self, "orden_id_activa", None)
+            autorizado_exceso = bool(getattr(self, "_exceso_credito_autorizado", False))
+            operario_nombre = getattr(self, "user_nombre", None) or getattr(self, "rol", None) or "Administrador"
 
-            if getattr(self, 'orden_id_activa', None):
-                cobro_payload = {
-                    "pagos": [
-                        {
-                            "metodo": metodo_pago,
-                            "monto": total,
-                            "recibido": recibido_payload,
-                            "cambio": cambio_payload
-                        }
-                    ],
-                    "cliente_id": cliente_id_val,
-                    "cliente_documento": doc_cli if doc_cli else None
-                }
-                resp = api.post(f"/ventas/{self.orden_id_activa}/autorizar-pago", json=cobro_payload)
-            else:
-                payload = {
-                    "cliente_id": cliente_id_val,
-                    "cliente_documento": doc_cli if doc_cli else None,
-                    "terminal_id": 1,
-                    "subtotal": total,
-                    "descuento": 0.0,
-                    "total": total,
-                    "pagos": [
-                        {
-                            "metodo": metodo_pago,
-                            "monto": total,
-                            "recibido": recibido_payload,
-                            "cambio": cambio_payload
-                        }
-                    ],
-                    "detalles": detalles_payload
-                }
-                resp = api.post("/ventas", json=payload)
-            
-            operario_nombre = getattr(self, 'user_nombre', None) or getattr(self, 'rol', None) or "Administrador"
-            venta_exitosa = False
-            numero_factura = self.factura_num
-            id_local = None
-            cambio_calc = max(0.0, float(recibido) - float(total))
+            fingerprint = self._calcular_fingerprint_carrito(metodo_pago, total, cliente_id_val, doc_cli)
+            idem_key = self._obtener_idempotency_key_venta(fingerprint)
 
-            if resp.status_code in (200, 201):
-                venta_respuesta = resp.json()
-                numero_factura = venta_respuesta.get("numero", self.factura_num)
-                id_local = guardar_venta_sqlite(
-                    doc_cli, total, metodo_pago, detalles_payload,
-                    operario_nombre, cliente_id=cliente_id_val,
-                    recibido=recibido, cambio=cambio_calc,
-                    numero_factura=numero_factura, snapshot_negocio=snapshot_actual
-                )
-                venta_exitosa = True
-            else:
-                if getattr(api, "es_modo_cliente", lambda: False)():
+            # Bloqueo inmediato de interfaz y feedback visual 'Registrando venta...'
+            self._registrando_venta = True
+            try:
+                if hasattr(self, "btn_accion_principal") and self.btn_accion_principal and self.btn_accion_principal.winfo_exists():
+                    self.btn_accion_principal.config(state="disabled", text="⏳ Registrando venta...")
+                for b in botones_modal or []:
+                    if b is not None and b.winfo_exists():
+                        b.config(state="disabled")
+                if boton_principal_modal is not None and boton_principal_modal.winfo_exists():
+                    boton_principal_modal.config(state="disabled", text="⏳ Registrando venta...")
+                self.ventana.update_idletasks()
+            except Exception:
+                pass
+
+            def _restaurar_ui_error():
+                self._registrando_venta = False
+                self._restaurar_boton_principal_pos()
+                try:
+                    for b in botones_modal or []:
+                        if b is not None and b.winfo_exists():
+                            b.config(state="normal")
+                    if boton_principal_modal is not None and boton_principal_modal.winfo_exists():
+                        boton_principal_modal.config(state="normal", text=texto_original_modal)
+                except Exception:
+                    pass
+                if callable(on_error_restore):
                     try:
-                        detalle_err = resp.json().get("detail", "Sin conexión con el servidor")
-                    except Exception:
-                        detalle_err = "Sin conexión con el servidor"
-                    messagebox.showerror(
-                        "Error de Conexión con el Servidor Central",
-                        f"No se pudo registrar la venta en el Servidor Principal ({api.base_url}):\n\n"
-                        f"• Motivo: {detalle_err}\n\n"
-                        "Por protección contable, una Caja Secundaria no guarda ventas en base de datos local aislada.\n"
-                        "Verifica la conexión de red e intenta nuevamente.",
-                        parent=self.ventana
-                    )
-                    return
-                id_local = guardar_venta_sqlite(
-                    doc_cli, total, metodo_pago, detalles_payload,
-                    operario_nombre, cliente_id=cliente_id_val,
-                    recibido=recibido, cambio=cambio_calc,
-                    numero_factura="", snapshot_negocio=snapshot_actual
-                )
-                if id_local:
-                    pref = snapshot_actual.get("prefijo_comprobante", "") or "FAC-"
-                    numero_factura = f"{pref}{id_local:05d}"
-                    venta_exitosa = True
-
-            if venta_exitosa:
-                msg_asistencia = self.confirmar_asistencia_y_recaudo_vendedor(
-                    operario_nombre, total, detalles_payload,
-                    id_venta=id_local, metodo_pago=metodo_pago
-                )
-
-                datos_venta = {
-                    'id_venta': id_local,
-                    'factura': numero_factura,
-                    'fecha': datetime.now().strftime('%Y-%m-%d'),
-                    'hora': datetime.now().strftime('%H:%M:%S'),
-                    'cliente': self.documento.get().strip() or 'Consumidor Final',
-                    'productos': [(d["item_nombre"], d["precio_vendido"], d["cantidad"]) for d in detalles_payload],
-                    'items': detalles_payload,
-                    'total': total,
-                    'metodo_pago': metodo_pago,
-                    'recibido': recibido,
-                    'cambio': cambio_calc,
-                    'saldo_pendiente': float(total) if str(metodo_pago) == "Fiado" else 0.0,
-                    'vendedor': operario_nombre,
-                    'snapshot_negocio': snapshot_actual
-                }
-
-                if self.printer_manager:
-                    self.printer_manager.ultima_factura = datos_venta
-
-                aviso_impresion = ""
-                if imprimir_recibo:
-                    cfg_over = {"formato_papel": formato_impresion} if formato_impresion else None
-                    if self.printer_manager:
-                        imp_ok = self.printer_manager.imprimir_factura(datos_venta, config_override=cfg_over)
-                        if imp_ok and self.impresora_conectada:
-                            self.printer_manager.abrir_caja_registradora()
-                        elif not imp_ok:
-                            aviso_impresion = "\n\n⚠️ Nota: No se detectó impresora física activa; puedes reimprimir o exportar el PDF desde Gestión de Ventas."
-                    else:
-                        try:
-                            from receipt_manager import imprimir_factura_unificada
-                        except ImportError:
-                            from interface.receipt_manager import imprimir_factura_unificada
-                        imp_ok, _ = imprimir_factura_unificada(datos_venta, config_override=cfg_over)
-                        if not imp_ok:
-                            aviso_impresion = "\n\n⚠️ Nota: No se detectó impresora física activa; puedes reimprimir o exportar el PDF desde Gestión de Ventas."
-                
-                if not imprimir_recibo and metodo_pago == "Efectivo":
-                    try:
-                        try:
-                            from interface.receipt_manager import pulsar_apertura_cajon
-                        except ImportError:
-                            from receipt_manager import pulsar_apertura_cajon
-                        pulsar_apertura_cajon()
+                        on_error_restore()
                     except Exception:
                         pass
 
-                extra_info = f"\n\n{msg_asistencia}" if msg_asistencia else ""
-                extra_info += aviso_impresion
-                if metodo_pago == "Efectivo":
-                    vuelto = recibido - total
-                    messagebox.showinfo("✅ Pago Completado", f"💖 VENTA COMPLETADA 💖\n🧾 Comprobante: {numero_factura}\n💸 Total: {self.formato_peso(total)}\n💵 Recibido: {self.formato_peso(recibido)}\n💰 Cambio: {self.formato_peso(vuelto)}{extra_info}\n🌸 ¡Gracias! 🌸", parent=self.ventana)
-                elif metodo_pago == "Fiado":
-                    messagebox.showinfo("✅ Pago Completado", f"💖 VENTA FIADA 💖\n🧾 Comprobante: {numero_factura}\n💸 Saldo pendiente: {self.formato_peso(total)}{extra_info}\n🌸 ¡Gracias! 🌸", parent=self.ventana)
+            def _ejecutar_peticion_http():
+                term_id = api.sincronizar_terminal_id() or api.terminal_id or 1
+                if orden_id_actual:
+                    cobro_payload = {
+                        "idempotency_key": idem_key,
+                        "pagos": [
+                            {
+                                "metodo": metodo_pago,
+                                "monto": total,
+                                "recibido": recibido_payload,
+                                "cambio": cambio_payload,
+                            }
+                        ],
+                        "cliente_id": cliente_id_val,
+                        "cliente_documento": doc_cli if doc_cli else None,
+                        "autorizado_exceso_credito": autorizado_exceso,
+                        "snapshot_negocio": snapshot_actual,
+                    }
+                    resp_http = api.post(f"/ventas/{orden_id_actual}/autorizar-pago", json=cobro_payload, timeout=12.0)
                 else:
-                    messagebox.showinfo("✅ Pago Completado", f"💖 VENTA POR TRANSFERENCIA 💖\n🧾 Comprobante: {numero_factura}\n💸 Total: {self.formato_peso(total)}{extra_info}\n🌸 ¡Gracias! 🌸", parent=self.ventana)
-                
-                if getattr(self, 'orden_id_activa', None):
-                    self.cancelar_orden_activa()
-                else:
-                    self.limpiar_formulario()
+                    payload = {
+                        "idempotency_key": idem_key,
+                        "cliente_id": cliente_id_val,
+                        "cliente_documento": doc_cli if doc_cli else None,
+                        "terminal_id": term_id,
+                        "subtotal": total,
+                        "descuento": 0.0,
+                        "total": total,
+                        "pagos": [
+                            {
+                                "metodo": metodo_pago,
+                                "monto": total,
+                                "recibido": recibido_payload,
+                                "cambio": cambio_payload,
+                            }
+                        ],
+                        "detalles": detalles_payload,
+                        "autorizado_exceso_credito": autorizado_exceso,
+                        "snapshot_negocio": snapshot_actual,
+                    }
+                    resp_http = api.post("/ventas", json=payload, timeout=12.0)
 
-                self.productos_inventario = self.obtener_productos()
-                self.actualizar_catalogo_live()
-                self.actualizar_indicadores_empleado_pos()
-                if self.es_admin:
-                    self.actualizar_ventas_operarios()
-            else:
+                # Recuperación segura ante desconexión o timeout después de haber enviado la solicitud
+                if getattr(resp_http, "is_network_error", False):
+                    time.sleep(0.8)
+                    if api.esta_disponible(forzar=True):
+                        resp_verif = api.get(f"/ventas/por-idempotencia/{idem_key}", timeout=6.0)
+                        if resp_verif.status_code == 200:
+                            return resp_verif
+                return resp_http
+
+            def _finalizar_en_ui(resp, exc_bg=None):
+                if exc_bg is not None:
+                    _restaurar_ui_error()
+                    messagebox.showerror(
+                        "Error al registrar la venta",
+                        f"Ocurrió un fallo de comunicación con el servidor central:\n\n{exc_bg}\n\n"
+                        f"Puede presionar nuevamente 'Confirmar Venta' de forma segura (protección anti-duplicado activa).",
+                        parent=parent_err,
+                    )
+                    return None
+
+                if resp is not None and resp.status_code in (200, 201):
+                    venta_respuesta = resp.json()
+                    id_central = venta_respuesta.get("id")
+                    numero_factura = venta_respuesta.get("numero") or self.factura_num
+                    doc_final = venta_respuesta.get("cliente_documento") or doc_cli or "Consumidor Final"
+                    cli_nombre_final = (
+                        venta_respuesta.get("cliente_nombre")
+                        or nombre_cliente_display
+                        or doc_final
+                    )
+
+                    # Cerrar modales de confirmación/pago primero
+                    for dlg_w in (dialogo_recibo, dialogo_pago):
+                        if dlg_w is not None:
+                            try:
+                                if dlg_w.winfo_exists():
+                                    dlg_w.destroy()
+                            except Exception:
+                                pass
+
+                    self._registrando_venta = False
+                    self._venta_idempotency_key = None
+                    self._venta_fingerprint = None
+                    self._exceso_credito_autorizado = False
+                    self.cliente_id_seleccionado = None
+                    self._restaurar_boton_principal_pos()
+
+                    if orden_id_actual:
+                        self.cancelar_orden_activa()
+                    else:
+                        self.limpiar_formulario()
+
+                    # Actualizar catálogo, existencias, caja e indicadores desde el servidor central
+                    self.productos_inventario = self.obtener_productos()
+                    self.actualizar_catalogo_live()
+                    self.actualizar_estado_caja()
+                    self.actualizar_indicadores_empleado_pos()
+                    if self.es_admin:
+                        self.actualizar_ventas_operarios()
+
+                    msg_asistencia = self.confirmar_asistencia_y_recaudo_vendedor(
+                        operario_nombre,
+                        total,
+                        detalles_payload,
+                        id_venta=id_central,
+                        metodo_pago=metodo_pago,
+                    )
+
+                    datos_venta = {
+                        "id_venta": id_central,
+                        "factura": numero_factura,
+                        "fecha": venta_respuesta.get("fecha") or datetime.now().strftime("%Y-%m-%d"),
+                        "hora": venta_respuesta.get("hora") or datetime.now().strftime("%H:%M:%S"),
+                        "cliente": cli_nombre_final,
+                        "cliente_documento": doc_final if doc_final != "Consumidor Final" else "",
+                        "productos": [(d["item_nombre"], d["precio_vendido"], d["cantidad"]) for d in detalles_payload],
+                        "items": detalles_payload,
+                        "total": total,
+                        "metodo_pago": metodo_pago,
+                        "recibido": recibido_payload,
+                        "cambio": cambio_payload,
+                        "saldo_pendiente": float(total) if str(metodo_pago) == "Fiado" else 0.0,
+                        "vendedor": operario_nombre,
+                        "snapshot_negocio": snapshot_actual,
+                    }
+
+                    if self.printer_manager:
+                        self.printer_manager.ultima_factura = datos_venta
+
+                    aviso_impresion = ""
+                    if imprimir_recibo:
+                        cfg_over = {"formato_papel": formato_impresion} if formato_impresion else None
+                        try:
+                            if self.printer_manager:
+                                imp_ok = self.printer_manager.imprimir_factura(datos_venta, config_override=cfg_over)
+                                if imp_ok and self.impresora_conectada:
+                                    self.printer_manager.abrir_caja_registradora()
+                                elif not imp_ok:
+                                    aviso_impresion = "\n\n⚠️ Nota: No se detectó impresora física activa; puedes reimprimir o exportar PDF en Historial."
+                            else:
+                                try:
+                                    from receipt_manager import imprimir_factura_unificada
+                                except ImportError:
+                                    from interface.receipt_manager import imprimir_factura_unificada
+                                imp_ok, _ = imprimir_factura_unificada(datos_venta, config_override=cfg_over)
+                                if not imp_ok:
+                                    aviso_impresion = "\n\n⚠️ Nota: No se detectó impresora física activa; puedes reimprimir o exportar PDF en Historial."
+                        except Exception as e_imp:
+                            print(f"Aviso en impresión de comprobante: {e_imp}")
+
+                    if not imprimir_recibo and metodo_pago == "Efectivo":
+                        try:
+                            try:
+                                from interface.receipt_manager import pulsar_apertura_cajon
+                            except ImportError:
+                                from receipt_manager import pulsar_apertura_cajon
+                            pulsar_apertura_cajon()
+                        except Exception:
+                            pass
+
+                    extra_info = f"\n\n{msg_asistencia}" if msg_asistencia else ""
+                    extra_info += aviso_impresion
+
+                    if str(metodo_pago) == "Fiado":
+                        messagebox.showinfo(
+                            "✅ Venta Registrada",
+                            f"Venta registrada correctamente. La deuda fue asociada al cliente.\n\n"
+                            f"🧾 Número de venta: {numero_factura} (ID #{id_central})\n"
+                            f"👤 Cliente: {cli_nombre_final} ({doc_final})\n"
+                            f"💸 Saldo pendiente asociado: {self.formato_peso(total)}"
+                            f"{extra_info}",
+                            parent=self.ventana,
+                        )
+                    elif str(metodo_pago) == "Efectivo":
+                        messagebox.showinfo(
+                            "✅ Venta Registrada",
+                            f"Venta registrada correctamente.\n\n"
+                            f"🧾 Número de venta: {numero_factura} (ID #{id_central})\n"
+                            f"💳 Método de pago: Efectivo\n"
+                            f"💸 Total: {self.formato_peso(total)}\n"
+                            f"💵 Recibido: {self.formato_peso(recibido_payload)}\n"
+                            f"💰 Cambio: {self.formato_peso(cambio_payload)}"
+                            f"{extra_info}",
+                            parent=self.ventana,
+                        )
+                    else:
+                        messagebox.showinfo(
+                            "✅ Venta Registrada",
+                            f"Venta registrada correctamente.\n\n"
+                            f"🧾 Número de venta: {numero_factura} (ID #{id_central})\n"
+                            f"💳 Método de pago: {metodo_pago}\n"
+                            f"💸 Total: {self.formato_peso(total)}"
+                            f"{extra_info}",
+                            parent=self.ventana,
+                        )
+                    return venta_respuesta
+
+                # Caso de error real del servidor o pérdida de red
+                _restaurar_ui_error()
                 try:
-                    error_msg = resp.json().get("detail", "Error desconocido")
-                except:
-                    error_msg = resp.text
-                messagebox.showerror("Error al Procesar Venta", f"No se pudo guardar la venta:\n{error_msg}", parent=self.ventana)
+                    error_msg = resp.json().get("detail", "Error desconocido") if resp is not None else "Sin conexión con el servidor"
+                except Exception:
+                    error_msg = resp.text if resp is not None else "Sin conexión con el servidor"
+                messagebox.showerror(
+                    "Error al registrar la venta",
+                    f"No se pudo registrar la venta en el Servidor Central ({api.base_url}):\n\n"
+                    f"• Motivo: {error_msg}\n\n"
+                    f"La venta NO fue duplicada ni guardada localmente. Puede verificar los datos o reintentar de forma segura.",
+                    parent=parent_err,
+                )
+                return None
+
+            if ejecutar_sincrono:
+                try:
+                    r_sync = _ejecutar_peticion_http()
+                    return _finalizar_en_ui(r_sync, None)
+                except Exception as exc_s:
+                    return _finalizar_en_ui(None, exc_s)
+
+            def _worker():
+                try:
+                    r_bg = _ejecutar_peticion_http()
+                    self.ventana.after(0, lambda: _finalizar_en_ui(r_bg, None))
+                except Exception as exc_b:
+                    self.ventana.after(0, lambda: _finalizar_en_ui(None, exc_b))
+
+            threading.Thread(target=_worker, daemon=True).start()
+            return None
         except Exception as e:
-            messagebox.showerror("Error", f"Error procesando venta: {e}", parent=self.ventana)
+            self._registrando_venta = False
+            self._restaurar_boton_principal_pos()
+            if callable(on_error_restore):
+                on_error_restore()
+            messagebox.showerror("Error", f"Error preparando la venta: {e}", parent=parent_err)
+            return None
 
     def confirmar_asistencia_y_recaudo_vendedor(self, operario_nombre, total_venta, detalles_payload, id_venta=None, metodo_pago="Efectivo"):
         """
@@ -3079,12 +3431,18 @@ class App:
 
     def limpiar_formulario(self):
         """Limpia el formulario para una nueva venta"""
+        if getattr(self, "_registrando_venta", False):
+            return
         self.documento.set("")
         self.codigo_entrada.set("")
         self.total_general.set(0.0)
         self.factura_num = datetime.now().strftime("%Y%m%d%H%M%S")
         self.orden_id_activa = None
         self.orden_numero_activa = None
+        self.cliente_id_seleccionado = None
+        self._exceso_credito_autorizado = False
+        self._venta_idempotency_key = None
+        self._venta_fingerprint = None
         if hasattr(self, 'banner_frame'):
             self.banner_frame.pack_forget()
         for item in self.tabla.get_children():

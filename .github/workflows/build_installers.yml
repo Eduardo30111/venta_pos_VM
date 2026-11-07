@@ -75,22 +75,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v4.0.2
-          name: "VmPOS v4.0.2 — Instalador Oficial Windows y macOS"
+          tag_name: v4.1.0
+          name: "VmPOS v4.1.0 — Sincronización Total Multicaja, Fiados Atómicos y Anti-Duplicados"
           body: |
-            ## 🚀 VmPOS v4.0.2 — Instaladores Oficiales
+            ## 🚀 VmPOS v4.1.0 — Instaladores Oficiales Centralizados
 
             ### 📦 Descargas Disponibles:
-            - **Windows (Instalador Setup .exe)**: `VmPOS_Setup_v4.0.2.exe` (Instalación limpia con reemplazo total de runtime, acceso directo y firewall en puerto 8000)
+            - **Windows (Instalador Setup .exe)**: `VmPOS_Setup_v4.1.0.exe` (Instalación limpia, motor FastAPI centralizado, puerto único 8000 y reglas de firewall)
             - **Windows (Portable .zip)**: `VmPOS_Windows_Portable.zip` (Descomprimir y usar de inmediato)
             - **macOS (Instalador DMG)**: `VmPOS_macOS_Instalador.dmg` (Arrastrar a Aplicaciones)
 
             ---
-            ### ✨ Novedades:
-            - Módulo de compras con botones de editar y eliminar compras de inventario.
-            - Corrección de auditoría completa de cuentas por cobrar, abonos y fiados.
-            - Eliminación definitiva limpia de clientes y cuentas de prueba.
-            - Arquitectura cliente-servidor con asistente de red para Windows y macOS.
+            ### ✨ Novedades Principales v4.1.0:
+            - **Sincronización Total Multicaja en Tiempo Real**: Computadoras Windows y Mac comparten la misma base de datos central sin dependencias de SQLite local para catálogo ni ventas.
+            - **Integridad Atómica de Fiados y Cartera**: Asociación automática e inmediata de ventas fiadas con saldo_pendiente del cliente y movimientos de cartera.
+            - **Abonos FIFO Con Trazabilidad Contable**: Los abonos descuentan la deuda en estricto orden cronológico, registran el medio de pago real (Efectivo en gaveta vs Transferencia en banco) y no inflan ventas.
+            - **Prevención de Ventas Duplicadas**: Bloqueo asíncrono con `idempotency_key`, protección contra 40+ clics repetidos, concurrencia simultánea y recuperación ante microcortes de red.
           draft: false
           prerelease: false
           files: |

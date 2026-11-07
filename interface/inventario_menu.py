@@ -90,18 +90,17 @@ def formato_cant(val, unidad=""):
         return f"{val} {unidad}".strip()
 
 def obtener_proveedores_locales():
-    """Consulta proveedores de SQLite local."""
-    conn = conectar_db()
-    if not conn:
-        return []
+    """Consulta proveedores desde el servidor central."""
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT id, nombre FROM proveedores ORDER BY nombre ASC")
-        return cur.fetchall()
+        from client.api_client import api
+        resp = api.get("/proveedores")
+        if resp.status_code == 200:
+            items = resp.json()
+            if isinstance(items, list):
+                return [(p["id"], p["nombre"]) for p in items if p.get("estado", "Activo") != "Inactivo"]
     except Exception:
-        return []
-    finally:
-        conn.close()
+        pass
+    return []
 
 def modal_crear_proveedor_rapido(parent_win, combo_widget=None, var_widget=None):
     """Crea un proveedor rápidamente desde un modal."""
@@ -139,14 +138,12 @@ def modal_crear_proveedor_rapido(parent_win, combo_widget=None, var_widget=None)
         if not nom:
             messagebox.showwarning("Aviso", "El nombre del proveedor es obligatorio.", parent=modal)
             return
-        conn = conectar_db()
-        if conn:
-            try:
-                cur = conn.cursor()
-                cur.execute("INSERT INTO proveedores (nombre, documento_nit, telefono) VALUES (?, ?, ?)", (nom, nit, tel))
-                conn.commit()
-                nuevo_id = cur.lastrowid
-                conn.close()
+        try:
+            from client.api_client import api
+            resp = api.post("/proveedores", json={"nombre": nom, "documento_nit": nit, "telefono": tel})
+            if resp.status_code in (200, 201):
+                creado_p = resp.json()
+                nuevo_id = creado_p.get("id")
                 messagebox.showinfo("Éxito", f"Proveedor '{nom}' creado exitosamente.", parent=modal)
                 if combo_widget and var_widget:
                     provs = obtener_proveedores_locales()
@@ -157,8 +154,11 @@ def modal_crear_proveedor_rapido(parent_win, combo_widget=None, var_widget=None)
                     combo_widget["values"] = lista
                     var_widget.set(f"{nuevo_id} - {nom}")
                 modal.destroy()
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo guardar proveedor: {e}", parent=modal)
+            else:
+                det = resp.json().get("detail", resp.text) if resp.text else f"HTTP {resp.status_code}"
+                messagebox.showerror("Error", f"No se pudo guardar proveedor: {det}", parent=modal)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar proveedor: {e}", parent=modal)
 
     footer = tk.Frame(modal, bg=t["bg_surface_alt"], bd=1, relief="ridge", padx=10, pady=8)
     footer.pack(fill="x", side="bottom")
@@ -614,9 +614,12 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
                     sm_v = float(e_smv.get().strip() or 3.0)
                     datos_up = {
                         "nombre": nom,
+                        "tipo_producto": articulo_existente.get("tipo_producto", t_art),
                         "precio": p_venta,
                         "costo": c_adq,
                         "categoria": categoria,
+                        "marca": articulo_existente.get("marca", ""),
+                        "descripcion": articulo_existente.get("descripcion", ""),
                         "codigo_barras": c_bar,
                         "unidad_medida": u_base,
                         "proveedor_id": prov_id_val,
@@ -626,7 +629,7 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
                         "stock_minimo_vitrina": sm_v,
                         "estado": articulo_existente.get("estado", "Activo")
                     }
-                    actualizar_articulo(articulo_existente["id"], datos_up)
+                    actualizar_articulo(articulo_existente.get("codigo") or articulo_existente["id"], datos_up)
                     messagebox.showinfo("Éxito", f"Artículo '{nom}' actualizado correctamente.", parent=modal)
                 else:
                     st_b = float(e_sb.get().strip() or 0.0) if t_art == "Fisico" else 0.0
@@ -693,13 +696,16 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
             messagebox.showwarning("Aviso", "Seleccione un artículo de la tabla.", parent=ventana)
             return
         vals = tree_cat.item(sel[0])["values"]
-        p_id = vals[0]
+        cod_sku = str(vals[1])
         nom = vals[2]
+        tipo_sel = str(vals[3])
         est_actual = vals[11]
         nuevo_est = "Inactivo" if est_actual == "Activo" else "Activo"
         if messagebox.askyesno("Confirmar", f"¿Desea cambiar el estado de '{nom}' a '{nuevo_est}'?", parent=ventana):
-            cambiar_estado_articulo(p_id, nuevo_est)
+            cambiar_estado_articulo(cod_sku, nuevo_est, tipo_producto=tipo_sel)
             cargar_tabla_catalogo()
+            cargar_tabla_bodega()
+            cargar_tabla_vitrina()
 
     crear_boton(bar_cat, "Actualizar", cargar_tabla_catalogo, tipo="secondary", icono="🔄", tam_fuente=9).pack(side="right", padx=4)
     crear_boton(bar_cat, "Activar/Inactivar", alternar_estado_seleccionado, tipo="secondary", icono="⚡", tam_fuente=9).pack(side="right", padx=4)
@@ -1716,6 +1722,34 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     cargar_tabla_traslados()
     cargar_tabla_compras()
     cargar_tabla_kardex()
+
+    import time as _time_sync
+    _estado_sync = {"ultimo": _time_sync.monotonic()}
+
+    def _refrescar_pestana_activa(forzar=False):
+        ahora_m = _time_sync.monotonic()
+        if not forzar and (ahora_m - _estado_sync["ultimo"]) < 3.0:
+            return
+        _estado_sync["ultimo"] = ahora_m
+        try:
+            idx = notebook.index(notebook.select())
+            if idx == 0:
+                cargar_tabla_catalogo()
+            elif idx == 1:
+                cargar_tabla_bodega()
+            elif idx == 2:
+                cargar_tabla_vitrina()
+            elif idx == 3:
+                cargar_tabla_traslados()
+            elif idx == 4:
+                cargar_tabla_compras()
+            elif idx == 5:
+                cargar_tabla_kardex()
+        except Exception:
+            pass
+
+    notebook.bind("<<NotebookTabChanged>>", lambda e: _refrescar_pestana_activa(forzar=True))
+    ventana.bind("<FocusIn>", lambda e: _refrescar_pestana_activa(forzar=False) if e.widget is ventana else None)
 
     # Footer
     footer = tk.Frame(ventana, bg=t["bg_footer"], padx=20, pady=8)

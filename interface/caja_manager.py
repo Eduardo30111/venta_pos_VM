@@ -15,6 +15,17 @@ import os
 import sys
 
 try:
+    from client.api_client import api
+except ImportError:
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+    try:
+        from client.api_client import api
+    except ImportError:
+        api = None
+
+try:
     from interface.database_manager import conectar_db
 except ImportError:
     try:
@@ -26,6 +37,18 @@ except ImportError:
 
 def obtener_sesion_activa(conn: Optional[sqlite3.Connection] = None) -> Optional[Dict[str, Any]]:
     """Obtiene la sesión de caja actualmente abierta, o None si no hay ninguna."""
+    if conn is None and api is not None:
+        try:
+            resp = api.get("/caja/sesion-activa", timeout=3.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                activa = data.get("activa")
+                if activa:
+                    return activa
+                return None
+        except Exception:
+            pass
+
     owns_conn = conn is None
     if conn is None:
         conn = conectar_db()
@@ -72,6 +95,30 @@ def registrar_movimiento_financiero(
     'GASTO_PAGADO', 'PAGO_PROVEEDOR', 'RETIRO_CAJA',
     'INGRESO_EXTRAORDINARIO', 'DEVOLUCION_VENTA', 'AJUSTE_AUTORIZADO', 'APERTURA_CAJA'
     """
+    if conn is None and api is not None:
+        try:
+            resp = api.post(
+                "/caja/movimientos-financieros",
+                json={
+                    "tipo": tipo,
+                    "concepto": concepto,
+                    "monto": float(monto),
+                    "metodo_pago": metodo_pago,
+                    "cuenta_afectada": cuenta_afectada,
+                    "usuario": usuario,
+                    "referencia_origen": str(referencia_origen or ""),
+                    "sesion_id": sesion_id,
+                    "observaciones": observaciones or "",
+                    "estado": estado,
+                    "sincronizar_caja": sincronizar_caja,
+                },
+                timeout=4.0,
+            )
+            if resp.status_code in (200, 201):
+                return int(resp.json().get("id", 1))
+        except Exception:
+            pass
+
     owns_connection = conn is None
     if conn is None:
         conn = conectar_db()
@@ -279,6 +326,30 @@ def registrar_abono_cartera(
     if monto <= 0:
         raise ValueError("El monto del abono debe ser mayor a cero.")
 
+    if api is not None:
+        try:
+            import uuid
+            resp_ab = api.post(
+                f"/clientes/{cliente_id}/abonos",
+                json={
+                    "monto": float(monto),
+                    "metodo": metodo,
+                    "notas": observaciones or "",
+                    "sesion_id": sesion_id,
+                    "idempotency_key": f"ABONO-MGR-{uuid.uuid4()}",
+                },
+                timeout=5.0,
+            )
+            if resp_ab.status_code in (200, 201):
+                return resp_ab.json()
+            elif resp_ab.status_code == 400:
+                err_detail = resp_ab.json().get("detail", "Error validando abono en servidor")
+                raise ValueError(err_detail)
+        except ValueError:
+            raise
+        except Exception:
+            pass
+
     conn = conectar_db()
     if not conn:
         raise RuntimeError("No se pudo conectar a la base de datos.")
@@ -404,6 +475,14 @@ def registrar_abono_cartera(
 
 def obtener_cierres_anteriores(limit: int = 50) -> List[Dict[str, Any]]:
     """Consulta el historial inmutable de turnos de caja cerrados."""
+    if api is not None:
+        try:
+            resp = api.get(f"/caja/cierres?limit={limit}", timeout=4.0)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+
     conn = conectar_db()
     if not conn:
         return []
@@ -448,6 +527,26 @@ def abrir_sesion_caja(
     """Abre un nuevo turno de caja con una base inicial de efectivo."""
     if monto_base is not None:
         monto_inicial = monto_base
+
+    if conn is None and api is not None:
+        try:
+            resp = api.post(
+                "/caja/abrir",
+                json={
+                    "usuario": usuario,
+                    "monto_inicial": float(monto_inicial),
+                    "terminal_nombre": terminal,
+                },
+                timeout=4.0,
+            )
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                sid = data.get("sesion_id") or data.get("sesion", {}).get("id")
+                if sid:
+                    return int(sid)
+        except Exception:
+            pass
+
     owns_conn = conn is None
     if conn is None:
         conn = conectar_db()
@@ -538,6 +637,27 @@ def registrar_movimiento_caja(
     if id_referencia is not None and not referencia_id:
         referencia_id = str(id_referencia)
 
+    if conn is None and api is not None:
+        try:
+            resp = api.post(
+                "/caja/movimientos",
+                json={
+                    "tipo": tipo,
+                    "monto": float(monto),
+                    "usuario": usuario,
+                    "terminal": terminal,
+                    "referencia_id": str(referencia_id or ""),
+                    "descripcion": descripcion or "",
+                    "sesion_id": sesion_id,
+                    "sincronizar_financiero": sincronizar_financiero,
+                },
+                timeout=4.0,
+            )
+            if resp.status_code in (200, 201):
+                return int(resp.json().get("id", 1))
+        except Exception:
+            pass
+
     owns_connection = conn is None
     if conn is None:
         conn = conectar_db()
@@ -614,6 +734,14 @@ def registrar_movimiento_caja(
 
 def calcular_arqueo_sesion(sesion_id: int) -> Dict[str, Any]:
     """Calcula el balance y efectivo esperado de una sesión de caja específica."""
+    if api is not None:
+        try:
+            resp = api.get(f"/caja/sesiones/{sesion_id}/arqueo", timeout=4.0)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+
     conn = conectar_db()
     if not conn:
         return {}
@@ -736,6 +864,24 @@ def cerrar_sesion_caja(
     if monto_real_contado is None:
         monto_real_contado = monto_real_efectivo if monto_real_efectivo is not None else 0.0
 
+    if api is not None:
+        try:
+            resp = api.post(
+                f"/caja/sesiones/{sesion_id}/cerrar",
+                json={
+                    "usuario": usuario,
+                    "monto_real_contado": float(monto_real_contado),
+                    "observaciones": observaciones or "",
+                    "terminal": terminal,
+                    "monto_transferencias_verificado": monto_transferencias_verificado,
+                },
+                timeout=5.0,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+
     arqueo = calcular_arqueo_sesion(sesion_id)
     if not arqueo:
         raise ValueError(f"No se encontró la sesión de caja {sesion_id}")
@@ -838,6 +984,20 @@ def anular_venta_completa(
 
     if not motivo or len(motivo.strip()) < 3:
         raise ValueError("El motivo de anulación es obligatorio (mínimo 3 caracteres).")
+
+    if api is not None:
+        try:
+            import urllib.parse
+            q_motivo = urllib.parse.quote(motivo.strip())
+            resp = api.post(f"/ventas/{id_venta}/anular?motivo={q_motivo}", timeout=6.0)
+            if resp.status_code == 200:
+                return resp.json()
+            elif resp.status_code in (400, 404):
+                raise ValueError(resp.json().get("detail", "Error al anular venta en servidor"))
+        except ValueError:
+            raise
+        except Exception:
+            pass
 
     conn = conectar_db()
     if not conn:
@@ -1121,6 +1281,27 @@ def editar_venta_completa(
     if not motivo or len(motivo.strip()) < 3:
         raise ValueError("El motivo de edición es obligatorio (mínimo 3 caracteres).")
 
+    if api is not None:
+        try:
+            import urllib.parse
+            q_motivo = urllib.parse.quote(motivo.strip())
+            resp = api.put(
+                f"/ventas/{id_venta}?motivo={q_motivo}",
+                json={
+                    "metodo_pago_principal": nuevo_metodo,
+                    "items": nuevos_items or [],
+                },
+                timeout=6.0,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            elif resp.status_code in (400, 404):
+                raise ValueError(resp.json().get("detail", "Error al editar venta en servidor"))
+        except ValueError:
+            raise
+        except Exception:
+            pass
+
     conn = conectar_db()
     if not conn:
         raise RuntimeError("No se pudo conectar a la base de datos.")
@@ -1305,6 +1486,17 @@ def obtener_resumen_financiero(
     if not fecha_fin:
         fecha_fin = fecha_inicio
 
+    if api is not None:
+        try:
+            resp = api.get(
+                f"/contabilidad/resumen-financiero?fecha_inicio={fecha_inicio}&fecha_fin={fecha_fin}",
+                timeout=5.0,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+
     conn = conectar_db()
     if not conn:
         return {}
@@ -1456,6 +1648,14 @@ def procesar_gastos_recurrentes() -> int:
     para el periodo actual sin duplicar en caso de reinicios de la aplicación.
     Retorna el número de nuevos gastos generados.
     """
+    if api is not None:
+        try:
+            resp = api.post("/gastos/recurrentes/procesar", json={}, timeout=5.0)
+            if resp.status_code == 200:
+                return int(resp.json().get("creados", 0))
+        except Exception:
+            pass
+
     conn = conectar_db()
     if not conn:
         return 0
@@ -1564,6 +1764,26 @@ def pagar_gasto(
     Si se paga en 'Efectivo', genera el movimiento 'EGRESO' en movimientos_caja para descontar
     el dinero real de la gaveta de caja física de la sesión activa.
     """
+    if api is not None:
+        try:
+            resp = api.post(
+                f"/gastos/{id_gasto}/pagar",
+                json={
+                    "metodo_pago": metodo_pago,
+                    "comprobante": comprobante or "",
+                    "terminal": terminal,
+                },
+                timeout=5.0,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            elif resp.status_code in (400, 404):
+                raise ValueError(resp.json().get("detail", "Error al pagar gasto en servidor"))
+        except ValueError:
+            raise
+        except Exception:
+            pass
+
     conn = conectar_db()
     if not conn:
         raise RuntimeError("No se pudo conectar a la base de datos.")
@@ -1652,6 +1872,17 @@ def calcular_metricas_contables(
         fecha_inicio = hoy_str
     if not fecha_fin:
         fecha_fin = fecha_inicio
+
+    if api is not None:
+        try:
+            resp = api.get(
+                f"/contabilidad/metricas?fecha_inicio={fecha_inicio}&fecha_fin={fecha_fin}",
+                timeout=5.0,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
 
     conn = conectar_db()
     if not conn:

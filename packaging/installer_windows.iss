@@ -1,10 +1,10 @@
 ; ==============================================================================
 ; Script: packaging/installer_windows.iss
-; Instalador Inno Setup para VmPOS v4.0.2 (Windows 10 / 11)
+; Instalador Inno Setup para VmPOS v4.1.0 (Windows 10 / 11)
 ; ==============================================================================
 
 #define MyAppName "VmPOS"
-#define MyAppVersion "4.0.2"
+#define MyAppVersion "4.1.0"
 #define MyAppPublisher "VmPOS Software"
 #define MyAppURL "https://github.com/Eduardo30111/venta_pos_VM"
 #define MyAppExeName "VmPOS.exe"
@@ -20,7 +20,7 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=VmPOS_Setup_v4.0.2
+OutputBaseFilename=VmPOS_Setup_v4.1.0
 SetupIconFile=..\assets\Salome.ico
 Compression=lzma2/ultra64
 SolidCompression=yes

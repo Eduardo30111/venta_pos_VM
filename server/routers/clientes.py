@@ -2,9 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy.sql import func, or_, and_
+from sqlalchemy.sql import func, or_
 from typing import List, Optional, Dict, Any
-from datetime import datetime, date, timedelta
+from datetime import date, timedelta
 
 from ..database import get_db
 from ..models.cliente import Cliente
@@ -12,9 +12,11 @@ from ..models.finanzas import CuentaPorCobrar, Abono, MovimientoCuentaCliente
 from ..models.venta import Venta, Pago
 from ..models.usuario import Usuario
 from ..schemas.cliente import (
-    ClienteCreate, ClienteUpdate, ClienteResponse, 
-    AbonoCreate, AjusteDeudaCreate, ClienteListItemResponse,
-    FiadoResumenItem, ClienteDeudaDetalleResponse
+    ClienteCreate,
+    ClienteUpdate,
+    ClienteResponse,
+    AbonoCreate,
+    AjusteDeudaCreate,
 )
 from ..middleware.auth import get_current_user
 from ..middleware.audit import log_audit
@@ -22,14 +24,13 @@ from ..services.cliente_service import ClienteService
 
 router = APIRouter(prefix="/clientes", tags=["clientes"])
 
+
 def parse_date_range(
     fecha_filtro: Optional[str] = None,
     fecha_desde: Optional[date] = None,
-    fecha_hasta: Optional[date] = None
+    fecha_hasta: Optional[date] = None,
 ):
-    """
-    Resuelve el rango de fechas en el servidor para evitar discrepancias de clientes.
-    """
+    """Resuelve el rango de fechas local del servidor evitando desfases UTC."""
     hoy = date.today()
     if not fecha_filtro:
         return None, None
@@ -49,6 +50,7 @@ def parse_date_range(
         return fecha_desde or hoy, fecha_hasta or hoy
     return None, None
 
+
 @router.get("")
 async def list_clientes(
     busqueda: Optional[str] = None,
@@ -59,19 +61,17 @@ async def list_clientes(
     fecha_desde: Optional[date] = None,
     fecha_hasta: Optional[date] = None,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
+    current_user: Usuario = Depends(get_current_user),
 ):
-    # 1. Base query for clients
     query = select(Cliente)
-    
-    # Búsqueda flexible por texto
+
     if busqueda and busqueda.strip():
         term = f"%{busqueda.strip()}%"
         query = query.where(
             or_(
                 Cliente.documento.ilike(term),
                 Cliente.nombre.ilike(term),
-                Cliente.telefono.ilike(term)
+                Cliente.telefono.ilike(term),
             )
         )
     if nombre:
@@ -84,58 +84,57 @@ async def list_clientes(
     clientes = result.scalars().all()
 
     f_inicio, f_fin = parse_date_range(fecha_filtro, fecha_desde, fecha_hasta)
+    f_ini_s = f_inicio.isoformat() if f_inicio else None
+    f_fin_s = f_fin.isoformat() if f_fin else None
 
-    # 2. Calcular agregados de ventas, fiados, abonos y deudas
+    venta_fecha_col = func.coalesce(Venta.fecha, func.date(Venta.created_at))
+    cxc_fecha_col = func.coalesce(CuentaPorCobrar.fecha, func.date(CuentaPorCobrar.created_at))
+
     items = []
     for c in clientes:
-        # Ventas completadas del cliente
         q_ventas = select(func.sum(Venta.total)).where(
             Venta.cliente_id == c.id,
-            Venta.estado == 'Completada'
+            Venta.estado != "Anulada",
         )
-        if f_inicio and f_fin:
-            q_ventas = q_ventas.where(func.date(Venta.created_at) >= f_inicio, func.date(Venta.created_at) <= f_fin)
+        if f_ini_s and f_fin_s:
+            q_ventas = q_ventas.where(venta_fecha_col >= f_ini_s, venta_fecha_col <= f_fin_s)
         res_v = await db.execute(q_ventas)
         total_compras = float(res_v.scalar() or 0.0)
 
-        # Total fiado histórico/periodo
         q_fiado = select(func.sum(CuentaPorCobrar.monto_original)).where(
             CuentaPorCobrar.cliente_id == c.id,
-            CuentaPorCobrar.estado != 'Anulada'
+            CuentaPorCobrar.estado != "Anulada",
         )
-        if f_inicio and f_fin:
-            q_fiado = q_fiado.where(func.date(CuentaPorCobrar.created_at) >= f_inicio, func.date(CuentaPorCobrar.created_at) <= f_fin)
+        if f_ini_s and f_fin_s:
+            q_fiado = q_fiado.where(cxc_fecha_col >= f_ini_s, cxc_fecha_col <= f_fin_s)
         res_f = await db.execute(q_fiado)
         total_fiado = float(res_f.scalar() or 0.0)
 
-        # Deuda actual (saldo pendiente)
         res_d = await db.execute(
             select(func.sum(CuentaPorCobrar.saldo_pendiente)).where(
                 CuentaPorCobrar.cliente_id == c.id,
-                CuentaPorCobrar.estado == 'Pendiente'
+                CuentaPorCobrar.estado == "Pendiente",
             )
         )
-        deuda_total = float(res_d.scalar() or 0.0)
+        deuda_total = round(float(res_d.scalar() or 0.0), 2)
 
-        # Total abonado
         res_ab = await db.execute(
-            select(func.sum(Abono.monto)).join(CuentaPorCobrar, Abono.cuenta_id == CuentaPorCobrar.id).where(
-                CuentaPorCobrar.cliente_id == c.id
-            )
+            select(func.sum(Abono.monto))
+            .join(CuentaPorCobrar, Abono.cuenta_id == CuentaPorCobrar.id)
+            .where(CuentaPorCobrar.cliente_id == c.id)
         )
-        total_abonado = float(res_ab.scalar() or 0.0)
+        total_abonado = round(float(res_ab.scalar() or 0.0), 2)
 
-        # Operario / Vendedor que realizó la venta o atención
         q_op = (
             select(Usuario.nombre, Usuario.rol)
             .select_from(Venta)
             .join(Usuario, Venta.usuario_id == Usuario.id)
-            .where(Venta.cliente_id == c.id)
-            .order_by(Venta.created_at.desc())
+            .where(Venta.cliente_id == c.id, Venta.estado != "Anulada")
+            .order_by(Venta.id.desc())
             .limit(1)
         )
-        if f_inicio and f_fin:
-            q_op = q_op.where(func.date(Venta.created_at) >= f_inicio, func.date(Venta.created_at) <= f_fin)
+        if f_ini_s and f_fin_s:
+            q_op = q_op.where(venta_fecha_col >= f_ini_s, venta_fecha_col <= f_fin_s)
         res_op = await db.execute(q_op)
         row_op = res_op.first()
         if row_op:
@@ -144,45 +143,44 @@ async def list_clientes(
         else:
             operario_venta = "—"
 
-        # Filtro de tipo
         if filtro_tipo == "compras" and total_compras <= 0:
             continue
         if filtro_tipo == "fiados" and (deuda_total <= 0 and total_fiado <= 0 and not c.permite_fiado):
             continue
 
-        items.append({
-            "id": c.id,
-            "documento": c.documento,
-            "cedula": c.documento,
-            "nombre": c.nombre,
-            "email": c.email,
-            "telefono": c.telefono or "",
-            "direccion": c.direccion or "",
-            "operario_venta": operario_venta,
-            "vendedor": operario_venta,
-            "permite_fiado": bool(c.permite_fiado),
-            "limite_credito": float(c.limite_credito or 0.0),
-            "total_compras": total_compras,
-            "total_fiado": total_fiado,
-            "total_abonado": total_abonado,
-            "deuda_total": deuda_total,
-            "saldo_pendiente": deuda_total,
-            "estado": c.estado,
-            "created_at": c.created_at
-        })
-
+        items.append(
+            {
+                "id": c.id,
+                "documento": c.documento,
+                "cedula": c.documento,
+                "nombre": c.nombre,
+                "email": c.email,
+                "telefono": c.telefono or "",
+                "direccion": c.direccion or "",
+                "operario_venta": operario_venta,
+                "vendedor": operario_venta,
+                "permite_fiado": bool(c.permite_fiado),
+                "limite_credito": float(c.limite_credito or 0.0),
+                "total_compras": total_compras,
+                "total_fiado": total_fiado,
+                "total_abonado": total_abonado,
+                "deuda_total": deuda_total,
+                "saldo_pendiente": deuda_total,
+                "estado": c.estado,
+                "created_at": c.created_at,
+            }
+        )
 
     return items
+
 
 @router.get("/fiados/resumen")
 async def resumen_fiados(
     busqueda: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
+    current_user: Usuario = Depends(get_current_user),
 ):
-    """
-    Devuelve la cartera de fiados para el modal de Gestión de Fiados.
-    """
+    """Devuelve la cartera de fiados desde las tablas centrales CuentaPorCobrar y Abono."""
     query = select(Cliente)
     if busqueda and busqueda.strip():
         term = f"%{busqueda.strip()}%"
@@ -190,57 +188,54 @@ async def resumen_fiados(
             or_(
                 Cliente.documento.ilike(term),
                 Cliente.nombre.ilike(term),
-                Cliente.telefono.ilike(term)
+                Cliente.telefono.ilike(term),
             )
         )
+    query = query.order_by(Cliente.nombre.asc())
     res = await db.execute(query)
     clientes = res.scalars().all()
 
     lista_fiados = []
     for c in clientes:
-        # Total fiado
         res_f = await db.execute(
             select(func.sum(CuentaPorCobrar.monto_original)).where(
                 CuentaPorCobrar.cliente_id == c.id,
-                CuentaPorCobrar.estado != 'Anulada'
+                CuentaPorCobrar.estado != "Anulada",
             )
         )
-        total_fiado = float(res_f.scalar() or 0.0)
+        total_fiado = round(float(res_f.scalar() or 0.0), 2)
 
-        # Deuda actual
         res_d = await db.execute(
             select(func.sum(CuentaPorCobrar.saldo_pendiente)).where(
                 CuentaPorCobrar.cliente_id == c.id,
-                CuentaPorCobrar.estado == 'Pendiente'
+                CuentaPorCobrar.estado == "Pendiente",
             )
         )
-        deuda_actual = float(res_d.scalar() or 0.0)
+        deuda_actual = round(float(res_d.scalar() or 0.0), 2)
 
-        # Total abonado
         res_ab = await db.execute(
-            select(func.sum(Abono.monto)).join(CuentaPorCobrar, Abono.cuenta_id == CuentaPorCobrar.id).where(
-                CuentaPorCobrar.cliente_id == c.id
-            )
-        )
-        total_abonado = float(res_ab.scalar() or 0.0)
-
-        # Último abono
-        res_ult = await db.execute(
-            select(Abono.created_at).join(CuentaPorCobrar, Abono.cuenta_id == CuentaPorCobrar.id)
+            select(func.sum(Abono.monto))
+            .join(CuentaPorCobrar, Abono.cuenta_id == CuentaPorCobrar.id)
             .where(CuentaPorCobrar.cliente_id == c.id)
-            .order_by(Abono.created_at.desc())
+        )
+        total_abonado = round(float(res_ab.scalar() or 0.0), 2)
+
+        res_ult = await db.execute(
+            select(Abono.created_at)
+            .join(CuentaPorCobrar, Abono.cuenta_id == CuentaPorCobrar.id)
+            .where(CuentaPorCobrar.cliente_id == c.id)
+            .order_by(Abono.id.desc())
             .limit(1)
         )
         ultimo_abono = res_ult.scalar()
 
-        # Operario / Vendedor que originó el fiado o última atención
         q_op_f = (
             select(Usuario.nombre, Usuario.rol)
             .select_from(CuentaPorCobrar)
             .join(Venta, CuentaPorCobrar.venta_id == Venta.id)
             .join(Usuario, Venta.usuario_id == Usuario.id)
-            .where(CuentaPorCobrar.cliente_id == c.id, CuentaPorCobrar.estado != 'Anulada')
-            .order_by(CuentaPorCobrar.created_at.desc())
+            .where(CuentaPorCobrar.cliente_id == c.id, CuentaPorCobrar.estado != "Anulada")
+            .order_by(CuentaPorCobrar.id.desc())
             .limit(1)
         )
         res_opf = await db.execute(q_op_f)
@@ -251,48 +246,51 @@ async def resumen_fiados(
         else:
             operario_fiado = "—"
 
-        # Incluir clientes que tienen crédito, deuda o historial de fiado
         if total_fiado > 0 or deuda_actual > 0 or c.permite_fiado:
             estado_desc = "PENDIENTE" if deuda_actual > 0 else ("PAGADO" if total_abonado > 0 else "AL DÍA")
-            lista_fiados.append({
-                "cliente_id": c.id,
-                "documento": c.documento,
-                "nombre": c.nombre,
-                "telefono": c.telefono or "",
-                "operario_venta": operario_fiado,
-                "vendedor": operario_fiado,
-                "total_fiado": total_fiado,
-                "total_abonado": total_abonado,
-                "deuda_actual": deuda_actual,
-                "ultimo_abono": ultimo_abono,
-                "estado": estado_desc
-            })
-
+            lista_fiados.append(
+                {
+                    "id": c.id,
+                    "cliente_id": c.id,
+                    "documento": c.documento,
+                    "cedula": c.documento,
+                    "nombre": c.nombre,
+                    "telefono": c.telefono or "",
+                    "operario_venta": operario_fiado,
+                    "vendedor": operario_fiado,
+                    "total_fiado": total_fiado,
+                    "total_abonado": total_abonado,
+                    "deuda_actual": deuda_actual,
+                    "total_deuda": deuda_actual,
+                    "saldo_pendiente": deuda_actual,
+                    "ultimo_abono": ultimo_abono,
+                    "estado": estado_desc,
+                }
+            )
 
     return lista_fiados
+
 
 @router.get("/buscar-precheck")
 async def precheck_cliente(
     q: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
+    current_user: Usuario = Depends(get_current_user),
 ):
-    """
-    Verifica si un cliente ya existe antes de crear uno nuevo para evitar duplicados.
-    """
     term = q.strip()
     if not term:
         return {"existe": False, "cliente": None}
 
-    # Búsqueda exacta por documento o teléfono primero, luego parcial por nombre
     res = await db.execute(
-        select(Cliente).where(
+        select(Cliente)
+        .where(
             or_(
                 Cliente.documento == term,
                 Cliente.telefono == term,
-                Cliente.nombre.ilike(f"%{term}%")
+                Cliente.nombre.ilike(f"%{term}%"),
             )
-        ).limit(1)
+        )
+        .limit(1)
     )
     cli = res.scalars().first()
     if cli:
@@ -309,26 +307,29 @@ async def precheck_cliente(
                 "permite_fiado": cli.permite_fiado,
                 "limite_credito": cli.limite_credito,
                 "saldo_pendiente": saldo,
-                "estado": cli.estado
-            }
+                "deuda_total": saldo,
+                "estado": cli.estado,
+            },
         }
     return {"existe": False, "cliente": None}
+
 
 @router.get("/{id}")
 async def get_cliente(
     id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
+    current_user: Usuario = Depends(get_current_user),
 ):
     result = await db.execute(select(Cliente).where(Cliente.id == id))
     cliente = result.scalars().first()
     if not cliente:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
-    
+
     saldo = await ClienteService.obtener_saldo_cliente(db, cliente.id)
-    cli_dict = {
+    return {
         "id": cliente.id,
         "documento": cliente.documento,
+        "cedula": cliente.documento,
         "nombre": cliente.nombre,
         "email": cliente.email,
         "telefono": cliente.telefono,
@@ -337,93 +338,96 @@ async def get_cliente(
         "limite_credito": cliente.limite_credito,
         "estado": cliente.estado,
         "saldo_pendiente": saldo,
-        "created_at": cliente.created_at
+        "deuda_total": saldo,
+        "created_at": cliente.created_at,
     }
-    return cli_dict
+
 
 @router.get("/{id}/deuda-detalle")
 async def get_deuda_detalle(
     id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
+    current_user: Usuario = Depends(get_current_user),
 ):
-    """
-    Retorna la ficha contable completa: resumen de compras, fiados, abonos, cuentas pendientes
-    y el libro cronológico de movimientos contables inmutables.
-    """
     cli_res = await db.execute(select(Cliente).where(Cliente.id == id))
     cliente = cli_res.scalars().first()
     if not cliente:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
 
-    # 1. Total compras
     res_v = await db.execute(
-        select(func.sum(Venta.total)).where(Venta.cliente_id == id, Venta.estado == 'Completada')
+        select(func.sum(Venta.total)).where(Venta.cliente_id == id, Venta.estado != "Anulada")
     )
-    total_compras = float(res_v.scalar() or 0.0)
+    total_compras = round(float(res_v.scalar() or 0.0), 2)
 
-    # 2. Total fiado
     res_f = await db.execute(
-        select(func.sum(CuentaPorCobrar.monto_original)).where(CuentaPorCobrar.cliente_id == id, CuentaPorCobrar.estado != 'Anulada')
+        select(func.sum(CuentaPorCobrar.monto_original)).where(
+            CuentaPorCobrar.cliente_id == id, CuentaPorCobrar.estado != "Anulada"
+        )
     )
-    total_fiado = float(res_f.scalar() or 0.0)
+    total_fiado = round(float(res_f.scalar() or 0.0), 2)
 
-    # 3. Total abonado
     res_ab = await db.execute(
-        select(func.sum(Abono.monto)).join(CuentaPorCobrar, Abono.cuenta_id == CuentaPorCobrar.id).where(CuentaPorCobrar.cliente_id == id)
+        select(func.sum(Abono.monto))
+        .join(CuentaPorCobrar, Abono.cuenta_id == CuentaPorCobrar.id)
+        .where(CuentaPorCobrar.cliente_id == id)
     )
-    total_abonado = float(res_ab.scalar() or 0.0)
+    total_abonado = round(float(res_ab.scalar() or 0.0), 2)
 
-    # 4. Deuda actual
     deuda_actual = await ClienteService.obtener_saldo_cliente(db, id)
 
-    # 5. Cuentas por cobrar pendientes
     cxc_res = await db.execute(
         select(CuentaPorCobrar, Venta.numero)
         .outerjoin(Venta, CuentaPorCobrar.venta_id == Venta.id)
-        .where(CuentaPorCobrar.cliente_id == id, CuentaPorCobrar.estado == 'Pendiente')
-        .order_by(CuentaPorCobrar.created_at.asc())
+        .where(CuentaPorCobrar.cliente_id == id, CuentaPorCobrar.estado == "Pendiente")
+        .order_by(CuentaPorCobrar.id.asc())
     )
     cuentas_pendientes = []
     for cxc, v_num in cxc_res.all():
-        cuentas_pendientes.append({
-            "id": cxc.id,
-            "venta_id": cxc.venta_id,
-            "numero_venta": v_num or f"Ajuste #{cxc.id}",
-            "monto_original": cxc.monto_original,
-            "saldo_pendiente": cxc.saldo_pendiente,
-            "estado": cxc.estado,
-            "created_at": cxc.created_at
-        })
+        cuentas_pendientes.append(
+            {
+                "id": cxc.id,
+                "venta_id": cxc.venta_id,
+                "numero_venta": v_num or f"Ajuste #{cxc.id}",
+                "fecha": cxc.fecha or (cxc.created_at.strftime("%Y-%m-%d") if cxc.created_at else ""),
+                "hora": cxc.hora or (cxc.created_at.strftime("%H:%M:%S") if cxc.created_at else ""),
+                "monto_original": cxc.monto_original,
+                "saldo_pendiente": cxc.saldo_pendiente,
+                "estado": cxc.estado,
+                "created_at": cxc.created_at,
+            }
+        )
 
-    # 6. Libro mayor de movimientos contables
     mov_res = await db.execute(
         select(MovimientoCuentaCliente, Usuario.nombre, Venta.numero)
         .outerjoin(Usuario, MovimientoCuentaCliente.usuario_id == Usuario.id)
         .outerjoin(Venta, MovimientoCuentaCliente.venta_id == Venta.id)
         .where(MovimientoCuentaCliente.cliente_id == id)
-        .order_by(MovimientoCuentaCliente.created_at.asc())
+        .order_by(MovimientoCuentaCliente.id.asc())
     )
     movimientos = []
     for mov, u_nom, v_num in mov_res.all():
-        movimientos.append({
-            "id": mov.id,
-            "cliente_id": mov.cliente_id,
-            "cuenta_id": mov.cuenta_id,
-            "venta_id": mov.venta_id,
-            "numero_venta": v_num,
-            "tipo": mov.tipo,
-            "monto": mov.monto,
-            "saldo_anterior": mov.saldo_anterior,
-            "saldo_nuevo": mov.saldo_nuevo,
-            "metodo_pago": mov.metodo_pago,
-            "usuario_id": mov.usuario_id,
-            "usuario_nombre": u_nom or f"Usuario #{mov.usuario_id}",
-            "terminal_id": mov.terminal_id,
-            "motivo": mov.motivo,
-            "observacion": mov.observacion,
-            "created_at": mov.created_at
-        })
+        movimientos.append(
+            {
+                "id": mov.id,
+                "cliente_id": mov.cliente_id,
+                "cuenta_id": mov.cuenta_id,
+                "venta_id": mov.venta_id,
+                "numero_venta": v_num,
+                "fecha": mov.fecha or (mov.created_at.strftime("%Y-%m-%d") if mov.created_at else ""),
+                "hora": mov.hora or (mov.created_at.strftime("%H:%M:%S") if mov.created_at else ""),
+                "tipo": mov.tipo,
+                "monto": mov.monto,
+                "saldo_anterior": mov.saldo_anterior,
+                "saldo_nuevo": mov.saldo_nuevo,
+                "metodo_pago": mov.metodo_pago,
+                "usuario_id": mov.usuario_id,
+                "usuario_nombre": u_nom or f"Usuario #{mov.usuario_id}",
+                "terminal_id": mov.terminal_id,
+                "motivo": mov.motivo,
+                "observacion": mov.observacion,
+                "created_at": mov.created_at,
+            }
+        )
 
     return {
         "cliente": {
@@ -436,57 +440,91 @@ async def get_deuda_detalle(
             "permite_fiado": cliente.permite_fiado,
             "limite_credito": cliente.limite_credito,
             "estado": cliente.estado,
-            "created_at": cliente.created_at
+            "saldo_pendiente": deuda_actual,
+            "created_at": cliente.created_at,
         },
         "total_compras": total_compras,
         "total_fiado": total_fiado,
         "total_abonado": total_abonado,
         "deuda_actual": deuda_actual,
         "cuentas_pendientes": cuentas_pendientes,
-        "movimientos": movimientos
+        "movimientos": movimientos,
     }
+
+
+@router.get("/{id}/abonos")
+async def get_abonos_cliente(
+    id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    res = await db.execute(
+        select(Abono, CuentaPorCobrar.venta_id, Usuario.nombre)
+        .join(CuentaPorCobrar, Abono.cuenta_id == CuentaPorCobrar.id)
+        .outerjoin(Usuario, Abono.recibido_por == Usuario.id)
+        .where(CuentaPorCobrar.cliente_id == id)
+        .order_by(Abono.id.desc())
+    )
+    salida = []
+    for ab, venta_id, u_nom in res.all():
+        salida.append(
+            {
+                "id": ab.id,
+                "cuenta_id": ab.cuenta_id,
+                "venta_id": venta_id,
+                "fecha": ab.fecha or (ab.created_at.strftime("%Y-%m-%d") if ab.created_at else ""),
+                "hora": ab.hora or (ab.created_at.strftime("%H:%M:%S") if ab.created_at else ""),
+                "monto": float(ab.monto or 0.0),
+                "metodo": ab.metodo,
+                "recibido_por": ab.recibido_por,
+                "usuario_nombre": u_nom or f"Usuario #{ab.recibido_por}",
+                "observacion": ab.observacion or "",
+                "created_at": ab.created_at,
+            }
+        )
+    return salida
+
 
 @router.get("/{id}/compras")
 async def get_compras_cliente(
     id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
+    current_user: Usuario = Depends(get_current_user),
 ):
-    """
-    Retorna el historial de compras directas realizadas por el cliente.
-    """
     res = await db.execute(
         select(Venta, Usuario.nombre)
         .outerjoin(Usuario, Venta.usuario_id == Usuario.id)
         .where(Venta.cliente_id == id)
-        .order_by(Venta.created_at.desc())
+        .order_by(Venta.id.desc())
     )
     compras = []
     for venta, u_nom in res.all():
-        # Obtener métodos de pago
         p_res = await db.execute(select(Pago).where(Pago.venta_id == venta.id))
         pagos = p_res.scalars().all()
-        metodos = ", ".join([p.metodo for p in pagos]) if pagos else "N/A"
+        metodos = ", ".join([p.metodo for p in pagos]) if pagos else (venta.metodo_pago_principal or "N/A")
 
-        compras.append({
-            "id": venta.id,
-            "numero": venta.numero,
-            "fecha": venta.created_at.strftime("%Y-%m-%d") if venta.created_at else "",
-            "hora": venta.created_at.strftime("%H:%M:%S") if venta.created_at else "",
-            "total": venta.total,
-            "metodo_pago": metodos,
-            "vendedor": u_nom or f"Usuario #{venta.usuario_id}",
-            "estado": venta.estado
-        })
+        compras.append(
+            {
+                "id": venta.id,
+                "numero": venta.numero,
+                "fecha": venta.fecha or (venta.created_at.strftime("%Y-%m-%d") if venta.created_at else ""),
+                "hora": venta.hora or (venta.created_at.strftime("%H:%M:%S") if venta.created_at else ""),
+                "total": venta.total,
+                "saldo_pendiente": float(venta.saldo_pendiente or 0.0),
+                "metodo_pago": metodos,
+                "vendedor": u_nom or venta.operario_nombre or f"Usuario #{venta.usuario_id}",
+                "estado": venta.estado,
+            }
+        )
     return compras
+
 
 @router.post("", response_model=ClienteResponse)
 async def create_cliente(
     cliente: ClienteCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
+    current_user: Usuario = Depends(get_current_user),
 ):
-    # Validación estricta de documento duplicado
     doc = cliente.documento.strip()
     if not doc:
         raise HTTPException(status_code=400, detail="El documento o cédula es obligatorio")
@@ -512,16 +550,17 @@ async def create_cliente(
         modulo="CLIENTES",
         tabla_afectada="clientes",
         registro_id=str(db_cli.id),
-        valor_nuevo={"documento": db_cli.documento, "nombre": db_cli.nombre}
+        valor_nuevo={"documento": db_cli.documento, "nombre": db_cli.nombre},
     )
     return db_cli
+
 
 @router.put("/{id}", response_model=ClienteResponse)
 async def update_cliente(
     id: int,
     cli_update: ClienteUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
+    current_user: Usuario = Depends(get_current_user),
 ):
     result = await db.execute(select(Cliente).where(Cliente.id == id))
     cliente = result.scalars().first()
@@ -531,7 +570,6 @@ async def update_cliente(
     update_data = cli_update.model_dump(exclude_unset=True, exclude={"cedula"})
     if "documento" in update_data and update_data["documento"]:
         doc = update_data["documento"].strip()
-        # Verificar que no pertenezca a otro cliente
         dup = await db.execute(select(Cliente).where(Cliente.documento == doc, Cliente.id != id))
         if dup.scalars().first():
             raise HTTPException(status_code=400, detail=f"El documento {doc} ya está asignado a otro cliente")
@@ -553,9 +591,10 @@ async def update_cliente(
         modulo="CLIENTES",
         tabla_afectada="clientes",
         registro_id=str(cliente.id),
-        valor_nuevo=update_data
+        valor_nuevo=update_data,
     )
     return cliente
+
 
 @router.delete("/{id}")
 async def delete_cliente(
@@ -563,12 +602,12 @@ async def delete_cliente(
     permanente: bool = True,
     forzar: bool = False,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
+    current_user: Usuario = Depends(get_current_user),
 ):
-    if current_user.rol != "Administrador":
+    if (current_user.rol or "").strip().lower() not in ("administrador", "admin"):
         raise HTTPException(
             status_code=403,
-            detail="Operación restringida: Solo los administradores pueden eliminar clientes"
+            detail="Operación restringida: Solo los administradores pueden eliminar clientes",
         )
 
     result = await db.execute(select(Cliente).where(Cliente.id == id))
@@ -576,32 +615,28 @@ async def delete_cliente(
     if not cliente:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
 
+    saldo = await ClienteService.obtener_saldo_cliente(db, id)
+    if saldo > 0.01 and not forzar:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No se puede eliminar al cliente '{cliente.nombre}' porque mantiene una deuda pendiente de ${saldo:,.0f}",
+        )
+
     doc_respaldo = cliente.documento
     nom_respaldo = cliente.nombre
 
-    # 1. Limpiar movimientos contables de cuenta corriente de este cliente (evita FK en abonos)
     cxc_subquery = select(CuentaPorCobrar.id).where(CuentaPorCobrar.cliente_id == id)
     await db.execute(
         delete(MovimientoCuentaCliente).where(
             or_(
                 MovimientoCuentaCliente.cliente_id == id,
-                MovimientoCuentaCliente.cuenta_id.in_(cxc_subquery)
+                MovimientoCuentaCliente.cuenta_id.in_(cxc_subquery),
             )
         )
     )
-    # 2. Limpiar abonos de cuentas asociadas al cliente
-    await db.execute(
-        delete(Abono).where(
-            Abono.cuenta_id.in_(cxc_subquery)
-        )
-    )
-    # 3. Limpiar cuentas por cobrar asociadas a este cliente
+    await db.execute(delete(Abono).where(Abono.cuenta_id.in_(cxc_subquery)))
     await db.execute(delete(CuentaPorCobrar).where(CuentaPorCobrar.cliente_id == id))
-    # 4. Desvincular de ventas para que el historial de facturas no se corrompa ni viole FK
-    await db.execute(
-        update(Venta).where(Venta.cliente_id == id).values(cliente_id=None)
-    )
-    # 5. Borrado definitivo del cliente
+    await db.execute(update(Venta).where(Venta.cliente_id == id).values(cliente_id=None))
     await db.delete(cliente)
     await db.commit()
 
@@ -615,59 +650,87 @@ async def delete_cliente(
         modulo="CLIENTES",
         tabla_afectada="clientes",
         registro_id=str(id),
-        valor_nuevo={"documento": doc_respaldo, "nombre": nom_respaldo, "motivo": "Eliminación solicitada por Administrador"}
+        valor_nuevo={
+            "documento": doc_respaldo,
+            "nombre": nom_respaldo,
+            "motivo": "Eliminación solicitada por Administrador",
+        },
     )
-    return {"message": f"Cliente '{nom_respaldo}' eliminado definitivamente de la base de datos.", "accion": "ELIMINADO_DEFINITIVO"}
+    return {
+        "message": f"Cliente '{nom_respaldo}' eliminado definitivamente de la base de datos.",
+        "accion": "ELIMINADO_DEFINITIVO",
+    }
+
 
 @router.post("/{id}/abonos")
 async def register_abono(
     id: int,
     abono: AbonoCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
+    current_user: Usuario = Depends(get_current_user),
 ):
     """
-    Registra un abono a la cuenta del cliente aplicando lógica FIFO y actualizando libro mayor.
+    Registra un abono atómico a la cuenta del cliente aplicando lógica FIFO,
+    idempotencia y actualizando Caja o Transferencias (nunca como nueva venta).
     """
-    res = await ClienteService.registrar_abono_fifo(
-        db=db,
-        cliente_id=id,
-        monto=abono.monto,
-        metodo=abono.metodo,
-        usuario_id=current_user.id,
-        terminal_id=None,
-        cuenta_id_especifica=abono.cuenta_id,
-        observacion=abono.observacion
-    )
-    await db.commit()
-    return res
+    u_nombre = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
+    try:
+        res = await ClienteService.registrar_abono_fifo(
+            db=db,
+            cliente_id=id,
+            monto=abono.monto,
+            metodo=abono.metodo,
+            usuario_id=current_user.id,
+            usuario_nombre=u_nombre,
+            terminal_id=abono.terminal_id,
+            sesion_caja_id=abono.sesion_caja_id,
+            cuenta_id_especifica=abono.cuenta_id,
+            observacion=abono.observacion,
+            idempotency_key=abono.idempotency_key,
+        )
+        await db.commit()
+        return res
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
 
 @router.post("/{id}/ajustes")
 async def register_ajuste(
     id: int,
     ajuste: AjusteDeudaCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
+    current_user: Usuario = Depends(get_current_user),
 ):
-    """
-    Ajuste manual de deuda autorizado (solo Administrador).
-    """
-    if current_user.rol != "Administrador":
-        raise HTTPException(status_code=403, detail="Solo los administradores pueden realizar ajustes manuales de deuda")
+    if (current_user.rol or "").strip().lower() not in ("administrador", "admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo los administradores pueden realizar ajustes manuales de deuda",
+        )
 
-    mov = await ClienteService.registrar_ajuste_manual(
-        db=db,
-        cliente_id=id,
-        monto_ajuste=ajuste.monto,
-        motivo=ajuste.motivo,
-        usuario_id=current_user.id,
-        terminal_id=None,
-        observacion=ajuste.observacion
-    )
-    await db.commit()
-    return {
-        "message": "Ajuste manual registrado exitosamente",
-        "movimiento_id": mov.id,
-        "saldo_anterior": mov.saldo_anterior,
-        "saldo_nuevo": mov.saldo_nuevo
-    }
+    try:
+        mov = await ClienteService.registrar_ajuste_manual(
+            db=db,
+            cliente_id=id,
+            monto_ajuste=ajuste.monto,
+            motivo=ajuste.motivo,
+            usuario_id=current_user.id,
+            terminal_id=None,
+            observacion=ajuste.observacion,
+        )
+        await db.commit()
+        return {
+            "message": "Ajuste manual registrado exitosamente",
+            "movimiento_id": mov.id,
+            "saldo_anterior": mov.saldo_anterior,
+            "saldo_nuevo": mov.saldo_nuevo,
+        }
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))

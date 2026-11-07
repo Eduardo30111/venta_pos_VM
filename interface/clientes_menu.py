@@ -3,6 +3,9 @@ from tkinter import ttk, messagebox
 from datetime import datetime, date, timedelta
 import os
 import sys
+import uuid
+import time
+import threading
 
 # Agregar ruta base para importar client
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,13 +34,6 @@ try:
     from components.currency_entry import CurrencyEntry, formatear_cop
 except ImportError:
     from interface.components.currency_entry import CurrencyEntry, formatear_cop
-
-try:
-    from caja_manager import registrar_movimiento_caja, registrar_abono_cartera
-    from database_manager import conectar_db
-except ImportError:
-    from interface.caja_manager import registrar_movimiento_caja, registrar_abono_cartera
-    from interface.database_manager import conectar_db
 
 def iniciar_clientes(parent_pid="", parent=None):
     if parent:
@@ -219,21 +215,23 @@ def iniciar_clientes(parent_pid="", parent=None):
     table_container.rowconfigure(0, weight=1)
     table_container.columnconfigure(0, weight=1)
 
-    # Columnas principales con operario/vendedor
-    columnas = ("NOMBRE", "TELEFONO", "OPERARIO", "FIADO", "DEUDA_TOTAL")
+    # Columnas principales con documento y operario/vendedor
+    columnas = ("DOCUMENTO", "NOMBRE", "TELEFONO", "OPERARIO", "FIADO", "DEUDA_TOTAL")
     tabla = ttk.Treeview(table_container, columns=columnas, show="headings")
 
+    tabla.heading("DOCUMENTO", text="DOCUMENTO")
     tabla.heading("NOMBRE", text="NOMBRE DEL CLIENTE")
     tabla.heading("TELEFONO", text="TELÉFONO")
     tabla.heading("OPERARIO", text="OPERARIO / VENDEDOR")
     tabla.heading("FIADO", text="FIADO")
     tabla.heading("DEUDA_TOTAL", text="DEUDA TOTAL")
 
-    tabla.column("NOMBRE", width=280, minwidth=160, anchor="w")
-    tabla.column("TELEFONO", width=130, minwidth=100, anchor="center")
-    tabla.column("OPERARIO", width=180, minwidth=130, anchor="center")
-    tabla.column("FIADO", width=90, minwidth=70, anchor="center")
-    tabla.column("DEUDA_TOTAL", width=150, minwidth=100, anchor="e")
+    tabla.column("DOCUMENTO", width=115, minwidth=90, anchor="center")
+    tabla.column("NOMBRE", width=250, minwidth=150, anchor="w")
+    tabla.column("TELEFONO", width=120, minwidth=95, anchor="center")
+    tabla.column("OPERARIO", width=170, minwidth=120, anchor="center")
+    tabla.column("FIADO", width=85, minwidth=65, anchor="center")
+    tabla.column("DEUDA_TOTAL", width=145, minwidth=100, anchor="e")
 
     v_scroll = ttk.Scrollbar(table_container, orient="vertical", command=tabla.yview)
     h_scroll = ttk.Scrollbar(table_container, orient="horizontal", command=tabla.xview)
@@ -259,8 +257,11 @@ def iniciar_clientes(parent_pid="", parent=None):
     # =========================================================================
     # CARGA DE DATOS DEL SERVIDOR Y FILTRADO LOCAL
     # =========================================================================
-    def cargar_datos_servidor():
+    ultimo_refresh_ts = [0.0]
+
+    def cargar_datos_servidor(silencioso=False):
         nonlocal clientes_cache
+        ultimo_refresh_ts[0] = time.time()
         params = {}
         tipo = filtro_tipo_var.get()
         if tipo in ("compras", "fiados"):
@@ -285,72 +286,27 @@ def iniciar_clientes(parent_pid="", parent=None):
             if resp.status_code == 200:
                 clientes_cache = resp.json()
                 filtrar_tabla_local()
-                # Sincronizar resiliente con SQLite local
-                try:
-                    conn_sync = conectar_db()
-                    if conn_sync:
-                        cur_sync = conn_sync.cursor()
-                        for c in clientes_cache:
-                            c_doc = str(c.get("documento") or c.get("cedula") or "").strip()
-                            if c_doc:
-                                cur_sync.execute("SELECT id FROM clientes WHERE cedula = ?", (c_doc,))
-                                if cur_sync.fetchone():
-                                    cur_sync.execute("""
-                                        UPDATE clientes SET nombre=?, telefono=?, direccion=?, limite_credito=?, saldo_pendiente=?, permite_fiado=?, estado=?
-                                        WHERE cedula=?
-                                    """, (c.get("nombre"), c.get("telefono") or "", c.get("direccion") or "", float(c.get("limite_credito") or 0.0), float(c.get("saldo_pendiente") or 0.0), 1 if c.get("permite_fiado") else 0, c.get("estado") or "Activo", c_doc))
-                                else:
-                                    cur_sync.execute("""
-                                        INSERT INTO clientes (cedula, nombre, telefono, direccion, limite_credito, permite_fiado, saldo_pendiente, estado, fecha_registro)
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                                    """, (c_doc, c.get("nombre"), c.get("telefono") or "", c.get("direccion") or "", float(c.get("limite_credito") or 0.0), 1 if c.get("permite_fiado") else 0, float(c.get("saldo_pendiente") or 0.0), c.get("estado") or "Activo"))
-                        conn_sync.commit()
-                        conn_sync.close()
-                except Exception as e_sync:
-                    print(f"Aviso sync SQLite: {e_sync}")
                 return
+            if not silencioso:
+                try:
+                    det = resp.json().get("detail", resp.text)
+                except Exception:
+                    det = resp.text
+                messagebox.showerror(
+                    "Error de Conexión con Servidor Central",
+                    f"No se pudo consultar la lista de clientes en {api.base_url}:\n\n{det}",
+                    parent=ventana,
+                )
         except Exception as e:
-            print(f"Aviso consultando clientes API: {e}")
-
-        # Fallback resiliente a SQLite local
-        try:
-            conn_l = conectar_db()
-            if conn_l:
-                cur_l = conn_l.cursor()
-                cur_l.execute("""
-                    SELECT id, cedula, nombre, telefono, direccion, limite_credito, saldo_pendiente, permite_fiado, estado
-                    FROM clientes
-                    ORDER BY nombre ASC
-                """)
-                clientes_cache = []
-                for r in cur_l.fetchall():
-                    cid, doc, nom, tel, direc, lim, sal, perm, est = r
-                    clientes_cache.append({
-                        "id": cid,
-                        "documento": doc,
-                        "cedula": doc,
-                        "nombre": nom,
-                        "telefono": tel or "",
-                        "direccion": direc or "",
-                        "limite_credito": float(lim or 0.0),
-                        "deuda_total": float(sal or 0.0),
-                        "saldo_pendiente": float(sal or 0.0),
-                        "permite_fiado": bool(perm),
-                        "estado": est or "Activo",
-                        "total_compras": 0.0,
-                        "operario_venta": "—"
-                    })
-                conn_l.close()
-                filtrar_tabla_local()
-        except Exception as e_sql:
-            messagebox.showerror("Error", f"Error al consultar clientes: {e_sql}")
+            if not silencioso:
+                messagebox.showerror("Error", f"Error al consultar clientes en el servidor central: {e}", parent=ventana)
 
     def filtrar_tabla_local():
         item_to_cliente_map.clear()
         tabla.delete(*tabla.get_children())
 
         busq = search_var.get().strip().lower()
-        
+
         tot_clientes = 0
         tot_compras = 0.0
         tot_con_fiado = 0
@@ -358,17 +314,17 @@ def iniciar_clientes(parent_pid="", parent=None):
 
         for c in clientes_cache:
             nombre = str(c.get("nombre", "") or "")
-            doc = str(c.get("documento", "") or "")
+            doc = str(c.get("documento") or c.get("cedula") or "")
             tel = str(c.get("telefono", "") or "")
             operario = str(c.get("operario_venta") or c.get("vendedor") or "—")
-            
+
             if busq:
                 if busq not in nombre.lower() and busq not in doc.lower() and busq not in tel.lower() and busq not in operario.lower():
                     continue
 
             tot_clientes += 1
             tot_compras += float(c.get("total_compras", 0) or 0)
-            deuda = float(c.get("deuda_total", 0) or 0)
+            deuda = float(c.get("deuda_total") if c.get("deuda_total") is not None else (c.get("saldo_pendiente", 0) or 0))
             tot_deuda += deuda
 
             permite_fiado = bool(c.get("permite_fiado", False))
@@ -386,6 +342,7 @@ def iniciar_clientes(parent_pid="", parent=None):
                 tags.append("deudor")
 
             item_id = tabla.insert("", "end", values=(
+                doc if doc else "—",
                 nombre,
                 tel if tel else "—",
                 operario,
@@ -393,7 +350,6 @@ def iniciar_clientes(parent_pid="", parent=None):
                 deuda_str
             ), tags=tuple(tags))
             item_to_cliente_map[item_id] = c
-
 
         total_clientes_var.set(str(tot_clientes))
         compras_periodo_var.set(f"${tot_compras:,.0f}")
@@ -534,7 +490,7 @@ def iniciar_clientes(parent_pid="", parent=None):
         fiados_raw_cache = []
         item_to_fiado_map = {}
 
-        def cargar_fiados():
+        def cargar_fiados(silencioso=False):
             nonlocal fiados_raw_cache
             try:
                 r = api.get("/clientes/fiados/resumen")
@@ -542,41 +498,15 @@ def iniciar_clientes(parent_pid="", parent=None):
                     fiados_raw_cache = r.json()
                     filtrar_fiados_local()
                     return
+                if not silencioso:
+                    try:
+                        det = r.json().get("detail", r.text)
+                    except Exception:
+                        det = r.text
+                    messagebox.showerror("Error", f"No se pudo consultar la cartera de fiados en el servidor central:\n{det}", parent=dlg_f)
             except Exception as e:
-                print(f"Aviso consultando cartera fiados API: {e}")
-
-            # Fallback resiliente a SQLite local
-            try:
-                conn_f = conectar_db()
-                if conn_f:
-                    cur_f = conn_f.cursor()
-                    cur_f.execute("""
-                        SELECT id, cedula, nombre, telefono, limite_credito, saldo_pendiente, permite_fiado, estado
-                        FROM clientes
-                        WHERE permite_fiado = 1 OR COALESCE(saldo_pendiente, 0) > 0
-                        ORDER BY nombre ASC
-                    """)
-                    fiados_raw_cache = []
-                    for rf in cur_f.fetchall():
-                        cid, doc, nom, tel, lim, sal, perm, est = rf
-                        fiados_raw_cache.append({
-                            "cliente_id": cid,
-                            "id": cid,
-                            "documento": doc,
-                            "nombre": nom,
-                            "telefono": tel or "",
-                            "total_fiado": float(sal or 0.0),
-                            "total_abonado": 0.0,
-                            "deuda_actual": float(sal or 0.0),
-                            "saldo_pendiente": float(sal or 0.0),
-                            "ultimo_abono": None,
-                            "estado": "PENDIENTE" if float(sal or 0.0) > 0 else "AL DÍA",
-                            "operario_venta": "—"
-                        })
-                    conn_f.close()
-                    filtrar_fiados_local()
-            except Exception as e_fsql:
-                print(f"Error fallback fiados SQLite: {e_fsql}")
+                if not silencioso:
+                    messagebox.showerror("Error", f"Error de conexión consultando cartera de fiados: {e}", parent=dlg_f)
 
         def filtrar_fiados_local(*args):
             item_to_fiado_map.clear()
@@ -665,33 +595,22 @@ def iniciar_clientes(parent_pid="", parent=None):
             if not confirmacion:
                 return
 
-            # 1. Intentar borrado en API
-            msg_api = None
             try:
                 resp = api.delete(f"/clientes/{cid}", params={"permanente": True, "forzar": True})
                 if resp.status_code == 200:
                     msg_api = resp.json().get("message")
-                elif resp.status_code not in (404, 503):
-                    detail = resp.json().get("detail", "Error al procesar la solicitud en el servidor.")
-                    messagebox.showerror("Error", f"No se pudo eliminar: {detail}", parent=dlg_f)
+                else:
+                    try:
+                        detail = resp.json().get("detail", resp.text)
+                    except Exception:
+                        detail = resp.text
+                    messagebox.showerror("Error", f"No se pudo eliminar en el servidor central:\n{detail}", parent=dlg_f)
                     return
             except Exception as e_api:
-                print(f"Aviso API al eliminar: {e_api}")
+                messagebox.showerror("Error de Red", f"No se pudo comunicar con el servidor central:\n{e_api}", parent=dlg_f)
+                return
 
-            # 2. Borrado definitivo en SQLite local
-            try:
-                conn_l = conectar_db()
-                if conn_l:
-                    cur_l = conn_l.cursor()
-                    cur_l.execute("UPDATE ventas SET cliente_id = NULL WHERE cliente_id = ? OR documento_cliente = ?", (cid, doc))
-                    cur_l.execute("DELETE FROM abonos_cartera WHERE cliente_id = ? OR cedula_cliente = ?", (cid, doc))
-                    cur_l.execute("DELETE FROM clientes WHERE id = ? OR cedula = ?", (cid, doc))
-                    conn_l.commit()
-                    conn_l.close()
-            except Exception as e_sql:
-                print(f"Error borrando cliente en SQLite: {e_sql}")
-
-            messagebox.showinfo("Cliente Eliminado", msg_api or f"✅ Cliente '{nom}' eliminado definitivamente de la base de datos.", parent=dlg_f)
+            messagebox.showinfo("Cliente Eliminado", msg_api or f"✅ Cliente '{nom}' eliminado en el servidor central.", parent=dlg_f)
             cargar_fiados()
             cargar_datos_servidor()
 
@@ -817,74 +736,32 @@ def iniciar_clientes(parent_pid="", parent=None):
                 messagebox.showerror("Error", "Documento y Nombre son campos obligatorios", parent=modal_nf)
                 return
 
-            # 1. Guardar en SQLite local inmediatamente (garantiza persistencia local y offline)
-            try:
-                conn_l = conectar_db()
-                if conn_l:
-                    cur_l = conn_l.cursor()
-                    cur_l.execute("SELECT id FROM clientes WHERE cedula = ?", (doc,))
-                    r_ex = cur_l.fetchone()
-                    if r_ex:
-                        cur_l.execute("""
-                            UPDATE clientes 
-                            SET nombre = ?, telefono = ?, direccion = ?, limite_credito = ?, permite_fiado = 1, estado = 'Activo'
-                            WHERE cedula = ?
-                        """, (nom, tel, direc, lim, doc))
-                    else:
-                        cur_l.execute("""
-                            INSERT INTO clientes (cedula, nombre, telefono, direccion, limite_credito, permite_fiado, saldo_pendiente, estado, fecha_registro)
-                            VALUES (?, ?, ?, ?, ?, 1, 0.0, 'Activo', ?)
-                        """, (doc, nom, tel, direc, lim, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                    conn_l.commit()
-                    conn_l.close()
-            except Exception as e_sql:
-                print(f"Error guardando cliente fiado en SQLite: {e_sql}")
-
-            # 2. Sincronizar con API central
             payload = {
                 "documento": doc,
                 "nombre": nom,
                 "telefono": tel,
                 "direccion": direc,
-                "permite_fiado": True,
+                "permite_fiado": bool(permite_var.get()),
                 "limite_credito": lim,
-                "estado": "Activo"
+                "estado": "Activo",
             }
 
             try:
                 resp = api.post("/clientes", json=payload)
                 if resp.status_code in (200, 201):
-                    try:
-                        data_c = resp.json()
-                        srv_id = data_c.get("id")
-                        if srv_id:
-                            conn_l = conectar_db()
-                            if conn_l:
-                                conn_l.execute("UPDATE clientes SET id = ? WHERE cedula = ?", (srv_id, doc))
-                                conn_l.commit()
-                                conn_l.close()
-                    except Exception:
-                        pass
-                    messagebox.showinfo("Éxito", f"Cliente '{nom}' registrado correctamente para fiado.", parent=modal_nf)
+                    messagebox.showinfo("Éxito", f"Cliente '{nom}' registrado correctamente en el servidor central.", parent=modal_nf)
                     modal_nf.destroy()
                     if on_success:
                         on_success()
                     cargar_datos_servidor()
-                elif resp.status_code == 400:
-                    detail = resp.json().get("detail", "Error al crear cliente")
-                    messagebox.showerror("Aviso", detail, parent=modal_nf)
                 else:
-                    messagebox.showinfo("Guardado Local", f"Cliente '{nom}' guardado en base de datos local.", parent=modal_nf)
-                    modal_nf.destroy()
-                    if on_success:
-                        on_success()
-                    cargar_datos_servidor()
+                    try:
+                        detail = resp.json().get("detail", resp.text)
+                    except Exception:
+                        detail = resp.text
+                    messagebox.showerror("No se pudo guardar", f"El servidor central rechazó el registro:\n\n{detail}", parent=modal_nf)
             except Exception as e:
-                messagebox.showinfo("Guardado Local", f"Cliente '{nom}' guardado en base local (servidor offline).", parent=modal_nf)
-                modal_nf.destroy()
-                if on_success:
-                    on_success()
-                cargar_datos_servidor()
+                messagebox.showerror("Error de Conexión", f"No se pudo conectar con el servidor central:\n{e}", parent=modal_nf)
 
         crear_boton(footer_nf, "Cancelar", modal_nf.destroy, tipo="secondary", icono="❌", tam_fuente=9).pack(side="right", padx=5, pady=4)
         crear_boton(footer_nf, "Guardar Cliente Fiado", guardar_nuevo_fiado, tipo="success", icono="💾", tam_fuente=9).pack(side="right", padx=5, pady=4)
@@ -1096,59 +973,99 @@ def iniciar_clientes(parent_pid="", parent=None):
             tk.Label(c_frame, text=f"Nuevo Saldo: ${saldo_nuevo:,.0f} COP", font=("Segoe UI", 10, "bold"), bg=t_conf["bg_card"], fg=t_conf["btn_danger_bg"]).pack(anchor="w", pady=2)
             tk.Label(c_frame, text=f"Método de Pago: {metodo}", font=("Segoe UI", 9), bg=t_conf["bg_card"], fg=t_conf["text_main"]).pack(anchor="w", pady=2)
 
+            idem_abono_key = f"abono-{uuid.uuid4()}"
+            estado_abono = {"en_curso": False}
+
+            c_btn_f = tk.Frame(conf, bg=t_conf["bg_surface"])
+            c_btn_f.pack(pady=10)
+
             def confirmar_final():
+                if estado_abono["en_curso"]:
+                    return
+                estado_abono["en_curso"] = True
+                c_nom = str(c_info.get("nombre") or f"Cliente #{cliente_id}").strip()
+                obs_txt = obs_var.get().strip() or None
                 try:
-                    c_doc = str(c_info.get("documento") or c_info.get("cedula") or "").strip()
-                    c_nom = str(c_info.get("nombre") or f"Cliente #{cliente_id}").strip()
-                    
-                    # 1. Si el servidor central está disponible, registrar prioritariamente allí
-                    saldo_final = saldo_nuevo
+                    btn_conf_abono.config(state="disabled", text="⏳ Registrando abono...")
+                    btn_canc_abono.config(state="disabled")
+                    conf.update_idletasks()
+                except Exception:
+                    pass
+
+                def _worker_abono():
                     try:
                         payload = {
                             "monto": monto,
                             "metodo": metodo,
-                            "observacion": obs_var.get().strip() or None
+                            "observacion": obs_txt,
+                            "idempotency_key": idem_abono_key,
                         }
-                        resp_api = api.post(f"/clientes/{cliente_id}/abonos", json=payload)
-                        if resp_api.status_code in (200, 201):
-                            data_api = resp_api.json()
-                            if "saldo_nuevo" in data_api:
-                                saldo_final = float(data_api["saldo_nuevo"])
-                    except Exception as e_api:
-                        print(f"Aviso conectando abono con API: {e_api}")
+                        resp_api = api.post(f"/clientes/{cliente_id}/abonos", json=payload, timeout=10.0)
+                        ventana.after(0, lambda: _finalizar_abono_ui(resp_api, None))
+                    except Exception as exc_ab:
+                        ventana.after(0, lambda: _finalizar_abono_ui(None, exc_ab))
 
-                    # 2. Registrar en SQLite local y reflejar ingreso en arqueo de caja física
-                    res_ab = registrar_abono_cartera(
-                        cliente_id=cliente_id,
-                        monto=monto,
-                        metodo=metodo,
-                        usuario="Administrador",
-                        observaciones=obs_var.get().strip() or f"Abono por {metodo}",
-                        cliente_doc=c_doc,
-                        cliente_nombre=c_nom,
-                        saldo_actual_conocido=deuda_actual
-                    )
-                    
-                    nuevo_saldo_mostrar = res_ab.get('saldo_nuevo', saldo_final)
+                def _finalizar_abono_ui(resp_api, exc_ab):
+                    estado_abono["en_curso"] = False
+                    if exc_ab is not None:
+                        try:
+                            if conf.winfo_exists():
+                                btn_conf_abono.config(state="normal", text="CONFIRMAR ABONO")
+                                btn_canc_abono.config(state="normal")
+                        except Exception:
+                            pass
+                        messagebox.showerror("Error de Red", f"No se pudo registrar el abono en el servidor central:\n{exc_ab}", parent=conf)
+                        return
 
-                    conf.destroy()
-                    messagebox.showinfo(
-                        "Abono Exitoso",
-                        f"Abono de ${monto:,.0f} COP registrado correctamente para {c_nom}.\nNuevo saldo pendiente: ${nuevo_saldo_mostrar:,.0f} COP",
-                        parent=modal_ab
-                    )
-                    e_monto.clear()
-                    obs_var.set("")
-                    refrescar_detalle()
-                    if on_abono_hecho:
-                        on_abono_hecho()
-                except Exception as ex:
-                    messagebox.showerror("Error", f"Error registrando abono: {ex}", parent=conf)
+                    if resp_api is not None and resp_api.status_code in (200, 201):
+                        data_api = resp_api.json()
+                        nuevo_saldo_mostrar = float(data_api.get("saldo_nuevo", saldo_nuevo))
+                        try:
+                            if conf.winfo_exists():
+                                conf.destroy()
+                        except Exception:
+                            pass
+                        messagebox.showinfo(
+                            "✅ Abono Registrado",
+                            f"Abono registrado correctamente para {c_nom}.\n\n"
+                            f"💵 Monto abonado: ${monto:,.0f} COP ({metodo})\n"
+                            f"📉 Nuevo saldo pendiente: ${nuevo_saldo_mostrar:,.0f} COP",
+                            parent=modal_ab,
+                        )
+                        e_monto.clear()
+                        obs_var.set("")
+                        refrescar_detalle()
+                        if on_abono_hecho:
+                            on_abono_hecho()
+                    else:
+                        try:
+                            if conf.winfo_exists():
+                                btn_conf_abono.config(state="normal", text="CONFIRMAR ABONO")
+                                btn_canc_abono.config(state="normal")
+                        except Exception:
+                            pass
+                        try:
+                            det_err = resp_api.json().get("detail", resp_api.text) if resp_api is not None else "Sin conexión con el servidor"
+                        except Exception:
+                            det_err = resp_api.text if resp_api is not None else "Sin conexión con el servidor"
+                        messagebox.showerror(
+                            "No se pudo registrar el abono",
+                            f"El servidor central rechazó o no pudo procesar el abono:\n\n{det_err}",
+                            parent=conf,
+                        )
 
-            c_btn_f = tk.Frame(conf, bg=t_conf["bg_surface"])
-            c_btn_f.pack(pady=10)
-            crear_boton(c_btn_f, "Cancelar", conf.destroy, tipo="secondary", tam_fuente=9).pack(side="left", padx=5)
-            crear_boton(c_btn_f, "CONFIRMAR ABONO", confirmar_final, tipo="success", tam_fuente=9).pack(side="left", padx=5)
+                threading.Thread(target=_worker_abono, daemon=True).start()
+
+            btn_canc_abono = crear_boton(
+                c_btn_f,
+                "Cancelar",
+                lambda: None if estado_abono["en_curso"] else conf.destroy(),
+                tipo="secondary",
+                tam_fuente=9,
+            )
+            btn_canc_abono.pack(side="left", padx=5)
+            btn_conf_abono = crear_boton(c_btn_f, "CONFIRMAR ABONO", confirmar_final, tipo="success", tam_fuente=9)
+            btn_conf_abono.pack(side="left", padx=5)
 
         btn_proc_abono = crear_boton(abono_row, "REGISTRAR ABONO", intentar_registrar_abono, tipo="success", icono="💾", tam_fuente=9)
         btn_proc_abono.pack(side="right", padx=6)
@@ -1327,38 +1244,13 @@ def iniciar_clientes(parent_pid="", parent=None):
                 messagebox.showerror("Error", "Documento y Nombre son campos requeridos", parent=modal_c)
                 return
 
-            p_fiado_val = 1 if permite_var.get() else 0
-
-            # 1. Guardar en SQLite local inmediatamente
-            try:
-                conn_l = conectar_db()
-                if conn_l:
-                    cur_l = conn_l.cursor()
-                    cur_l.execute("SELECT id FROM clientes WHERE cedula = ?", (doc,))
-                    r_ex = cur_l.fetchone()
-                    if r_ex:
-                        cur_l.execute("""
-                            UPDATE clientes 
-                            SET nombre = ?, telefono = ?, direccion = ?, limite_credito = ?, permite_fiado = ?, estado = 'Activo'
-                            WHERE cedula = ?
-                        """, (nom, tel, direc, lim, p_fiado_val, doc))
-                    else:
-                        cur_l.execute("""
-                            INSERT INTO clientes (cedula, nombre, telefono, direccion, limite_credito, permite_fiado, saldo_pendiente, estado, fecha_registro)
-                            VALUES (?, ?, ?, ?, ?, ?, 0.0, 'Activo', ?)
-                        """, (doc, nom, tel, direc, lim, p_fiado_val, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                    conn_l.commit()
-                    conn_l.close()
-            except Exception as e_sql:
-                print(f"Error guardando cliente en SQLite local: {e_sql}")
-
             payload = {
                 "documento": doc,
                 "nombre": nom,
                 "telefono": tel,
                 "direccion": direc,
-                "permite_fiado": permite_var.get(),
-                "limite_credito": lim
+                "permite_fiado": bool(permite_var.get()),
+                "limite_credito": lim,
             }
 
             try:
@@ -1371,24 +1263,21 @@ def iniciar_clientes(parent_pid="", parent=None):
 
                 if resp.status_code in (200, 201):
                     modal_c.destroy()
-                    messagebox.showinfo("Éxito", "Cliente guardado exitosamente", parent=ventana)
+                    messagebox.showinfo("Éxito", "Cliente guardado exitosamente en el servidor central.", parent=ventana)
                     cargar_datos_servidor()
-                elif resp.status_code == 400:
-                    detail = resp.json().get("detail", "Error al guardar")
-                    messagebox.showerror("Aviso", detail, parent=modal_c)
                 else:
-                    modal_c.destroy()
-                    messagebox.showinfo("Éxito", "Cliente guardado en base de datos local.", parent=ventana)
-                    cargar_datos_servidor()
+                    try:
+                        detail = resp.json().get("detail", resp.text)
+                    except Exception:
+                        detail = resp.text
+                    messagebox.showerror("No se pudo guardar", f"El servidor central rechazó la operación:\n\n{detail}", parent=modal_c)
             except Exception as e:
-                modal_c.destroy()
-                messagebox.showinfo("Éxito", "Cliente guardado en base de datos local.", parent=ventana)
-                cargar_datos_servidor()
+                messagebox.showerror("Error de Conexión", f"No se pudo conectar con el servidor central:\n{e}", parent=modal_c)
 
         crear_boton(footer_mc, "Cancelar", modal_c.destroy, tipo="secondary", icono="❌", tam_fuente=9).pack(side="right", padx=5, pady=4)
         crear_boton(footer_mc, "Guardar", guardar, tipo="success", icono="💾", tam_fuente=9).pack(side="right", padx=5, pady=4)
 
-    # Eliminar definitivamente cliente de la base de datos
+    # Eliminar definitivamente cliente de la base de datos central
     def eliminar_cliente_ui():
         cli = get_cliente_seleccionado()
         if not cli:
@@ -1400,7 +1289,6 @@ def iniciar_clientes(parent_pid="", parent=None):
         doc = str(cli.get("documento") or cli.get("cedula") or "").strip()
         deuda = float(cli.get("deuda_total") or cli.get("saldo_pendiente") or 0.0)
 
-        # Confirmación de eliminación definitiva
         if deuda > 0.01:
             confirmacion = messagebox.askyesno(
                 "⚠️ Eliminar Cliente con Deuda",
@@ -1413,43 +1301,28 @@ def iniciar_clientes(parent_pid="", parent=None):
             confirmacion = messagebox.askyesno(
                 "🗑️ Confirmar Eliminación Definitiva",
                 f"¿Está seguro de que desea ELIMINAR DEFINITIVAMENTE al cliente '{nom}' (Doc: {doc})?\n\n"
-                f"El cliente será borrado por completo de la base de datos.",
+                f"El cliente será borrado por completo de la base de datos central.",
                 parent=ventana
             )
         if not confirmacion:
             return
 
-        # 1. Borrado en API
-        msg_api = None
         try:
             resp = api.delete(f"/clientes/{cid}", params={"permanente": True, "forzar": True})
             if resp.status_code == 200:
-                data = resp.json()
-                msg_api = data.get("message")
-            elif resp.status_code not in (404, 503):
-                detail = resp.json().get("detail", "Error al procesar la solicitud en el servidor.")
-                messagebox.showerror("Error", f"No se pudo eliminar: {detail}", parent=ventana)
-                return
+                msg_api = resp.json().get("message")
+                messagebox.showinfo("Cliente Eliminado", msg_api or f"✅ Cliente '{nom}' eliminado en el servidor central.", parent=ventana)
+                cargar_datos_servidor()
+            else:
+                try:
+                    detail = resp.json().get("detail", resp.text)
+                except Exception:
+                    detail = resp.text
+                messagebox.showerror("Error", f"No se pudo eliminar en el servidor central:\n{detail}", parent=ventana)
         except Exception as e:
-            print(f"Aviso API al eliminar: {e}")
+            messagebox.showerror("Error de Red", f"No se pudo conectar con el servidor central:\n{e}", parent=ventana)
 
-        # 2. Borrado definitivo en SQLite local
-        try:
-            conn_l = conectar_db()
-            if conn_l:
-                cur_l = conn_l.cursor()
-                cur_l.execute("UPDATE ventas SET cliente_id = NULL WHERE cliente_id = ? OR documento_cliente = ?", (cid, doc))
-                cur_l.execute("DELETE FROM abonos_cartera WHERE cliente_id = ? OR cedula_cliente = ?", (cid, doc))
-                cur_l.execute("DELETE FROM clientes WHERE id = ? OR cedula = ?", (cid, doc))
-                conn_l.commit()
-                conn_l.close()
-        except Exception as e_sql:
-            print(f"Error borrando cliente en SQLite: {e_sql}")
-
-        messagebox.showinfo("Cliente Eliminado", msg_api or f"✅ Cliente '{nom}' eliminado definitivamente de la base de datos.", parent=ventana)
-        cargar_datos_servidor()
-
-    # Reactivar cliente para crédito y ventas
+    # Reactivar cliente para crédito y ventas en el servidor central
     def reactivar_cliente_ui():
         cli = get_cliente_seleccionado()
         if not cli:
@@ -1458,27 +1331,20 @@ def iniciar_clientes(parent_pid="", parent=None):
 
         cid = cli["id"]
         nom = cli["nombre"]
-        doc = str(cli.get("documento") or cli.get("cedula") or "").strip()
 
-        # Reactivar en API
         try:
-            api.put(f"/clientes/{cid}", json={"estado": "Activo", "permite_fiado": True})
+            resp = api.put(f"/clientes/{cid}", json={"estado": "Activo", "permite_fiado": True})
+            if resp.status_code in (200, 201):
+                messagebox.showinfo("Cliente Reactivado", f"✅ Cliente '{nom}' reactivado exitosamente con crédito habilitado.", parent=ventana)
+                cargar_datos_servidor()
+            else:
+                try:
+                    det = resp.json().get("detail", resp.text)
+                except Exception:
+                    det = resp.text
+                messagebox.showerror("Error", f"No se pudo reactivar al cliente:\n{det}", parent=ventana)
         except Exception as e_api:
-            print(f"Aviso API al reactivar: {e_api}")
-
-        # Reactivar en SQLite
-        try:
-            conn_l = conectar_db()
-            if conn_l:
-                cur_l = conn_l.cursor()
-                cur_l.execute("UPDATE clientes SET estado = 'Activo', permite_fiado = 1 WHERE id = ? OR cedula = ?", (cid, doc))
-                conn_l.commit()
-                conn_l.close()
-        except Exception as e_sql:
-            print(f"Error reactivando cliente en SQLite: {e_sql}")
-
-        messagebox.showinfo("Cliente Reactivado", f"✅ Cliente '{nom}' reactivado exitosamente con crédito habilitado.", parent=ventana)
-        cargar_datos_servidor()
+            messagebox.showerror("Error de Red", f"No se pudo conectar con el servidor central:\n{e_api}", parent=ventana)
 
     # Doble clic en tabla principal abre el detalle
     def on_doble_clic(event):
@@ -1540,6 +1406,14 @@ def iniciar_clientes(parent_pid="", parent=None):
     footer.pack(fill="x", side="bottom")
     fg_f = calcular_color_texto_optimo(t["bg_footer"])
     tk.Label(footer, text=f"✨ {business_mgr.nombre} - Sistema Integral de Clientes, Cuentas por Cobrar y Trazabilidad Financiera 🌸", font=("Segoe UI", 9, "italic"), bg=t["bg_footer"], fg=fg_f).pack(pady=4)
+
+    def _on_focus_in_clientes(event=None):
+        if event is not None and getattr(event, "widget", None) is not ventana:
+            return
+        if time.time() - ultimo_refresh_ts[0] >= 2.5:
+            cargar_datos_servidor(silencioso=True)
+
+    ventana.bind("<FocusIn>", _on_focus_in_clientes)
 
     # Carga inicial (inicia siempre en HOY por defecto)
     cargar_datos_servidor()

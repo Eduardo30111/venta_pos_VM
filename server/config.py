@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
     APP_NAME: str = "VmPOS"
-    APP_VERSION: str = "4.0.0"
+    APP_VERSION: str = "4.1.0"
     SERVER_PORT: int = OFFICIAL_SERVER_PORT
 
     class Config:

@@ -5,14 +5,13 @@ from .sesion import Sesion
 from .categoria import Categoria
 from .producto import Producto
 from .servicio import Servicio
-from .proveedor import Proveedor
+from .proveedor import Proveedor, LiquidacionProveedor
 from .cliente import Cliente
 from .venta import Venta, DetalleVenta, Pago
-from .inventario import MovimientoInventario
+from .inventario import MovimientoInventario, TrasladoInventario, CompraInventario, DetalleCompra
+from .caja import SesionCaja, MovimientoCaja, MovimientoFinanciero
 from .nomina import Comision, Liquidacion, Asistencia
-from .finanzas import CuentaPorCobrar, Abono, CuentaPorPagar, Gasto, MovimientoCuentaCliente
+from .finanzas import CuentaPorCobrar, Abono, CuentaPorPagar, Gasto, GastoRecurrente, MovimientoCuentaCliente
 from .auditoria import AuditLog
 from .turno import CicloTurno, ColaTurno, AtencionTurno, AlmuerzoTurno, EventoTurno
 from .configuracion import ConfiguracionNegocio
-
-

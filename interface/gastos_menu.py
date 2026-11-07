@@ -66,6 +66,51 @@ FRECUENCIAS = ["Diaria", "Semanal", "Quincenal", "Mensual", "Anual"]
 
 def obtener_gastos_db(filtro_periodo="Todos", filtro_cat="Todas", filtro_estado="Todos", busqueda=""):
     """Consulta gastos con filtros contables y búsqueda."""
+    try:
+        f_ini = None
+        f_fin = None
+        hoy = datetime.now()
+        hoy_str = hoy.strftime("%Y-%m-%d")
+        if filtro_periodo == "Hoy":
+            f_ini = f_fin = hoy_str
+        elif filtro_periodo == "Ayer":
+            from datetime import timedelta
+            f_ini = f_fin = (hoy - timedelta(days=1)).strftime("%Y-%m-%d")
+        elif filtro_periodo == "Esta semana":
+            from datetime import timedelta
+            f_ini = (hoy - timedelta(days=hoy.weekday())).strftime("%Y-%m-%d")
+            f_fin = hoy_str
+        elif filtro_periodo == "Este mes":
+            f_ini = hoy.strftime("%Y-%m-01")
+            f_fin = hoy_str
+
+        p = {}
+        if f_ini: p["fecha_inicio"] = f_ini
+        if f_fin: p["fecha_fin"] = f_fin
+        if filtro_cat != "Todas": p["categoria"] = filtro_cat
+        if filtro_estado != "Todos": p["estado"] = filtro_estado
+
+        resp = api.get("/gastos", params=p, timeout=4.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            if busqueda:
+                b_low = busqueda.lower().strip()
+                data = [
+                    x for x in data
+                    if b_low in str(x.get("concepto", "")).lower()
+                    or b_low in str(x.get("proveedor", "")).lower()
+                    or b_low in str(x.get("comprobante", "")).lower()
+                ]
+            for g in data:
+                if "id_gasto" not in g and "id" in g:
+                    g["id_gasto"] = g["id"]
+                if g.get("estado") == "Pendiente" and g.get("fecha_vencimiento"):
+                    if g["fecha_vencimiento"] < hoy_str:
+                        g["estado"] = "Vencido"
+            return data
+    except Exception:
+        pass
+
     conn = conectar_sqlite()
     if not conn:
         return []
@@ -150,6 +195,28 @@ def registrar_nuevo_gasto(
     usuario: str = "Administrador"
 ) -> bool:
     """Inserta un gasto. Si es Pagado en Efectivo, descuenta de la sesión física de caja."""
+    try:
+        resp = api.post(
+            "/gastos",
+            json={
+                "concepto": concepto,
+                "valor": float(valor),
+                "categoria": categoria,
+                "clasificacion": categoria,
+                "metodo_pago": metodo_pago,
+                "estado": estado,
+                "fecha_vencimiento": fecha_vencimiento or None,
+                "proveedor": proveedor or "",
+                "comprobante": comprobante or "",
+                "observaciones": observaciones or "",
+            },
+            timeout=5.0,
+        )
+        if resp.status_code in (200, 201):
+            return True
+    except Exception:
+        pass
+
     conn = conectar_sqlite()
     if not conn:
         return False
@@ -226,6 +293,13 @@ def registrar_nuevo_gasto(
 
 def anular_gasto_db(id_gasto: int) -> bool:
     """Marca un gasto como Anulado y actualiza la trazabilidad financiera."""
+    try:
+        resp = api.delete(f"/gastos/{id_gasto}", timeout=4.0)
+        if resp.status_code == 200:
+            return True
+    except Exception:
+        pass
+
     conn = conectar_sqlite()
     if not conn:
         return False
@@ -931,6 +1005,24 @@ def iniciar_gastos(parent_pid="", parent=None):
         recargar_tabla_gastos()
         recargar_tabla_recurrentes()
         recargar_dashboard()
+
+    _last_focusin = [0.0]
+
+    def _on_focusin(event):
+        try:
+            if event.widget == ventana:
+                import time
+                now = time.time()
+                if now - _last_focusin[0] > 2.5:
+                    _last_focusin[0] = now
+                    ventana.after(100, recargar_todo)
+        except Exception:
+            pass
+
+    try:
+        ventana.bind("<FocusIn>", _on_focusin, add="+")
+    except Exception:
+        pass
 
     recargar_todo()
 
