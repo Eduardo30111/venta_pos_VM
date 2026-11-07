@@ -16,13 +16,8 @@ echo "=================================================================="
 echo "🚀 INICIANDO EMPAQUETADO DE VmPOS PARA macOS"
 echo "=================================================================="
 
-# 1. Asegurar entorno virtual y dependencias compatibles con macOS (Tk >= 9.0)
-if [ -x "$PROJECT_ROOT/venv/bin/python" ] && [ -x "$PROJECT_ROOT/venv/bin/pyinstaller" ]; then
-    PYTHON_BIN="$PROJECT_ROOT/venv/bin/python"
-    export PYTHONPATH="$PROJECT_ROOT/.venv/lib/python3.9/site-packages:$PROJECT_ROOT/venv/lib/python3.9/site-packages:$PYTHONPATH"
-elif [ -x "$PROJECT_ROOT/.venv/bin/python3" ]; then
-    PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python3"
-elif [ -x "/Users/eduardosanchez/miniconda3/bin/python3" ]; then
+# 1. Asegurar entorno virtual y dependencias compatibles con macOS (Tk >= 9.0 obligatorio)
+if [ -x "/Users/eduardosanchez/miniconda3/bin/python3" ]; then
     PYTHON_BIN="/Users/eduardosanchez/miniconda3/bin/python3"
 elif [ -x "$HOME/miniconda3/bin/python3" ]; then
     PYTHON_BIN="$HOME/miniconda3/bin/python3"
@@ -30,6 +25,11 @@ elif [ -x "/opt/homebrew/bin/python3" ]; then
     PYTHON_BIN="/opt/homebrew/bin/python3"
 elif [ -x "/usr/local/bin/python3" ]; then
     PYTHON_BIN="/usr/local/bin/python3"
+elif [ -x "$PROJECT_ROOT/venv/bin/python" ] && [ -x "$PROJECT_ROOT/venv/bin/pyinstaller" ]; then
+    PYTHON_BIN="$PROJECT_ROOT/venv/bin/python"
+    export PYTHONPATH="$PROJECT_ROOT/.venv/lib/python3.9/site-packages:$PROJECT_ROOT/venv/lib/python3.9/site-packages:$PYTHONPATH"
+elif [ -x "$PROJECT_ROOT/.venv/bin/python3" ]; then
+    PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python3"
 elif [ -f "./venv/bin/python" ]; then
     PYTHON_BIN="./venv/bin/python"
 else
