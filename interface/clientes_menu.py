@@ -34,8 +34,10 @@ except ImportError:
 
 try:
     from caja_manager import registrar_movimiento_caja, registrar_abono_cartera
+    from database_manager import conectar_db
 except ImportError:
     from interface.caja_manager import registrar_movimiento_caja, registrar_abono_cartera
+    from interface.database_manager import conectar_db
 
 def iniciar_clientes(parent_pid="", parent=None):
     if parent:

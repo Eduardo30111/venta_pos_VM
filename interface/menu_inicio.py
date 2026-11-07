@@ -2015,6 +2015,9 @@ class VmPOSDashboard(tk.Tk):
             form_frame = tk.LabelFrame(main_frame, text="Agregar Nuevo Gasto", 
                                       bg="#FFF3E0", fg="#E65100", font=("Segoe UI", 12, "bold"))
             form_frame.pack(fill="x", pady=10)
+            lista_frame = tk.LabelFrame(main_frame, text="Gastos Registrados Hoy",
+                                       bg="#FFF3E0", fg="#E65100", font=("Segoe UI", 12, "bold"))
+            lista_frame.pack(fill="both", expand=True, pady=10)
             self.tree_gastos = ttk.Treeview(lista_frame, columns=("Concepto", "Valor", "Hora"), show="headings")
             self.tree_gastos.pack(fill="both", expand=True, padx=10, pady=10)
 

@@ -57,6 +57,47 @@ except Exception as e:
     print(f"[AVISO] Aviso al instalar dependencias con pip: {e}")
     print("Continuando con la compilacion...")
 
+# 1.5 Verificar importación limpia de todos los módulos UI/Cliente/Servidor en un subproceso aislado
+print("\n[1.5/4] Verificando importacion de todos los modulos principales...")
+MODULOS_VERIFICAR = [
+    "interface.config",
+    "interface.business_manager",
+    "interface.network_manager",
+    "interface.network_dialog",
+    "interface.receipt_manager",
+    "interface.menu_inicio",
+    "interface.ventas_menu",
+    "interface.caja_menu",
+    "interface.clientes_menu",
+    "interface.inventario_menu",
+    "interface.gastos_menu",
+    "interface.nomina_menu",
+    "interface.reportes_menu",
+    "interface.configuracion_menu",
+    "interface.contabilidad_menu",
+    "interface.turnos_menu",
+    "interface.usuarios_menu",
+    "client.api_client",
+    "server.main",
+]
+check_script = (
+    "import importlib, os, sys; "
+    f"sys.path.insert(0, {PROJECT_ROOT!r}); "
+    f"sys.path.insert(0, os.path.join({PROJECT_ROOT!r}, 'interface')); "
+    f"[importlib.import_module(m) for m in {MODULOS_VERIFICAR!r}]"
+)
+res_imp = subprocess.run([sys.executable, "-c", check_script], capture_output=True, text=True)
+temp_vmpos_log = os.path.join(PROJECT_ROOT, "vmpos.log")
+if os.path.exists(temp_vmpos_log):
+    try:
+        os.remove(temp_vmpos_log)
+    except Exception:
+        pass
+if res_imp.returncode != 0:
+    print(f"\n[ERROR] Fallo al importar modulos principales:\n{res_imp.stderr}\n{res_imp.stdout}")
+    sys.exit(res_imp.returncode)
+print(f"  [OK] {len(MODULOS_VERIFICAR)} modulos verificados sin errores de importacion ni anotaciones.")
+
 # 2. Limpiar carpetas y ejecutables anteriores sin borrar instaladores DMG/ZIP de macOS
 print("\n[2/4] Limpiando carpetas build/ y ejecutables previos...")
 build_dir = os.path.join(PROJECT_ROOT, "build")

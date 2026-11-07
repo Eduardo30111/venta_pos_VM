@@ -23,12 +23,14 @@ import os
 import sys
 import json
 import time
+import socket
 import shutil
 import sqlite3
 import tempfile
 import textwrap
 import subprocess
 from datetime import datetime
+from typing import Tuple
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -1488,6 +1490,35 @@ def _imprimir_por_red_tcp(norm, cfg):
         return True, f"Factura impresa y cajón abierto vía red TCP ({ip}:{puerto})."
     except Exception as e:
         return False, f"Error conectando con impresora de red {ip}:{puerto}: {e}"
+
+
+def _buscar_impresora_usb_compatible(cfg: dict):
+    """Busca un dispositivo térmico USB ESC/POS compatible usando VID/PID configurado o conocidos."""
+    try:
+        import usb.core
+    except ImportError:
+        return None
+
+    vid_cfg = str(cfg.get("usb_vendor_id", "")).strip()
+    pid_cfg = str(cfg.get("usb_product_id", "")).strip()
+    if vid_cfg and pid_cfg:
+        try:
+            v_int = int(vid_cfg, 16) if vid_cfg.startswith("0x") else int(vid_cfg)
+            p_int = int(pid_cfg, 16) if pid_cfg.startswith("0x") else int(pid_cfg)
+            dev = usb.core.find(idVendor=v_int, idProduct=p_int)
+            if dev is not None:
+                return dev
+        except Exception:
+            pass
+
+    try:
+        for ucfg in USB_THERMAL_CONFIGS:
+            dev = usb.core.find(idVendor=ucfg["vid"], idProduct=ucfg["pid"])
+            if dev is not None:
+                return dev
+    except Exception:
+        pass
+    return None
 
 
 def pulsar_apertura_cajon(config_override=None) -> Tuple[bool, str]:

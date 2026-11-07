@@ -21,6 +21,8 @@ from tkinter import ttk, messagebox
 from datetime import datetime
 import os
 import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from client.api_client import api
 
 try:
     from theme_manager import theme_mgr, aplicar_tema, calcular_geometria_segura, crear_boton, ScrollableContainer, calcular_color_texto_optimo

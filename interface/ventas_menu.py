@@ -6,10 +6,17 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 import os
+import sys
+import sqlite3
+import subprocess
 import threading
-import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from client.api_client import api
+
+try:
+    from database_manager import conectar_db
+except ImportError:
+    from interface.database_manager import conectar_db
 
 try:
     from theme_manager import theme_mgr, aplicar_tema, calcular_geometria_segura, calcular_color_texto_optimo, crear_boton, ScrollableContainer
