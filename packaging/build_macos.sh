@@ -39,7 +39,9 @@ export MPLCONFIGDIR="$PROJECT_ROOT/build/matplotlib_cache"
 mkdir -p "$PYINSTALLER_CONFIG_DIR" "$MPLCONFIGDIR"
 
 echo "Verificando dependencias de compilación..."
-$PYTHON_BIN -m pip install --quiet pyinstaller pillow reportlab matplotlib pandas openpyxl httpx pydantic pydantic_settings python-barcode babel python-escpos pyusb fastapi uvicorn "sqlalchemy[asyncio]" greenlet aiosqlite asyncpg "python-jose[cryptography]" "passlib[bcrypt]" "bcrypt==3.2.2" python-multipart
+if ! $PYTHON_BIN -c "import PyInstaller, PIL, reportlab, matplotlib, pandas, openpyxl, httpx, pydantic, pydantic_settings, barcode, babel, escpos, usb, fastapi, uvicorn, sqlalchemy, greenlet, aiosqlite, asyncpg, jose, bcrypt, multipart" 2>/dev/null; then
+    $PYTHON_BIN -m pip install --quiet pyinstaller pillow reportlab matplotlib pandas openpyxl httpx pydantic pydantic_settings python-barcode babel python-escpos pyusb fastapi uvicorn "sqlalchemy[asyncio]" greenlet aiosqlite asyncpg "python-jose[cryptography]" bcrypt python-multipart
+fi
 
 # 2. Generar archivo .icns si no existe
 ICNS_PATH="$PROJECT_ROOT/assets/Salome.icns"
@@ -108,7 +110,6 @@ $PYTHON_BIN -m PyInstaller \
     --collect-submodules="anyio" \
     --collect-submodules="sqlalchemy" \
     --collect-submodules="jose" \
-    --collect-submodules="passlib" \
     --hidden-import="fastapi" \
     --hidden-import="uvicorn" \
     --hidden-import="greenlet" \
@@ -120,7 +121,6 @@ $PYTHON_BIN -m PyInstaller \
     --hidden-import="aiosqlite" \
     --hidden-import="asyncpg" \
     --hidden-import="jose" \
-    --hidden-import="passlib.handlers.bcrypt" \
     --hidden-import="bcrypt" \
     --hidden-import="multipart" \
     --hidden-import="reportlab" \
@@ -178,7 +178,7 @@ if hdiutil makehybrid -hfs -joliet -iso -default-volume-name "Instalador VmPOS" 
         echo "ℹ️ No se pudo convertir ISO a DMG, usando método estándar."
     fi
 fi
-rm -f "$STAGE_ISO"
+rm -f "$STAGE_ISO" "$PROJECT_ROOT/VmPOS.spec"
 rm -rf "$DMG_STAGE"
 
 echo "=================================================================="

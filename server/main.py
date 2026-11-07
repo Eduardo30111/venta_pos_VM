@@ -56,7 +56,7 @@ app.include_router(configuracion.router)
 app.include_router(configuracion.router, prefix="/api")
 
 
-async def _sincronizar_usuarios_locales(session: AsyncSession):
+async def _sincronizar_usuarios_locales():
     """Sincroniza usuarios existentes en usuarios.db del servidor hacia la tabla central Usuario sin borrar nada."""
     try:
         from interface.config import DB_USUARIOS_PATH
@@ -83,22 +83,37 @@ async def _sincronizar_usuarios_locales(session: AsyncSession):
             uname = str(d.get("usuario") or "").strip()
             if not uname:
                 continue
-            existente = await session.execute(select(Usuario).where(Usuario.usuario == uname))
-            if not existente.scalars().first():
-                raw_pwd = str(d.get("password") or d.get("clave") or "admin123")
-                pwd_hash = raw_pwd if raw_pwd.startswith("$2") else hash_password(raw_pwd)
-                nuevo = Usuario(
-                    nombre=str(d.get("nombre") or uname),
-                    apellidos=str(d.get("apellidos") or ""),
-                    documento=str(d.get("documento") or "000000000"),
-                    usuario=uname,
-                    password_hash=pwd_hash,
-                    rol=str(d.get("rol") or "Operario"),
-                    tipo_remuneracion=str(d.get("tipo_remuneracion") or "Fija"),
-                    estado=str(d.get("estado") or "Activo"),
-                )
-                session.add(nuevo)
-        await session.commit()
+            try:
+                async with db_mod.SessionLocal() as sync_session:
+                    existente = await sync_session.execute(select(Usuario).where(Usuario.usuario == uname))
+                    if existente.scalars().first():
+                        continue
+
+                    raw_doc = str(d.get("documento") or "").strip()
+                    if not raw_doc or raw_doc in ("000000000", "None", "null"):
+                        doc_val = None
+                    else:
+                        dup_doc = await sync_session.execute(select(Usuario).where(Usuario.documento == raw_doc))
+                        doc_val = None if dup_doc.scalars().first() else raw_doc
+
+                    raw_pwd = str(d.get("password") or d.get("clave") or "admin123")
+                    pwd_hash = raw_pwd if raw_pwd.startswith("$2") else hash_password(raw_pwd)
+                    nuevo = Usuario(
+                        nombre=str(d.get("nombre") or uname),
+                        apellidos=str(d.get("apellidos") or ""),
+                        documento=doc_val,
+                        usuario=uname,
+                        password_hash=pwd_hash,
+                        rol=str(d.get("rol") or "Operario"),
+                        tipo_remuneracion=str(d.get("tipo_remuneracion") or "Fija"),
+                        salario_diario=float(d.get("salario_diario") or 0.0),
+                        porcentaje_comision=float(d.get("porcentaje_comision") or 0.0),
+                        estado=str(d.get("estado") or "Activo"),
+                    )
+                    sync_session.add(nuevo)
+                    await sync_session.commit()
+            except Exception as row_err:
+                print(f"Aviso sincronizando usuario local '{uname}': {row_err}")
     except Exception as e:
         print(f"Aviso sincronizando usuarios locales en startup: {e}")
 
@@ -153,13 +168,18 @@ async def startup():
         if not result.scalars().first():
             session.add(Terminal(nombre="CAJA-01", descripcion="Caja Principal (Servidor)"))
             session.add(Terminal(nombre="CAJA-02", descripcion="Caja Secundaria"))
+            await session.commit()
+
+    await _sincronizar_usuarios_locales()
+
+    async with db_mod.SessionLocal() as session:
         admin = await session.execute(select(Usuario).where(Usuario.usuario == "admin"))
         if not admin.scalars().first():
             session.add(
                 Usuario(
                     nombre="Admin",
                     apellidos="Principal",
-                    documento="000000000",
+                    documento=None,
                     usuario="admin",
                     password_hash=hash_password("admin123"),
                     rol="Administrador",
@@ -167,9 +187,10 @@ async def startup():
                     estado="Activo",
                 )
             )
-        await session.commit()
-        await _sincronizar_usuarios_locales(session)
-        await obtener_o_crear_config_negocio(session)
+            await session.commit()
+
+    async with db_mod.SessionLocal() as cfg_session:
+        await obtener_o_crear_config_negocio(cfg_session)
 
 
 @app.get("/api/health")
