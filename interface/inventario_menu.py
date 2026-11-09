@@ -168,6 +168,500 @@ def modal_crear_proveedor_rapido(parent_win, combo_widget=None, var_widget=None)
     e_nom.bind("<Return>", lambda ev: e_nit.focus_set())
     e_nit.bind("<Return>", lambda ev: e_tel.focus_set())
 
+
+# ==============================================================================
+# SELECTORES DINÁMICOS Y BÚSQUEDA ASISTIDA DE ARTÍCULOS
+# ==============================================================================
+
+def modal_buscar_articulo_catalogo(parent, articulos_provider, on_elegido):
+    """Ventana emergente responsiva para búsqueda y selección asistida de productos."""
+    dialog = tk.Toplevel(parent)
+    dialog.title("🔎 Buscar Producto en Catálogo")
+    t_d = aplicar_tema(dialog)
+    dialog.configure(bg=t_d["bg_surface"])
+    calcular_geometria_segura(dialog, 700, 480, 540, 380)
+    dialog.transient(parent)
+    dialog.grab_set()
+
+    f_top = tk.Frame(dialog, bg=t_d["bg_surface"], padx=15, pady=10)
+    f_top.pack(fill="x")
+    tk.Label(f_top, text="🔍 Buscar por Nombre, Código o Código de Barras:", font=("Segoe UI", 10, "bold"),
+             bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(anchor="w", pady=(0, 4))
+    var_q = tk.StringVar()
+    e_q = tk.Entry(f_top, textvariable=var_q, font=("Segoe UI", 11), bg=t_d["input_bg"],
+                   fg=t_d["input_fg"], insertbackground=t_d["input_insert"])
+    e_q.pack(fill="x")
+    e_q.focus_set()
+
+    f_tbl = tk.Frame(dialog, bg=t_d["bg_surface"], padx=15, pady=5)
+    f_tbl.pack(fill="both", expand=True)
+    cols = ("Código", "Nombre", "Tipo", "U. Medida", "Stock Bodega", "Stock Vitrina", "Costo")
+    tree = ttk.Treeview(f_tbl, columns=cols, show="headings", selectmode="browse")
+    for c in cols:
+        tree.heading(c, text=c)
+    tree.column("Código", width=80, anchor="center")
+    tree.column("Nombre", width=220, anchor="w")
+    tree.column("Tipo", width=70, anchor="center")
+    tree.column("U. Medida", width=80, anchor="center")
+    tree.column("Stock Bodega", width=85, anchor="center")
+    tree.column("Stock Vitrina", width=85, anchor="center")
+    tree.column("Costo", width=95, anchor="e")
+
+    sc_y = ttk.Scrollbar(f_tbl, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=sc_y.set)
+    tree.pack(side="left", fill="both", expand=True)
+    sc_y.pack(side="right", fill="y")
+
+    try:
+        articulos = articulos_provider() or []
+    except Exception:
+        articulos = []
+    art_map = {}
+
+    def _render(filtro=""):
+        tree.delete(*tree.get_children())
+        art_map.clear()
+        q = filtro.strip().lower()
+        for a in articulos:
+            nom = (a.get("nombre") or "").lower()
+            cod = (a.get("codigo") or "").lower()
+            cb = str(a.get("codigo_barras") or "").lower()
+            if not q or (q in nom or q in cod or (cb and q in cb)):
+                u = a.get("unidad_medida", "Unidad")
+                item_id = tree.insert("", "end", values=(
+                    a.get("codigo", ""),
+                    a.get("nombre", ""),
+                    a.get("tipo_producto", "Fisico"),
+                    u,
+                    formato_cant(a.get("stock_bodega", 0), u),
+                    formato_cant(a.get("stock_vitrina", 0), u),
+                    formato_peso(a.get("costo", a.get("precio_costo", 0.0)))
+                ))
+                art_map[item_id] = a
+
+    _render()
+    var_q.trace_add("write", lambda *a: _render(var_q.get()))
+
+    def _seleccionar():
+        sel = tree.selection()
+        if not sel:
+            return
+        art = art_map.get(sel[0])
+        if art:
+            on_elegido(art)
+            dialog.destroy()
+
+    tree.bind("<Double-1>", lambda e: _seleccionar())
+    dialog.bind("<Return>", lambda e: _seleccionar())
+    dialog.bind("<Escape>", lambda e: dialog.destroy())
+
+    f_btn = tk.Frame(dialog, bg=t_d["bg_surface_alt"], padx=15, pady=8, bd=1, relief="ridge")
+    f_btn.pack(fill="x", side="bottom")
+    crear_boton(f_btn, "Cancelar", dialog.destroy, tipo="secondary").pack(side="right", padx=5)
+    crear_boton(f_btn, "Seleccionar", _seleccionar, tipo="success", icono="✅").pack(side="right", padx=5)
+
+
+def hacer_combobox_buscable(combobox, var_texto, articulos_func, on_select_callback=None, parent_modal=None, boton_lupa_parent=None):
+    """
+    Convierte un Combobox estándar en un selector con filtro predictivo en tiempo real
+    por nombre, código y código de barras. Soporta mayúsculas y minúsculas,
+    despliega '(Sin coincidencias)' y permite navegación con teclado o búsqueda asistida.
+    """
+    articulos_cache = {"lista": []}
+
+    def _obtener_lista():
+        if not articulos_cache["lista"]:
+            try:
+                articulos_cache["lista"] = articulos_func() or []
+            except Exception:
+                articulos_cache["lista"] = []
+        return articulos_cache["lista"]
+
+    def _recargar_cache():
+        try:
+            articulos_cache["lista"] = articulos_func() or []
+        except Exception:
+            articulos_cache["lista"] = []
+        return articulos_cache["lista"]
+
+    try:
+        combobox.config(state="normal")
+    except Exception:
+        pass
+
+    def _filtrar(e=None):
+        if e and e.keysym in ("Up", "Down", "Return", "Escape", "Tab"):
+            return
+
+        q = var_texto.get().strip().lower()
+        articulos = _obtener_lista()
+
+        if not q:
+            combobox["values"] = [f"{a['codigo']} - {a['nombre']}" for a in articulos]
+            return
+
+        coincidencias = []
+        for a in articulos:
+            nom = (a.get("nombre") or "").lower()
+            cod = (a.get("codigo") or "").lower()
+            cb = str(a.get("codigo_barras") or "").lower()
+            if q in nom or q in cod or (cb and q in cb):
+                coincidencias.append(f"{a['codigo']} - {a['nombre']}")
+
+        if coincidencias:
+            combobox["values"] = coincidencias
+        else:
+            combobox["values"] = [f"⚠️ (Sin coincidencias para '{var_texto.get()}')"]
+
+    def _on_select(e=None):
+        sel = var_texto.get()
+        if sel.startswith("⚠️ (Sin coincidencias"):
+            return
+        if on_select_callback:
+            on_select_callback(e)
+
+    def _on_focus_in(e=None):
+        _recargar_cache()
+        if not var_texto.get().strip():
+            combobox["values"] = [f"{a['codigo']} - {a['nombre']}" for a in _obtener_lista()]
+
+    def _on_return(e=None):
+        vals = combobox["values"]
+        if vals and len(vals) == 1 and not vals[0].startswith("⚠️"):
+            var_texto.set(vals[0])
+            _on_select()
+
+    combobox.bind("<KeyRelease>", _filtrar)
+    combobox.bind("<<ComboboxSelected>>", _on_select)
+    combobox.bind("<FocusIn>", _on_focus_in)
+    combobox.bind("<Return>", _on_return)
+
+    if boton_lupa_parent:
+        crear_boton(
+            boton_lupa_parent, "",
+            lambda: modal_buscar_articulo_catalogo(
+                parent_modal or combobox.winfo_toplevel(),
+                _obtener_lista,
+                lambda a: (var_texto.set(f"{a['codigo']} - {a['nombre']}"), _on_select())
+            ),
+            tipo="secondary", icono="🔍", tam_fuente=8, padx=5, pady=2,
+            tooltip="Buscar artículo en catálogo visual"
+        ).pack(side="left", padx=(2, 0))
+
+    return _recargar_cache
+
+
+# ==============================================================================
+# MODAL FLOTANTE DE ENTRADA DE FACTURAS POR DISTRIBUIDOR
+# ==============================================================================
+
+def modal_productos_distribuidor(parent_modal, proveedor_id, proveedor_nombre, on_agregar_item_callback, abrir_nuevo_articulo_callback=None):
+    """
+    Ventana emergente flotante para agregar productos de un distribuidor específico.
+    Muestra prioritariamente los productos asociados al distribuidor.
+    Incluye:
+    - Buscador dinámico por nombre, código y código de barras.
+    - Botón 'PRODUCTOS DE BODEGA' para asociar o agregar productos existentes sin duplicarlos.
+    - Botón 'AGREGAR PRODUCTO NUEVO' para registrar productos nuevos asociados a este distribuidor
+      sin perder los datos de la factura actual.
+    """
+    dialog = tk.Toplevel(parent_modal)
+    dialog.title(f"🏢 Productos de Distribuidor: {proveedor_nombre}")
+    t_d = aplicar_tema(dialog)
+    dialog.configure(bg=t_d["bg_surface"])
+    calcular_geometria_segura(dialog, 900, 650, 720, 500)
+    dialog.transient(parent_modal)
+    dialog.grab_set()
+
+    # 1. Cabecera
+    f_head = tk.Frame(dialog, bg=t_d["bg_surface"], padx=20, pady=10)
+    f_head.pack(fill="x")
+
+    f_head_txt = tk.Frame(f_head, bg=t_d["bg_surface"])
+    f_head_txt.pack(side="left", fill="x", expand=True)
+
+    tk.Label(f_head_txt, text=f"🏢 Distribuidor: {proveedor_nombre}", font=("Segoe UI", 12, "bold"),
+             bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(anchor="w")
+    lbl_subhead = tk.Label(f_head_txt, text="Catálogo de productos asociados habitualmente a este proveedor",
+                           font=("Segoe UI", 9), bg=t_d["bg_surface"], fg=t_d["text_muted"])
+    lbl_subhead.pack(anchor="w")
+
+    crear_boton(f_head, "Cerrar", dialog.destroy, tipo="secondary", icono="❌").pack(side="right")
+
+    # 2. Barra de herramientas y filtros
+    f_bar = tk.Frame(dialog, bg=t_d["bg_surface_alt"], padx=20, pady=8)
+    f_bar.pack(fill="x")
+
+    # Buscador
+    tk.Label(f_bar, text="🔍 Buscar:", font=("Segoe UI", 9, "bold"),
+             bg=t_d["bg_surface_alt"], fg=t_d["text_main"]).pack(side="left", padx=(0, 4))
+    var_filtro_dist = tk.StringVar()
+    e_filtro_dist = tk.Entry(f_bar, textvariable=var_filtro_dist, font=("Segoe UI", 10), width=24,
+                             bg=t_d["input_bg"], fg=t_d["input_fg"], insertbackground=t_d["input_insert"])
+    e_filtro_dist.pack(side="left", padx=(0, 15))
+
+    # Estado de vista: 'DISTRIBUIDOR' o 'BODEGA'
+    modo_vista = {"modo": "DISTRIBUIDOR"}
+
+    # 3. Contenedor de la Tabla
+    f_tabla = tk.Frame(dialog, bg=t_d["bg_surface"], padx=20, pady=5)
+    f_tabla.pack(fill="both", expand=True)
+
+    lbl_info_vacio = tk.Label(f_tabla, text="", font=("Segoe UI", 9, "bold"),
+                              bg=t_d["bg_surface_alt"], fg="#3B82F6", padx=10, pady=10)
+
+    cols_d = ("Código", "Nombre", "Categoría", "U. Medida", "Stock Bodega", "Stock Vitrina", "Último Costo", "Distribuidor")
+    tree_dist = ttk.Treeview(f_tabla, columns=cols_d, show="headings", selectmode="browse")
+    for c in cols_d:
+        tree_dist.heading(c, text=c)
+    tree_dist.column("Código", width=75, anchor="center")
+    tree_dist.column("Nombre", width=220, anchor="w")
+    tree_dist.column("Categoría", width=100, anchor="w")
+    tree_dist.column("U. Medida", width=80, anchor="center")
+    tree_dist.column("Stock Bodega", width=85, anchor="center")
+    tree_dist.column("Stock Vitrina", width=85, anchor="center")
+    tree_dist.column("Último Costo", width=100, anchor="e")
+    tree_dist.column("Distribuidor", width=120, anchor="w")
+
+    sc_y_dist = ttk.Scrollbar(f_tabla, orient="vertical", command=tree_dist.yview)
+    tree_dist.configure(yscrollcommand=sc_y_dist.set)
+    tree_dist.pack(side="left", fill="both", expand=True)
+    sc_y_dist.pack(side="right", fill="y")
+
+    prod_map = {}
+
+    def cargar_articulos(filtro=""):
+        tree_dist.delete(*tree_dist.get_children())
+        prod_map.clear()
+        q = filtro.strip().lower()
+
+        if modo_vista["modo"] == "DISTRIBUIDOR":
+            lbl_subhead.config(text=f"Mostrando productos asociados habitualmente a {proveedor_nombre}")
+            btn_toggle_bodega.config(text="📦 PRODUCTOS DE BODEGA")
+            btn_asociar.pack_forget()
+            catalogo = obtener_catalogo(tipo="Fisico", solo_activos=True, proveedor_id=proveedor_id)
+            if not catalogo:
+                todos = obtener_catalogo(tipo="Fisico", solo_activos=True)
+                catalogo = [it for it in todos if it.get("proveedor_id") == proveedor_id or str(it.get("proveedor_id")) == str(proveedor_id)]
+        else:
+            lbl_subhead.config(text="Mostrando todos los productos de Bodega (Seleccione para agregar a factura o asociar)")
+            btn_toggle_bodega.config(text="🏢 VER PRODUCTOS DEL DISTRIBUIDOR")
+            btn_asociar.pack(side="left", padx=5)
+            catalogo = obtener_catalogo(tipo="Fisico", solo_activos=True)
+
+        count_shown = 0
+        for p in catalogo:
+            nom = (p.get("nombre") or "").lower()
+            cod = (p.get("codigo") or "").lower()
+            cb = str(p.get("codigo_barras") or "").lower()
+            if not q or (q in nom or q in cod or (cb and q in cb)):
+                u = p.get("unidad_medida", "Unidad")
+                it_id = tree_dist.insert("", "end", values=(
+                    p.get("codigo", ""),
+                    p.get("nombre", ""),
+                    p.get("categoria", "General"),
+                    u,
+                    formato_cant(p.get("stock_bodega", 0), u),
+                    formato_cant(p.get("stock_vitrina", 0), u),
+                    formato_peso(p.get("costo", p.get("precio_costo", 0.0))),
+                    p.get("proveedor_nombre") or "—"
+                ))
+                prod_map[it_id] = p
+                count_shown += 1
+
+        if count_shown == 0 and modo_vista["modo"] == "DISTRIBUIDOR":
+            lbl_info_vacio.config(text=f"💡 No hay productos asociados previamente a '{proveedor_nombre}'.\nUse '📦 PRODUCTOS DE BODEGA' para asociar existentes o '➕ AGREGAR PRODUCTO NUEVO'.")
+            lbl_info_vacio.pack(fill="x", pady=5)
+        else:
+            lbl_info_vacio.pack_forget()
+
+    def toggle_modo_bodega():
+        if modo_vista["modo"] == "DISTRIBUIDOR":
+            modo_vista["modo"] = "BODEGA"
+        else:
+            modo_vista["modo"] = "DISTRIBUIDOR"
+        cargar_articulos(var_filtro_dist.get())
+
+    btn_toggle_bodega = crear_boton(
+        f_bar, "📦 PRODUCTOS DE BODEGA", toggle_modo_bodega,
+        tipo="info", icono="📦", tam_fuente=9, padx=8, pady=3,
+        tooltip="Consultar todos los productos registrados en bodega"
+    )
+    btn_toggle_bodega.pack(side="left", padx=5)
+
+    def asociar_producto_existente():
+        sel = tree_dist.selection()
+        if not sel:
+            messagebox.showwarning("Aviso", "Seleccione un producto de la tabla para asociarlo a este distribuidor.", parent=dialog)
+            return
+        art = prod_map.get(sel[0])
+        if not art:
+            return
+        try:
+            actualizar_articulo(art["codigo"], {"proveedor_id": proveedor_id})
+            messagebox.showinfo(
+                "Asociación Exitosa",
+                f"El producto '{art['nombre']}' ({art['codigo']}) fue asociado exitosamente a {proveedor_nombre}.\nConservó sus existencias e identificación.",
+                parent=dialog
+            )
+            cargar_articulos(var_filtro_dist.get())
+        except Exception as ex:
+            messagebox.showerror("Error", f"No se pudo asociar el producto: {ex}", parent=dialog)
+
+    btn_asociar = crear_boton(
+        f_bar, "🏷️ Asociar al Distribuidor", asociar_producto_existente,
+        tipo="warning", icono="🔗", tam_fuente=9, padx=8, pady=3,
+        tooltip="Vincular este producto a este distribuidor sin duplicarlo"
+    )
+
+    def on_click_nuevo_producto():
+        def _on_creado(nuevo_prod):
+            cargar_articulos(var_filtro_dist.get())
+            for it_id, p in prod_map.items():
+                if p.get("codigo") == nuevo_prod.get("codigo"):
+                    tree_dist.selection_set(it_id)
+                    tree_dist.focus(it_id)
+                    _on_articulo_click()
+                    break
+        if callable(abrir_nuevo_articulo_callback):
+            abrir_nuevo_articulo_callback(_on_creado)
+
+    btn_nuevo = crear_boton(
+        f_bar, "AGREGAR PRODUCTO NUEVO", on_click_nuevo_producto,
+        tipo="success", icono="➕", tam_fuente=9, padx=8, pady=3,
+        tooltip="Registrar un nuevo producto en catálogo asociado a este distribuidor"
+    )
+    btn_nuevo.pack(side="right", padx=5)
+
+    # 4. Panel Inferior para Ingreso Rápido a la Factura
+    f_bottom = tk.LabelFrame(dialog, text=" 📥 Agregar Producto a la Factura ", font=("Segoe UI", 9, "bold"),
+                             bg=t_d["bg_surface"], fg=t_d["text_main"], padx=15, pady=8)
+    f_bottom.pack(fill="x", padx=20, pady=(0, 10))
+
+    f_bt_r1 = tk.Frame(f_bottom, bg=t_d["bg_surface"])
+    f_bt_r1.pack(fill="x", pady=2)
+
+    lbl_prod_sel = tk.Label(f_bt_r1, text="Artículo: (Seleccione uno de la tabla)", font=("Segoe UI", 9, "bold"),
+                            bg=t_d["bg_surface"], fg=t_d["text_main"])
+    lbl_prod_sel.pack(side="left", padx=(0, 15))
+
+    tk.Label(f_bt_r1, text="Presentación:", font=("Segoe UI", 9), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(side="left", padx=(0, 4))
+    var_unid_d = tk.StringVar(value="Unidad")
+    cb_unid_d = ttk.Combobox(f_bt_r1, textvariable=var_unid_d,
+                             values=["Caja", "Paquete", "Docena", "Unidad", "Kilogramo", "Litro", "Metro"],
+                             state="readonly", width=10)
+    cb_unid_d.pack(side="left", padx=(0, 15))
+
+    tk.Label(f_bt_r1, text="Factor (Contenido):", font=("Segoe UI", 9), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(side="left", padx=(0, 4))
+    e_fac_d = tk.Entry(f_bt_r1, width=6, font=("Segoe UI", 9), bg=t_d["input_bg"], fg=t_d["input_fg"], insertbackground=t_d["input_insert"])
+    e_fac_d.insert(0, "1")
+    e_fac_d.pack(side="left", padx=(0, 15))
+
+    tk.Label(f_bt_r1, text="Cant. Empaques:", font=("Segoe UI", 9), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(side="left", padx=(0, 4))
+    e_cant_d = tk.Entry(f_bt_r1, width=6, font=("Segoe UI", 9), bg=t_d["input_bg"], fg=t_d["input_fg"], insertbackground=t_d["input_insert"])
+    e_cant_d.insert(0, "1")
+    e_cant_d.pack(side="left", padx=(0, 15))
+
+    tk.Label(f_bt_r1, text="Costo por Empaque:", font=("Segoe UI", 9), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(side="left", padx=(0, 4))
+    e_costo_d = CurrencyEntry(f_bt_r1, initial_value=0, show_symbol=True, width=14, font=("Segoe UI", 9),
+                              bg=t_d["input_bg"], fg=t_d["input_fg"], insertbackground=t_d["input_insert"])
+    e_costo_d.pack(side="left")
+
+    f_bt_r2 = tk.Frame(f_bottom, bg=t_d["bg_surface"])
+    f_bt_r2.pack(fill="x", pady=(4, 2))
+
+    lbl_res_d = tk.Label(f_bt_r2, text="Subtotal: $0 COP", font=("Segoe UI", 9, "bold"),
+                         bg=t_d["bg_surface"], fg="#3B82F6")
+    lbl_res_d.pack(side="left")
+
+    def _recalcular_subtotal_d(*a):
+        try:
+            fac = float(e_fac_d.get().strip() or 1.0)
+            cant = float(e_cant_d.get().strip() or 1.0)
+            cost_emp = float(e_costo_d.get_value())
+            tot_u = fac * cant
+            c_u = cost_emp / fac if fac > 0 else cost_emp
+            sub = cant * cost_emp
+            lbl_res_d.config(text=f"Resultado: {tot_u:g} unidades que ingresan a costo de {formato_peso(c_u)} c/u (Subtotal: {formato_peso(sub)})")
+        except Exception:
+            lbl_res_d.config(text="Resultado: —")
+
+    e_fac_d.bind("<KeyRelease>", _recalcular_subtotal_d)
+    e_cant_d.bind("<KeyRelease>", _recalcular_subtotal_d)
+    e_costo_d.bind("<KeyRelease>", _recalcular_subtotal_d)
+
+    articulo_seleccionado = {"art": None}
+
+    def _on_articulo_click(event=None):
+        sel = tree_dist.selection()
+        if not sel:
+            return
+        art = prod_map.get(sel[0])
+        if not art:
+            return
+        articulo_seleccionado["art"] = art
+        lbl_prod_sel.config(text=f"Artículo: {art['codigo']} - {art['nombre']}")
+        u = art.get("unidad_medida", "Unidad")
+        if u in cb_unid_d["values"]:
+            var_unid_d.set(u)
+            if u in ("Unidad", "Kilogramo", "Litro", "Metro"):
+                e_fac_d.delete(0, tk.END)
+                e_fac_d.insert(0, "1")
+        costo_art = float(art.get("costo") or art.get("precio_costo") or 0.0)
+        e_costo_d.set_value(costo_art)
+        _recalcular_subtotal_d()
+
+    tree_dist.bind("<<TreeviewSelect>>", _on_articulo_click)
+
+    def _agregar_item_a_factura():
+        art = articulo_seleccionado["art"]
+        if not art:
+            messagebox.showwarning("Aviso", "Seleccione un producto del catálogo para agregarlo a la factura.", parent=dialog)
+            return
+
+        try:
+            fac = float(e_fac_d.get().strip())
+            cant = float(e_cant_d.get().strip())
+            cost_emp = float(e_costo_d.get_value())
+        except Exception:
+            messagebox.showerror("Error", "Ingrese valores numéricos válidos.", parent=dialog)
+            return
+
+        if fac <= 0 or cant <= 0 or cost_emp < 0:
+            messagebox.showwarning("Aviso", "Factor y Cantidad deben ser mayores a 0, y Costo mayor o igual a 0.", parent=dialog)
+            return
+
+        tot_u = fac * cant
+        c_u = cost_emp / fac if fac > 0 else cost_emp
+        sub = round(cant * cost_emp, 2)
+
+        item_obj = {
+            "producto_id": art["id"],
+            "codigo": art["codigo"],
+            "nombre": art["nombre"],
+            "unidad_compra": var_unid_d.get(),
+            "factor_conversion": fac,
+            "cantidad_comprada": cant,
+            "cantidad_unidades": tot_u,
+            "costo_unidad_compra": cost_emp,
+            "costo_unitario_convertido": c_u,
+            "subtotal": sub
+        }
+
+        if on_agregar_item_callback:
+            on_agregar_item_callback(item_obj)
+
+        lbl_res_d.config(text=f"✅ '{art['nombre']}' agregado a la factura ({formato_peso(sub)})", fg="#10B981")
+        e_cant_d.delete(0, tk.END)
+        e_cant_d.insert(0, "1")
+
+    crear_boton(f_bt_r2, "📥 Agregar a la Factura", _agregar_item_a_factura, tipo="success", icono="📥", tam_fuente=9).pack(side="right")
+    tree_dist.bind("<Double-1>", lambda e: _agregar_item_a_factura())
+
+    # Cargar lista inicial
+    cargar_articulos()
+    var_filtro_dist.trace_add("write", lambda *a: cargar_articulos(var_filtro_dist.get()))
+
 # ==============================================================================
 # APLICACIÓN PRINCIPAL DE INVENTARIO
 # ==============================================================================
@@ -349,8 +843,8 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     cb_tipo_cat.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_catalogo())
 
     # Botones Catálogo
-    def abrir_modal_articulo(articulo_existente=None, on_creado_callback=None, ubicacion_destino=None):
-        modal = tk.Toplevel(ventana)
+    def abrir_modal_articulo(articulo_existente=None, on_creado_callback=None, ubicacion_destino=None, proveedor_preseleccionado=None, parent_modal=None):
+        modal = tk.Toplevel(parent_modal or ventana)
         es_edicion = articulo_existente is not None
         art = articulo_existente if (es_edicion and isinstance(articulo_existente, dict)) else {}
         if es_edicion:
@@ -370,7 +864,7 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         t_mod = aplicar_tema(modal)
         calcular_geometria_segura(modal, 580, 680, 480, 480)
         modal.configure(bg=t_mod["bg_surface"])
-        modal.transient(ventana)
+        modal.transient(parent_modal or ventana)
         modal.grab_set()
 
         header_m = tk.Frame(modal, bg=t_mod["bg_surface"], padx=20, pady=10)
@@ -474,6 +968,11 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         if es_edicion and art.get("proveedor_id"):
             for p in provs:
                 if p[0] == art.get("proveedor_id"):
+                    prov_actual = f"{p[0]} - {p[1]}"
+                    break
+        elif proveedor_preseleccionado and not es_edicion:
+            for p in provs:
+                if p[0] == proveedor_preseleccionado or str(p[0]) == str(proveedor_preseleccionado):
                     prov_actual = f"{p[0]} - {p[1]}"
                     break
         var_prov = tk.StringVar(value=prov_actual)
@@ -808,8 +1307,11 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         articulos = obtener_catalogo(tipo="Fisico", solo_activos=True)
         lista_arts = [f"{a['codigo']} - {a['nombre']}" for a in articulos]
         var_art_aj = tk.StringVar()
-        cb_art_aj = ttk.Combobox(f_aj, textvariable=var_art_aj, values=lista_arts, state="readonly", width=40)
-        cb_art_aj.pack(fill="x", pady=(0, 10))
+        f_cb_aj = tk.Frame(f_aj, bg=t_mod["bg_surface"])
+        f_cb_aj.pack(fill="x", pady=(0, 10))
+        cb_art_aj = ttk.Combobox(f_cb_aj, textvariable=var_art_aj, values=lista_arts, width=38)
+        cb_art_aj.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        hacer_combobox_buscable(cb_art_aj, var_art_aj, lambda: articulos, on_select_callback=on_art_aj_sel, parent_modal=modal, boton_lupa_parent=f_cb_aj)
 
         lbl_saldo_actual = tk.Label(f_aj, text="Stock registrado en sistema: —", font=("Segoe UI", 10),
                                     bg=t_mod["bg_surface"], fg=t_mod["text_muted"])
@@ -975,8 +1477,11 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     tk.Label(f_tras_form, text="Artículo a Trasladar:", font=("Segoe UI", 9, "bold"),
              bg=t["bg_surface"], fg=t["text_main"]).pack(anchor="w", pady=(0, 2))
     var_tras_prod = tk.StringVar()
-    cb_tras_prod = ttk.Combobox(f_tras_form, textvariable=var_tras_prod, state="readonly", width=34)
-    cb_tras_prod.pack(fill="x", pady=(0, 10))
+    f_cb_tras = tk.Frame(f_tras_form, bg=t["bg_surface"])
+    f_cb_tras.pack(fill="x", pady=(0, 10))
+    cb_tras_prod = ttk.Combobox(f_cb_tras, textvariable=var_tras_prod, width=30)
+    cb_tras_prod.pack(side="left", fill="x", expand=True, padx=(0, 4))
+    hacer_combobox_buscable(cb_tras_prod, var_tras_prod, lambda: obtener_catalogo(tipo="Fisico", solo_activos=True), on_select_callback=actualizar_info_traslado, parent_modal=ventana, boton_lupa_parent=f_cb_tras)
 
     # Origen y Destino
     f_orig_dest = tk.Frame(f_tras_form, bg=t["bg_surface"])
@@ -1170,7 +1675,43 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         def crear_prov_compra():
             modal_crear_proveedor_rapido(modal, combo_widget=cb_cp_prov, var_widget=var_cp_prov)
 
-        crear_boton(f_prov_box, "+", crear_prov_compra, tipo="success", icono="➕", tam_fuente=8, padx=6, pady=2, tooltip="Crear nuevo proveedor").pack(side="left", padx=(4, 0))
+        crear_boton(f_prov_box, "+", crear_prov_compra, tipo="success", icono="➕", tam_fuente=8, padx=6, pady=2, tooltip="Crear nuevo proveedor").pack(side="left", padx=(4, 2))
+
+        def abrir_popup_catalogo_distribuidor(auto_prompt=False):
+            sel = var_cp_prov.get()
+            if not sel or sel == "Ninguno" or " - " not in sel:
+                if not auto_prompt:
+                    messagebox.showwarning("Aviso", "Seleccione un proveedor válido primero.", parent=modal)
+                return
+            prov_id = int(sel.split(" - ")[0])
+            prov_nom = sel.split(" - ", 1)[1]
+
+            def _on_agregar(item_obj):
+                items_en_compra.append(item_obj)
+                _insertar_fila_item(item_obj)
+                _recalcular_total()
+
+            def _abrir_nuevo(on_creado_cb):
+                abrir_modal_articulo(
+                    articulo_existente=None,
+                    on_creado_callback=on_creado_cb,
+                    ubicacion_destino=var_cp_dest.get(),
+                    proveedor_preseleccionado=prov_id,
+                    parent_modal=modal
+                )
+
+            modal_productos_distribuidor(
+                parent_modal=modal,
+                proveedor_id=prov_id,
+                proveedor_nombre=prov_nom,
+                on_agregar_item_callback=_on_agregar,
+                abrir_nuevo_articulo_callback=_abrir_nuevo
+            )
+
+        crear_boton(f_prov_box, "Catálogo", lambda: abrir_popup_catalogo_distribuidor(auto_prompt=False),
+                    tipo="primary", icono="🏢", tam_fuente=8, padx=6, pady=2,
+                    tooltip="Abrir ventana flotante con los productos de este distribuidor").pack(side="left", padx=(2, 0))
+        cb_cp_prov.bind("<<ComboboxSelected>>", lambda e: abrir_popup_catalogo_distribuidor(auto_prompt=True))
 
         # Documento Factura
         tk.Label(f_top, text="Nº Factura / Remisión:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_main"]).grid(row=0, column=2, sticky="w", pady=4, padx=(15, 0))
@@ -1194,8 +1735,10 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
 
         tk.Label(f_ai_r1, text="Artículo:", font=("Segoe UI", 9, "bold"), bg=t_mod["bg_surface"], fg=t_mod["text_main"]).pack(side="left", padx=(0, 5))
         var_ai_prod = tk.StringVar()
-        cb_ai_prod = ttk.Combobox(f_ai_r1, textvariable=var_ai_prod, state="readonly", width=30)
-        cb_ai_prod.pack(side="left", padx=(0, 5))
+        f_cb_ai = tk.Frame(f_ai_r1, bg=t_mod["bg_surface"])
+        f_cb_ai.pack(side="left", padx=(0, 4))
+        cb_ai_prod = ttk.Combobox(f_cb_ai, textvariable=var_ai_prod, width=28)
+        cb_ai_prod.pack(side="left")
 
         def crear_articulo_desde_compra():
             def on_creado(nuevo_art):
@@ -1283,6 +1826,7 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
             actualizar_calculo_item()
 
         cb_ai_prod.bind("<<ComboboxSelected>>", on_producto_seleccionado)
+        hacer_combobox_buscable(cb_ai_prod, var_ai_prod, lambda: obtener_catalogo(tipo="Fisico", solo_activos=True), on_select_callback=lambda e: on_producto_seleccionado(), parent_modal=modal, boton_lupa_parent=f_cb_ai)
         e_ai_factor.bind("<KeyRelease>", actualizar_calculo_item)
         e_ai_cant.bind("<KeyRelease>", actualizar_calculo_item)
         e_ai_costo.bind("<KeyRelease>", actualizar_calculo_item)

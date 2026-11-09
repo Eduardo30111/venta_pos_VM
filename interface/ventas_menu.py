@@ -170,7 +170,8 @@ def guardar_venta_sqlite(
             cod = str(d.get("item_codigo", d.get("codigo", "00000")))
             nom = str(d.get("item_nombre", d.get("nombre", "Producto")))
             pre = float(d.get("precio_vendido", d.get("precio", 0.0)))
-            cant = int(d.get("cantidad", 1))
+            c_raw = float(d.get("cantidad", 1))
+            cant = int(c_raw) if c_raw.is_integer() else round(c_raw, 3)
             sub = float(d.get("subtotal", pre * cant))
 
             # Obtener costo unitario histórico del producto en este instante exacto
@@ -997,6 +998,9 @@ class App:
         btn_eliminar = crear_boton(cart_in_frame, "🗑️", command=self.eliminar_seleccionado, tipo="danger", tam_fuente=8, pady=2, padx=6)
         btn_eliminar.pack(side="left", padx=1)
 
+        btn_editar = crear_boton(cart_in_frame, "✏️", command=self.editar_item_carrito_click, tipo="secondary", tam_fuente=8, pady=2, padx=6, tooltip="Modificar cantidad o precio del ítem")
+        btn_editar.pack(side="left", padx=1)
+
         if self.puede_procesar_venta:
             btn_abrir_caja = crear_boton(cart_in_frame, "💰 Caja", command=self.gestionar_caja_pos, tipo="warning", tam_fuente=8, pady=2, padx=6)
             btn_abrir_caja.pack(side="right", padx=1)
@@ -1015,6 +1019,7 @@ class App:
         sc_cart_y = ttk.Scrollbar(cart_table_frame, orient="vertical", command=self.tabla.yview)
         sc_cart_x = ttk.Scrollbar(cart_table_frame, orient="horizontal", command=self.tabla.xview)
         self.tabla.configure(yscrollcommand=sc_cart_y.set, xscrollcommand=sc_cart_x.set)
+        self.tabla.bind("<Double-1>", self.editar_item_carrito_click)
 
         self.tabla.grid(row=0, column=0, sticky="nsew")
         sc_cart_y.grid(row=0, column=1, sticky="ns")
@@ -1234,7 +1239,7 @@ class App:
             ):
                 continue
 
-            precio_str = "Variable" if (t_prod == "Servicio" and es_var) else self.formato_peso(precio)
+            precio_str = "Variable" if es_var else self.formato_peso(precio)
             stock_str = "—" if t_prod == "Servicio" else str(stock)
             self.tabla_catalogo.insert("", tk.END, text=str(cod), values=(
                 cod,
@@ -1315,7 +1320,7 @@ class App:
         precio = producto[3]
 
         if producto[2] > 0 or tipo_prod == "Servicio":
-            if tipo_prod == "Servicio" and es_var:
+            if es_var:
                 precio_ingresado = self.solicitar_precio_variable(producto[1], precio, parent=self.ventana)
                 if precio_ingresado is None:
                     return
@@ -1336,7 +1341,8 @@ class App:
             vals = self.tabla.item(i, "values") or ()
             nom = str(vals[0]) if len(vals) > 0 else ""
             pre = round(self.limpiar_precio(vals[1]), 2) if len(vals) > 1 else 0.0
-            cant = int(float(vals[2])) if len(vals) > 2 else 1
+            c_raw = float(vals[2]) if len(vals) > 2 else 1.0
+            cant = int(c_raw) if c_raw.is_integer() else round(c_raw, 3)
             filas.append((cod, nom, pre, cant))
         return (
             getattr(self, "orden_id_activa", None),
@@ -2050,8 +2056,9 @@ class App:
                             sv_fmt = int(sv) if sv.is_integer() else sv
                         except Exception:
                             sv_fmt = sv
+                        es_var_prod = bool(it.get("precio_variable", 0))
                         todos_los_productos.append(
-                            (cod, nom, sv_fmt, precio_v, "Fisico", prov_id, p_id, costo_u, False, sb, cod_barras)
+                            (cod, nom, sv_fmt, precio_v, "Fisico", prov_id, p_id, costo_u, es_var_prod, sb, cod_barras)
                         )
 
                 if str(self.rol).strip().lower() == "operario":
@@ -2092,7 +2099,7 @@ class App:
                             p.get("proveedor_id"),
                             p.get("id"),
                             costo_u,
-                            False,
+                            bool(p.get("precio_variable", False)),
                             sb_val,
                             cod_barras,
                         )
@@ -2143,8 +2150,15 @@ class App:
         return float(texto.replace("$", "").replace("COP", "").replace(",", "").strip() or 0)
 
     def actualizar_total(self):
-        """Actualizar el display del total"""
-        self.total_label.config(text=self.formato_peso(self.total_general.get()))
+        """Actualizar el total general y su etiqueta en pantalla sumando las filas del carrito."""
+        total_calculado = 0.0
+        for item_id in self.tabla.get_children():
+            valores = self.tabla.item(item_id, "values")
+            if valores and len(valores) >= 4:
+                total_calculado += self.limpiar_precio(valores[3])
+        self.total_general.set(round(total_calculado, 2))
+        if hasattr(self, "total_label") and self.total_label:
+            self.total_label.config(text=self.formato_peso(total_calculado))
 
     def actualizar_hora(self):
         """Actualizar hora cada segundo"""
@@ -2158,10 +2172,10 @@ class App:
     # ====================================================================================
 
     def solicitar_precio_variable(self, nombre, precio_sugerido=0.0, parent=None):
-        """Muestra un modal estilizado para ingresar el precio de un servicio con precio variable"""
+        """Muestra un modal estilizado para ingresar el precio acordado de un producto o servicio con precio variable"""
         parent_win = parent or self.ventana
         dialog = tk.Toplevel(parent_win)
-        dialog.title("💰 Definir Precio de Servicio")
+        dialog.title("💰 Definir Precio de Venta")
         t_d = aplicar_tema(dialog)
         dialog.configure(bg=t_d["bg_surface"])
         dialog.transient(parent_win)
@@ -2170,9 +2184,9 @@ class App:
         calcular_geometria_segura(dialog, 460, 260, 400, 220)
         dialog.resizable(False, False)
 
-        tk.Label(dialog, text="⚙️ SERVICIO CON PRECIO VARIABLE", font=("Segoe UI", 11, "bold"), 
+        tk.Label(dialog, text="⚙️ ARTÍCULO CON PRECIO VARIABLE", font=("Segoe UI", 11, "bold"), 
                  bg=t_d["bg_surface"], fg=t_d["bg_header"]).pack(pady=(16, 5))
-        tk.Label(dialog, text=f"Ingrese el monto a cobrar por el servicio:\n'{nombre}'", font=("Segoe UI", 10), 
+        tk.Label(dialog, text=f"Ingrese el precio acordado para la venta:\n'{nombre}'", font=("Segoe UI", 10), 
                  bg=t_d["bg_surface"], fg=t_d["text_secondary"], justify="center").pack(pady=(0, 10))
 
         entry_frame = tk.Frame(dialog, bg=t_d["bg_surface"])
@@ -2200,7 +2214,7 @@ class App:
         def confirmar(event=None):
             monto = entry_monto.get_value()
             if monto <= 0:
-                messagebox.showwarning("Atención", "El precio debe ser mayor a 0", parent=dialog)
+                messagebox.showwarning("Atención", "El precio de venta debe ser mayor a 0", parent=dialog)
                 return
             resultado[0] = float(monto)
             dialog.destroy()
@@ -2294,7 +2308,7 @@ class App:
                 if t_sel != "Todos" and p[4] != t_sel:
                     continue
                 if not filtro_texto or filtro_texto in f"{p[0]} {p[1]}".lower():
-                    es_var = p[8] if (p[4] == "Servicio" and len(p) > 8) else False
+                    es_var = p[8] if len(p) > 8 else False
                     precio_str = "Variable" if es_var else self.formato_peso(p[3])
                     stock_str = "—" if p[4] == "Servicio" else str(p[2])
                     lista.insert("", tk.END, values=(p[0], p[1], stock_str, precio_str))
@@ -2322,7 +2336,7 @@ class App:
                 precio_base = prod_encontrado[3] if prod_encontrado else self.limpiar_precio(valores[3])
                 
                 if stock > 0 or tipo_prod == "Servicio":
-                    if tipo_prod == "Servicio" and es_var:
+                    if es_var:
                         precio_ingresado = self.solicitar_precio_variable(nombre, precio_base, parent=ventana)
                         if precio_ingresado is None:
                             return
@@ -2468,7 +2482,7 @@ class App:
             
             if producto[2] > 0 or tipo_prod == "Servicio":
                 precio = producto[3]
-                if tipo_prod == "Servicio" and es_var:
+                if es_var:
                     precio_ingresado = self.solicitar_precio_variable(producto[1], precio, parent=self.ventana)
                     if precio_ingresado is None:
                         self.codigo_entrada.set("")
@@ -2487,12 +2501,206 @@ class App:
 
     def eliminar_seleccionado(self):
         """Elimina el producto seleccionado del carrito"""
-        item = self.tabla.focus()
+        item = self.tabla.focus() or (self.tabla.selection()[0] if self.tabla.selection() else None)
         if item:
             valores = self.tabla.item(item)["values"]
             self.total_general.set(self.total_general.get() - self.limpiar_precio(valores[3]))
             self.tabla.delete(item)
             self.actualizar_total()
+
+    def editar_item_carrito_click(self, event=None):
+        """Permite modificar directamente la cantidad y el precio del producto seleccionado en el carrito."""
+        sel = self.tabla.selection()
+        if not sel and event:
+            row_id = self.tabla.identify_row(event.y)
+            if row_id:
+                sel = (row_id,)
+                self.tabla.selection_set(row_id)
+        if not sel:
+            item_foc = self.tabla.focus()
+            if item_foc:
+                sel = (item_foc,)
+                self.tabla.selection_set(item_foc)
+
+        if not sel:
+            messagebox.showinfo("Modificar Ítem", "Seleccione un producto en la tabla del carrito para modificar su cantidad o precio.", parent=self.ventana)
+            return
+
+        item_id = sel[0]
+        codigo = self.tabla.item(item_id, "text")
+        valores = self.tabla.item(item_id, "values")
+        if not valores or len(valores) < 4:
+            return
+
+        nombre = str(valores[0])
+        precio_actual = self.limpiar_precio(valores[1])
+        try:
+            cant_actual = float(valores[2])
+        except Exception:
+            cant_actual = 1.0
+
+        # Buscar información completa del producto en inventario
+        prod_encontrado = None
+        for p in self.productos_inventario:
+            cod_p = str(p[0]).strip()
+            cod_c = str(codigo).strip()
+            if cod_p.lower() == cod_c.lower() or cod_p.zfill(5) == cod_c.zfill(5):
+                prod_encontrado = p
+                break
+
+        tipo_prod = prod_encontrado[4] if prod_encontrado else "Fisico"
+        stock_vitrina = float(prod_encontrado[2]) if prod_encontrado else 0.0
+        stock_bodega = float(prod_encontrado[9]) if prod_encontrado else 0.0
+        es_var = bool(prod_encontrado[8]) if (prod_encontrado and len(prod_encontrado) > 8) else False
+        precio_maestro = float(prod_encontrado[3]) if prod_encontrado else precio_actual
+
+        # Obtener unidad de medida
+        unidad_medida = "Unidad"
+        try:
+            from interface.inventario_manager import obtener_articulo_por_codigo
+        except ImportError:
+            try:
+                from inventario_manager import obtener_articulo_por_codigo
+            except ImportError:
+                obtener_articulo_por_codigo = None
+        if callable(obtener_articulo_por_codigo):
+            try:
+                art_data = obtener_articulo_por_codigo(codigo)
+                if art_data and art_data.get("unidad_medida"):
+                    unidad_medida = art_data.get("unidad_medida")
+            except Exception:
+                pass
+
+        es_unidad_discreta = unidad_medida in ("Unidad", "Caja", "Paquete", "Docena")
+
+        # Modal de edición estilizado
+        dialog = tk.Toplevel(self.ventana)
+        dialog.title("✏️ Modificar Cantidad y Precio de Venta")
+        t_d = aplicar_tema(dialog)
+        dialog.configure(bg=t_d["bg_surface"])
+        dialog.transient(self.ventana)
+        dialog.grab_set()
+
+        calcular_geometria_segura(dialog, 480, 380, 420, 320)
+        dialog.resizable(False, False)
+
+        f_header = tk.Frame(dialog, bg=t_d["bg_surface"], padx=20, pady=12)
+        f_header.pack(fill="x")
+        tk.Label(f_header, text="✏️ MODIFICAR ÍTEM EN CARRITO", font=("Segoe UI", 11, "bold"),
+                 bg=t_d["bg_surface"], fg=t_d["bg_header"]).pack(anchor="w")
+        tk.Label(f_header, text=f"Artículo: {nombre} ({codigo})", font=("Segoe UI", 10, "bold"),
+                 bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(anchor="w", pady=(2, 0))
+        stock_info_txt = f"Presentación: {unidad_medida} | Stock en Vitrina: {stock_vitrina:g} und" if tipo_prod != "Servicio" else f"Presentación: {unidad_medida} (Servicio)"
+        tk.Label(f_header, text=stock_info_txt, font=("Segoe UI", 8),
+                 bg=t_d["bg_surface"], fg=t_d["text_muted"]).pack(anchor="w")
+
+        f_body = tk.Frame(dialog, bg=t_d["bg_surface"], padx=20, pady=5)
+        f_body.pack(fill="both", expand=True)
+
+        # 1. Campo Cantidad
+        tk.Label(f_body, text=f"Cantidad ({unidad_medida}):", font=("Segoe UI", 9, "bold"),
+                 bg=t_d["bg_surface"], fg=t_d["text_main"]).grid(row=0, column=0, sticky="w", pady=(8, 2))
+        var_cant = tk.StringVar(value=str(int(cant_actual) if cant_actual.is_integer() else cant_actual))
+        e_cant = tk.Entry(f_body, textvariable=var_cant, font=("Segoe UI", 11), width=15,
+                          bg=t_d["input_bg"], fg=t_d["input_fg"], insertbackground=t_d["input_insert"])
+        e_cant.grid(row=0, column=1, sticky="w", pady=(8, 2), padx=(10, 0))
+
+        # 2. Campo Precio Unitario
+        tk.Label(f_body, text="Precio Unitario ($ COP):", font=("Segoe UI", 9, "bold"),
+                 bg=t_d["bg_surface"], fg=t_d["text_main"]).grid(row=1, column=0, sticky="w", pady=(10, 2))
+        puede_editar_precio = bool(es_var or self.es_admin)
+
+        e_precio = CurrencyEntry(
+            f_body,
+            initial_value=precio_actual,
+            show_symbol=False,
+            font=("Segoe UI", 11, "bold"),
+            width=15,
+            bg=t_d["input_bg"],
+            fg=t_d["input_fg"],
+            insertbackground=t_d["input_insert"]
+        )
+        e_precio.grid(row=1, column=1, sticky="w", pady=(10, 2), padx=(10, 0))
+
+        if not puede_editar_precio:
+            e_precio.config(state="disabled")
+            tk.Label(f_body, text="🔒 Precio fijo (Requiere perfil Administrador para modificar)",
+                     font=("Segoe UI", 8, "italic"), bg=t_d["bg_surface"], fg=t_d["text_muted"]).grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 6))
+        else:
+            hint_txt = "⚙️ Precio variable habilitado" if es_var else "👑 Modificación autorizada por Administrador"
+            tk.Label(f_body, text=hint_txt, font=("Segoe UI", 8, "italic"),
+                     bg=t_d["bg_surface"], fg="#10B981" if es_var else "#3B82F6").grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 6))
+
+        # 3. Vista previa del Subtotal
+        lbl_sub_prev = tk.Label(f_body, text=f"Nuevo Subtotal: {self.formato_peso(cant_actual * precio_actual)}",
+                                font=("Segoe UI", 11, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"])
+        lbl_sub_prev.grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 5))
+
+        def _recalcular_preview(*a):
+            try:
+                c_val = float(var_cant.get().strip() or 0.0)
+                p_val = float(e_precio.get_value())
+                lbl_sub_prev.config(text=f"Nuevo Subtotal: {self.formato_peso(c_val * p_val)}")
+            except Exception:
+                lbl_sub_prev.config(text="Nuevo Subtotal: —")
+
+        var_cant.trace_add("write", _recalcular_preview)
+        e_precio.bind("<KeyRelease>", _recalcular_preview)
+
+        def confirmar_cambios(event=None):
+            try:
+                c_val = float(var_cant.get().strip())
+            except Exception:
+                messagebox.showwarning("Cantidad Inválida", "Por favor ingrese una cantidad numérica válida.", parent=dialog)
+                e_cant.focus_set()
+                return
+
+            if c_val <= 0:
+                messagebox.showwarning("Cantidad Inválida", "La cantidad debe ser mayor a cero.", parent=dialog)
+                e_cant.focus_set()
+                return
+
+            if es_unidad_discreta and not c_val.is_integer():
+                messagebox.showwarning(
+                    "Unidad No Fraccionable",
+                    f"El artículo se despacha por '{unidad_medida}', por lo que no admite cantidades fraccionadas (decimales).",
+                    parent=dialog
+                )
+                e_cant.focus_set()
+                return
+
+            if tipo_prod != "Servicio" and c_val > (stock_vitrina + 1e-6):
+                msg_st = f"No hay suficiente stock en Vitrina para esta cantidad ({c_val:g} solicitados vs {stock_vitrina:g} disponibles)."
+                if stock_bodega > 0:
+                    msg_st += f"\n\nExisten {stock_bodega:g} unidades en Bodega. Realice un traslado si requiere más."
+                messagebox.showwarning("Stock Insuficiente", msg_st, parent=dialog)
+                return
+
+            try:
+                p_val = float(e_precio.get_value())
+            except Exception:
+                p_val = precio_actual
+
+            if p_val <= 0:
+                messagebox.showwarning("Precio Inválido", "El precio unitario debe ser mayor a 0.", parent=dialog)
+                e_precio.focus_set()
+                return
+
+            # Aplicar a la fila del carrito
+            cant_fmt = int(c_val) if c_val.is_integer() else round(c_val, 3)
+            sub_nuevo = round(p_val * c_val, 2)
+            self.tabla.item(item_id, values=(nombre, self.formato_peso(p_val), cant_fmt, self.formato_peso(sub_nuevo)))
+            self.actualizar_total()
+            dialog.destroy()
+
+        f_footer = tk.Frame(dialog, bg=t_d["bg_surface_alt"], padx=15, pady=10, bd=1, relief="ridge")
+        f_footer.pack(fill="x", side="bottom")
+
+        crear_boton(f_footer, "Cancelar", command=dialog.destroy, tipo="secondary").pack(side="right", padx=5)
+        crear_boton(f_footer, "Aplicar Cambios", command=confirmar_cambios, tipo="success", icono="✅").pack(side="right", padx=5)
+
+        dialog.bind("<Return>", confirmar_cambios)
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
 
     def pagar(self):
         """Abre la ventana para procesar el pago con layout responsive, clientes centrales y confirmación asíncrona idempotente."""
@@ -3031,12 +3239,14 @@ class App:
                 valores = self.tabla.item(i, "values")
                 nombre = valores[0]
                 precio_limpio = self.limpiar_precio(valores[1])
-                cantidad = int(float(valores[2]))
-                subtotal = precio_limpio * cantidad
+                c_raw = float(valores[2])
+                cantidad = int(c_raw) if c_raw.is_integer() else round(c_raw, 3)
+                subtotal = round(precio_limpio * cantidad, 2)
 
                 tipo_item = "Producto"
                 item_id = None
                 costo = 0.0
+                precio_catalogo = precio_limpio
 
                 for p in self.productos_inventario:
                     cod_p = str(p[0]).strip()
@@ -3045,6 +3255,7 @@ class App:
                         tipo_item = "Servicio" if p[4] == "Servicio" else "Producto"
                         item_id = p[6]
                         costo = p[7]
+                        precio_catalogo = float(p[3]) if p[3] is not None else precio_limpio
                         prov_id = p[5]
                         if tipo_item == "Servicio" and prov_id and (costo is None or float(costo or 0) <= 0):
                             costo = precio_limpio
@@ -3065,7 +3276,7 @@ class App:
                     "item_id": item_id,
                     "item_codigo": str(codigo),
                     "item_nombre": nombre,
-                    "precio_original": precio_limpio,
+                    "precio_original": precio_catalogo,
                     "precio_vendido": precio_limpio,
                     "cantidad": cantidad,
                     "descuento": 0.0,

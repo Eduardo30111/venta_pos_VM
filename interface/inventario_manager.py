@@ -94,7 +94,7 @@ def _asegurar_respuesta_ok(resp) -> Any:
 # 2. CATÁLOGO UNIFICADO DE ARTÍCULOS (PRODUCTOS FÍSICOS Y SERVICIOS)
 # ==============================================================================
 
-def obtener_catalogo(filtro=None, categoria=None, tipo=None, solo_activos=False, conn=None) -> List[Dict[str, Any]]:
+def obtener_catalogo(filtro=None, categoria=None, tipo=None, solo_activos=False, proveedor_id=None, conn=None) -> List[Dict[str, Any]]:
     params: Dict[str, Any] = {"solo_activos": bool(solo_activos)}
     if filtro:
         params["filtro"] = str(filtro).strip()
@@ -102,6 +102,8 @@ def obtener_catalogo(filtro=None, categoria=None, tipo=None, solo_activos=False,
         params["categoria"] = str(categoria).strip()
     if tipo and tipo != "Todos":
         params["tipo"] = str(tipo).strip()
+    if proveedor_id is not None:
+        params["proveedor_id"] = int(proveedor_id)
 
     resp = api.get("/inventario/catalogo", params=params)
     if resp.status_code == 200:

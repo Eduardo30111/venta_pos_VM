@@ -142,6 +142,7 @@ async def obtener_catalogo_endpoint(
     categoria: Optional[str] = None,
     tipo: Optional[str] = None,
     solo_activos: bool = False,
+    proveedor_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ):
@@ -179,6 +180,9 @@ async def obtener_catalogo_endpoint(
     if categoria and categoria != "Todas":
         cat_q = categoria.strip().lower()
         items = [it for it in items if (it.get("categoria") or "").strip().lower() == cat_q]
+
+    if proveedor_id is not None:
+        items = [it for it in items if it.get("proveedor_id") == int(proveedor_id)]
 
     if filtro and filtro.strip():
         t_q = filtro.strip().lower()
