@@ -188,120 +188,123 @@ def actualizar_tabla():
         tabla.insert("", "end", values=valores)
 
 def seleccionar_usuario(event):
-    """Carga los datos del usuario seleccionado en los campos del formulario"""
-    global id_usuario_seleccionado, rol_var, estado_var, tipo_nomina_var, salario_diario_var
-
-    sel = tabla.selection()
-    if not sel:
-        return
-
-    item_seleccionado = sel[0]
-    try:
-        valores = tabla.item(item_seleccionado, "values")
-        if not valores:
-            return
-
-        id_usuario_seleccionado = int(valores[0])
-
-        limpiar_campos(reset_id=False)
-
-        usuarios = obtener_usuarios()
-        for u in usuarios:
-            if u["id"] == id_usuario_seleccionado:
-                entradas["Usuario"].insert(0, u.get("usuario", ""))
-                entradas["Nombre"].insert(0, u.get("nombre", ""))
-                entradas["Apellidos"].insert(0, u.get("apellidos", ""))
-                entradas["Documento"].insert(0, u.get("documento") or "")
-
-                rol_var.set(u.get("rol", "Vendedor"))
-                estado_var.set(u.get("estado", "Activo"))
-
-                tipo_nom = u.get("tipo_remuneracion", "Porcentual")
-                tipo_nomina_var.set(tipo_nom)
-
-                if tipo_nom == "Fija":
-                    salario_diario_var.set(str(int(u.get("salario_diario", 0))))
-                else:
-                    salario_diario_var.set(str(u.get("porcentaje_comision", 0)))
-                break
-    except Exception as e:
-        print(f"Error al seleccionar usuario: {e}")
-
-def guardar_usuario():
-    """Guarda o actualiza un usuario"""
+    """
+    Carga los datos del usuario seleccionado en los campos de edición.
+    """
     global id_usuario_seleccionado
 
-    usuario = entradas["Usuario"].get().strip()
-    password = entradas["Password"].get().strip()
-    nombre = entradas["Nombre"].get().strip()
-    apellidos = entradas["Apellidos"].get().strip()
-    documento = entradas["Documento"].get().strip()
+    item_seleccionado = tabla.focus()
+    if not item_seleccionado:
+        return
+    
+    try:
+        valores = tabla.item(item_seleccionado, 'values')
+        if not valores: return
+        
+        id_usuario_seleccionado = int(valores[0])
+        
+        # We clean first to make sure fields are empty
+        for campo in ["Usuario", "Password", "Nombre", "Apellidos"]:
+            if campo in entradas:
+                entradas[campo].delete(0, tk.END)
+                
+        entradas['Usuario'].insert(0, valores[1])
+        
+        rol_var.set(valores[2])
+        estado_var.set(valores[3])
+        
+        # As table has ("ID", "Usuario", "Rol", "Estado", "Último Acceso", "Fecha Registro")
+        # We need to query DB to get Nombre, Apellidos, Tipo_nomina, Salario
+        usuarios_db = obtener_usuarios()
+        for u in usuarios_db:
+            if u['id'] == id_usuario_seleccionado:
+                if 'Nombre' in entradas and u.get('nombre'):
+                    entradas['Nombre'].insert(0, u['nombre'])
+                if 'Apellidos' in entradas and u.get('apellidos'):
+                    entradas['Apellidos'].insert(0, u['apellidos'])
+                    
+                tipo_nom = u.get('tipo_nomina', 'Porcentual')
+                tipo_nomina_var.set(tipo_nom)
+                
+                if tipo_nom == 'Fija':
+                    salario_diario_var.set(str(u.get('salario_diario', 0.0)))
+                else:
+                    salario_diario_var.set(str(u.get('comision_porcentaje', 0.0)))
+                break
+        
+        print(f"👤 Usuario seleccionado: {valores[1]} (ID: {id_usuario_seleccionado})")
+    except Exception as e:
+        print(f"❌ Error al seleccionar usuario: {e}")
 
+def guardar_usuario():
+    """
+    Guarda o actualiza un usuario en la base de datos.
+    """
+    global id_usuario_seleccionado
+    
+    usuario = entradas['Usuario'].get().strip()
+    password = entradas['Password'].get().strip()
+    nombre = entradas['Nombre'].get().strip() if 'Nombre' in entradas else ""
+    apellidos = entradas['Apellidos'].get().strip() if 'Apellidos' in entradas else ""
+    
     rol = rol_var.get()
     estado = estado_var.get()
     tipo_nom = tipo_nomina_var.get()
-
+    
     try:
-        valor_nom = float(salario_diario_var.get().replace("$", "").replace(",", "").strip() or 0)
+        valor_nom = float(salario_diario_var.get())
     except ValueError:
         valor_nom = 0.0
-
-    if tipo_nom == "Porcentual" and valor_nom > 100.0:
-        tipo_nom = "Fija"
-        tipo_nomina_var.set("Fija")
-
+        
     salario = valor_nom if tipo_nom == "Fija" else 0.0
     comision = valor_nom if tipo_nom == "Porcentual" else 0.0
-
+    
     if not usuario:
         messagebox.showerror("Error", "El campo Usuario es obligatorio.", parent=ventana_usuarios)
-        entradas["Usuario"].focus()
+        entradas['Usuario'].focus()
         return
     if rol == "Seleccionar" or not rol:
-        messagebox.showerror("Error", "Debes seleccionar un rol válido (Administrador, Vendedor, Operario).", parent=ventana_usuarios)
+        messagebox.showerror("Error", "Debes seleccionar un rol.", parent=ventana_usuarios)
         return
     if estado == "Seleccionar" or not estado:
         messagebox.showerror("Error", "Debes seleccionar un estado.", parent=ventana_usuarios)
         return
-
+    
     try:
         if id_usuario_seleccionado:
-            ok, msg = actualizar_usuario_db(
-                id_usuario_seleccionado,
-                usuario=usuario,
-                rol=rol,
-                estado=estado,
+            print(f"🔄 Actualizando usuario con ID: {id_usuario_seleccionado}")
+            resultado = actualizar_usuario_db(
+                id_usuario_seleccionado, 
+                usuario=usuario, 
+                rol=rol, 
+                estado=estado, 
                 password=password if password else None,
-                comision=comision,
+                comision_porcentaje=comision,
                 nombre=nombre,
                 apellidos=apellidos,
-                tipo_nom=tipo_nom,
-                salario=salario,
-                documento=documento
+                tipo_nomina=tipo_nom,
+                salario_diario=salario
             )
-            if ok:
+            if resultado:
                 messagebox.showinfo("Éxito", f"Usuario '{usuario}' actualizado correctamente.", parent=ventana_usuarios)
-                limpiar_campos()
-                actualizar_tabla()
             else:
-                messagebox.showerror("Error", msg, parent=ventana_usuarios)
+                messagebox.showerror("Error", "No se pudo actualizar el usuario.", parent=ventana_usuarios)
         else:
             if not password:
                 messagebox.showerror("Error", "La contraseña es obligatoria para un nuevo usuario.", parent=ventana_usuarios)
-                entradas["Password"].focus()
+                entradas['Password'].focus()
                 return
-
-            ok, msg = insertar_usuario(
-                usuario, password, rol, estado, comision, nombre, apellidos, tipo_nom, salario, documento
-            )
-            if ok:
-                messagebox.showinfo("Éxito", f"Usuario '{usuario}' registrado correctamente.", parent=ventana_usuarios)
-                limpiar_campos()
-                actualizar_tabla()
+            print(f"➕ Creando nuevo usuario: {usuario}")
+            resultado = insertar_usuario(usuario, password, rol, estado, comision, nombre, apellidos, tipo_nom, salario)
+            if resultado:
+                messagebox.showinfo("Éxito", f"Usuario '{usuario}' creado correctamente.", parent=ventana_usuarios)
             else:
-                messagebox.showerror("Error", msg, parent=ventana_usuarios)
+                messagebox.showerror("Error", f"No se pudo crear el usuario. Es posible que ya exista.", parent=ventana_usuarios)
+        limpiar_campos()
+        actualizar_tabla()
     except Exception as e:
-        messagebox.showerror("Error", f"Ocurrió un error inesperado:\n{e}", parent=ventana_usuarios)
+        print(f"❌ Error al guardar usuario: {e}")
+        messagebox.showerror("Error de base de datos", f"Ocurrió un error al guardar el usuario:\n{e}")
 
 def eliminar_usuario():
     """Elimina el usuario seleccionado"""
@@ -364,7 +367,7 @@ def probar_login():
         if test_client_resp.status_code == 200:
             messagebox.showinfo("Login Exitoso", f"✅ Las credenciales de '{usuario}' son VÁLIDAS.", parent=ventana_usuarios)
         else:
-            messagebox.showerror("Login Fallido", f"❌ Credenciales incorrectas o usuario inactivo.\nStatus: {test_client_resp.status_code}", parent=ventana_usuarios)
+            messagebox.showerror("Login Fallido", f"❌ Credenciales incorrectas o usuario inactivo. Status: {test_client_resp.status_code}", parent=ventana_usuarios)
     except Exception as e:
         messagebox.showerror("Error", f"Error al probar login: {e}", parent=ventana_usuarios)
 

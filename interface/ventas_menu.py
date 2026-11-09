@@ -3246,6 +3246,7 @@ class App:
                 item_id = None
                 costo = 0.0
                 precio_catalogo = precio_limpio
+                prov_id = None
 
                 for p in self.productos_inventario:
                     cod_p = str(p[0]).strip()
@@ -3281,6 +3282,7 @@ class App:
                     "descuento": 0.0,
                     "subtotal": subtotal,
                     "costo_unitario": costo,
+                    "proveedor_id": prov_id,
                 })
 
             if not detalles_payload and not getattr(self, "orden_id_activa", None):

@@ -2,6 +2,14 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
+import builtins
+import typing
+builtins.Tuple = typing.Tuple
+builtins.List = typing.List
+builtins.Dict = typing.Dict
+builtins.Optional = typing.Optional
+builtins.Any = typing.Any
+from typing import Tuple, List, Dict, Optional, Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -264,84 +272,38 @@ def abrir_configuracion_red():
         from network_dialog import abrir_dialogo_red
     abrir_dialogo_red(parent=ventana, on_saved=lambda _cfg: recargar_identidad_login())
 
+
 def validar_usuario(event=None):
     usuario = usuario_var.get().strip()
     clave = pass_var.get().strip()
     
     if not usuario or not clave:
-        mostrar_alerta_bonita("Campos vacíos", "Por favor ingresa usuario y contraseña", "error")
+        messagebox.showwarning("Campos vacíos", "Por favor ingresa usuario y contraseña")
         return
 
-    api.recargar_configuracion_red()
+    # Usar la nueva API
     success, message = api.login(usuario, clave)
+    
     if not success:
-        msg_str = str(message or "")
-        if "conexión" in msg_str.lower() or "servidor" in msg_str.lower() or "503" in msg_str:
-            # Si esta computadora está configurada como CAJA SECUNDARIA (Cliente),
-            # PROHIBIR el inicio en base de datos local aislada para proteger la integridad de los datos.
-            if api.es_modo_cliente():
-                abrir = messagebox.askyesno(
-                    "Servidor Principal No Disponible",
-                    f"Esta computadora está configurada como CAJA SECUNDARIA (Cliente), pero no hay conexión con el Servidor Principal:\n\n"
-                    f"• Dirección configurada: {api.base_url}\n"
-                    f"• Detalle: {msg_str}\n\n"
-                    "Por seguridad e integridad contable, una Caja Secundaria no puede operar en base de datos local aislada.\n\n"
-                    "¿Deseas abrir la Configuración de Red para verificar la IP o el estado del Servidor?"
-                )
-                if abrir:
-                    abrir_configuracion_red()
-                return
-
-            # Solo si esta computadora es el Servidor Principal, permitir respaldo en usuarios.db local
-            try:
-                try:
-                    from interface.usuarios_db import obtener_usuario_por_credenciales
-                except ImportError:
-                    from usuarios_db import obtener_usuario_por_credenciales
-                
-                u_local = obtener_usuario_por_credenciales(usuario, clave)
-                if u_local:
-                    nom_comp = f"{u_local.get('nombre', '')} {u_local.get('apellidos', '')}".strip()
-                    usuario_actual = nom_comp if nom_comp else str(u_local.get('usuario', 'Usuario')).capitalize()
-                    mostrar_alerta_bonita("¡Bienvenida! ✨", f"Hola {usuario_actual}!\n\nAcceso concedido como {u_local.get('rol', 'Usuario')}\n(Servidor Principal)", "success")
-                    ventana.after(1000, lambda: _iniciar_flujo_principal(u_local, usuario_actual))
-                    return
-            except Exception as e_local:
-                print(f"Advertencia: no se pudo verificar localmente: {e_local}")
-
-            abrir = messagebox.askyesno(
-                "Servidor No Disponible",
-                f"{msg_str}\n\n"
-                f"URL actual: {api.base_url}\n\n"
-                "No se pudo conectar al servidor ni se encontraron credenciales locales válidas.\n"
-                "¿Deseas abrir la Configuración de Red para verificar la IP y Puerto del Servidor?"
-            )
-            if abrir:
-                abrir_configuracion_red()
-            return
-        mostrar_alerta_bonita("Error", message, "error")
+        messagebox.showerror("Error", message)
         return
 
+    # Obtener datos del perfil
     resp = api.get("/auth/me")
     if resp.status_code == 200:
         datos_usuario = resp.json()
-        nom_comp = f"{datos_usuario.get('nombre', '')} {datos_usuario.get('apellidos', '')}".strip()
-        usuario_actual = nom_comp if nom_comp else str(datos_usuario.get('usuario', 'Usuario')).capitalize()
+        usuario_actual = datos_usuario['nombre'].capitalize()
         os.environ["VMPOS_TOKEN"] = api.token
-        try:
-            from interface.nomina_manager import sincronizar_usuario_desde_dict
-            sincronizar_usuario_desde_dict(datos_usuario)
-        except Exception:
-            try:
-                from nomina_manager import sincronizar_usuario_desde_dict
-                sincronizar_usuario_desde_dict(datos_usuario)
-            except Exception:
-                pass
 
-        mostrar_alerta_bonita("¡Bienvenida! ✨", f"Hola {usuario_actual}!\n\nAcceso concedido como {datos_usuario['rol']}\nIniciando sistema...", "success")
+        mostrar_alerta_bonita(
+            "¡Bienvenida! ✨",
+            f"Hola {usuario_actual}!\n\nAcceso concedido como {datos_usuario['rol']}\nIniciando sistema...",
+            "success"
+        )
+        
         ventana.after(1500, lambda: _iniciar_flujo_principal(datos_usuario, usuario_actual))
     else:
-        mostrar_alerta_bonita("Error", "No se pudo cargar el perfil del usuario", "error")
+        messagebox.showerror("Error", "No se pudo cargar el perfil del usuario")
 
 def limpiar_campos(event=None):
     usuario_var.set("")
@@ -385,8 +347,8 @@ FG_LOGIN = calcular_color_texto_optimo(COLOR_LOGIN)
 main_frame = tk.Frame(ventana, bg=t["bg_app"])
 main_frame.pack(fill="both", expand=True, padx=12, pady=12)
 main_frame.rowconfigure(0, weight=1)
-main_frame.columnconfigure(0, weight=1, minsize=320, uniform="cols")
-main_frame.columnconfigure(1, weight=1, minsize=320, uniform="cols")
+main_frame.columnconfigure(0, weight=1, minsize=320)
+main_frame.columnconfigure(1, weight=1, minsize=320)
 
 # Panel Izquierdo Promocional / Institucional
 left_frame = tk.Frame(main_frame, bg=t["bg_card"], relief="solid", bd=1)

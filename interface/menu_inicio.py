@@ -1,5 +1,13 @@
 import sys
 import io
+import builtins
+import typing
+builtins.Tuple = typing.Tuple
+builtins.List = typing.List
+builtins.Dict = typing.Dict
+builtins.Optional = typing.Optional
+builtins.Any = typing.Any
+from typing import Tuple, List, Dict, Optional, Any
 
 if not hasattr(sys.stdout, "name") or sys.stdout.name != "vmpos.log":
     try:
@@ -225,6 +233,9 @@ class VmPOSDashboard(tk.Tk):
         
         # Actualizar estadísticas cada 30 segundos
         self._actualizar_estadisticas()
+        
+        # Verificar asistencia diaria
+        self._verificar_asistencia()
         
         # Verificar asistencia diaria
         self._verificar_asistencia()
@@ -948,6 +959,32 @@ class VmPOSDashboard(tk.Tk):
                     pass
         except Exception as e:
             print(f"Error aplicando datos al dashboard: {e}")
+
+
+    def _verificar_asistencia(self):
+        try:
+            if self.rol_usuario in ["admin", "gerente", "administrador"]:
+                from usuarios_db import conectar_usuarios_db
+                import datetime
+                hoy = datetime.date.today().strftime('%Y-%m-%d')
+                
+                conn = conectar_usuarios_db()
+                cur = conn.cursor()
+                
+                # Check if there are employees/vendors
+                cur.execute("SELECT COUNT(*) FROM usuarios WHERE rol IN ('Operario', 'Vendedor') AND estado='Activo'")
+                if cur.fetchone()[0] > 0:
+                    # Check if attendance is marked for today
+                    cur.execute("SELECT COUNT(*) FROM asistencia WHERE fecha=?", (hoy,))
+                    if cur.fetchone()[0] == 0:
+                        self.after(2000, lambda: messagebox.showinfo(
+                            "Recordatorio de Asistencia", 
+                            "¡Hola! Recuerda comprobar la asistencia del personal hoy para cargar sus nóminas diarias.",
+                            parent=self
+                        ))
+                conn.close()
+        except Exception as e:
+            print("Error verificando asistencia:", e)
 
     def _actualizar_estadisticas(self):
         """Actualiza todas las estadísticas del dashboard en segundo plano sin congelar la interfaz."""
@@ -2308,6 +2345,28 @@ class VmPOSDashboard(tk.Tk):
                 self._lanzar_modulo_subproceso("turnos_menu.py", "Control del Turno", extra)
             else:
                 messagebox.showerror("❌ Error al abrir Turnos", f"No se pudo abrir control de turnos:\n{e}")
+
+
+    def _abrir_nomina(self):
+        """Abre el módulo de nómina y liquidación usando subprocess."""
+        try:
+            import subprocess
+            import sys
+            import os
+            
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            script_path = os.path.join(base_dir, 'nomina_menu.py')
+            
+            if os.path.exists(script_path):
+                print("Abriendo módulo de nómina en proceso separado...")
+
+                with open('debug_nomina.txt', 'w') as f:
+                    subprocess.Popen([sys.executable, script_path], stdout=f, stderr=f)
+
+            else:
+                messagebox.showerror("❌ Error", f"No se encontró el módulo: {script_path}")
+        except Exception as e:
+            messagebox.showerror("❌ Error", f"Error al abrir el módulo de nómina: {e}")
 
 # --- Punto de entrada desde el login ---
 def iniciar_dashboard(usuario, datos_usuario):

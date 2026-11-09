@@ -47,6 +47,7 @@ try:
     from interface.database_manager import conectar_db
 except ImportError:
     from database_manager import conectar_db
+from usuarios_db import conectar_usuarios_db
 
 try:
     from interface.proveedores_manager import (
@@ -1191,10 +1192,10 @@ def iniciar_nomina(parent_pid="", parent=None):
     toolbar_cxp = tk.Frame(subtab_cxp, bg=t["bg_surface"])
     toolbar_cxp.pack(fill="x", padx=6, pady=(4, 4))
 
-    var_solo_pendientes = tk.BooleanVar(value=True)
+    var_solo_pendientes = tk.BooleanVar(value=False)
 
     lbl_info_cxp = tk.Label(
-        toolbar_cxp, text="Ventas de servicios asociadas al proveedor y liquidación de comisiones:",
+        toolbar_cxp, text="Ventas de productos y servicios asociados al proveedor (pendientes, liquidadas y anuladas):",
         font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_secondary"]
     )
     lbl_info_cxp.pack(side="left")
@@ -1242,6 +1243,10 @@ def iniciar_nomina(parent_pid="", parent=None):
     tree_cxp.grid(row=0, column=0, sticky="nsew")
     scroll_cxp_y.grid(row=0, column=1, sticky="ns")
     scroll_cxp_x.grid(row=1, column=0, sticky="ew")
+
+    tree_cxp.tag_configure("Pendiente", foreground="#B45309", font=("Segoe UI", 9, "bold"))
+    tree_cxp.tag_configure("Pagada", foreground="#047857")
+    tree_cxp.tag_configure("Anulada", foreground="#DC2626", font=("Segoe UI", 9, "italic"))
 
     # --- Contenido Subtab 2: Historial Permanente ---
     toolbar_hist = tk.Frame(subtab_historial, bg=t["bg_surface"])
@@ -1345,7 +1350,7 @@ def iniciar_nomina(parent_pid="", parent=None):
                 _fmt_cop(c.get("monto_pagado", 0.0)),
                 _fmt_cop(c.get("saldo_pendiente", 0.0)),
                 estado_tag
-            ))
+            ), tags=(estado_tag,))
 
     def on_proveedor_seleccionado(event=None):
         datos = obtener_datos_proveedor_seleccionado()
@@ -1394,13 +1399,13 @@ def iniciar_nomina(parent_pid="", parent=None):
 
         for p in proveedores:
             item_id = tree_prov.insert("", "end", values=(
-                p["id"],
-                p["nombre"],
-                p.get("documento_nit") or "N/A",
-                _fmt_cop(p["total_ventas"]),
-                _fmt_cop(p["total_comisiones"]),
-                _fmt_cop(p["total_pagado"]),
-                _fmt_cop(p["saldo_pendiente"])
+                p.get("id"),
+                p.get("nombre", ""),
+                p.get("documento_nit") or p.get("nit") or "N/A",
+                _fmt_cop(p.get("total_ventas", 0.0)),
+                _fmt_cop(p.get("total_comisiones", 0.0)),
+                _fmt_cop(p.get("total_pagado", 0.0)),
+                _fmt_cop(p.get("saldo_pendiente", p.get("saldo_acumulado", 0.0)))
             ))
             if selected_id is not None and str(p["id"]) == str(selected_id):
                 item_to_select = item_id

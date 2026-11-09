@@ -30,9 +30,11 @@ from interface.proveedores_manager import (
     inicializar_tablas_proveedores,
     registrar_cxp_servicio_venta,
     recalcular_saldo_proveedor,
+    obtener_resumen_proveedores,
     obtener_detalle_cuentas_proveedor,
     liquidar_proveedor_db,
-    revertir_cxp_por_venta_anulada
+    revertir_cxp_por_venta_anulada,
+    sincronizar_cxp_retroactivas
 )
 from interface.ventas_menu import guardar_venta_sqlite
 
@@ -406,6 +408,61 @@ class TestRecuperacionInventarioVentasProveedores(unittest.TestCase):
         self.assertEqual(cxp_row[0], "Anulada")
         self.assertEqual(float(cxp_row[1]), 0.0)
         conn.close()
+
+    def test_08_resumen_proveedor_contiene_saldo_pendiente(self):
+        """Verifica que obtener_resumen_proveedores siempre incluya saldo_pendiente sin KeyError."""
+        conn = conectar_db(self.db_ventas)
+        cur = conn.cursor()
+        cur.execute("INSERT INTO proveedores (nombre, telefono, saldo_acumulado, documento_nit) VALUES ('Omara Sierra Test', '3147774000', 45000.0, '12345678')")
+        p_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+
+        resumen = obtener_resumen_proveedores(conn=conectar_db(self.db_ventas))
+        omara = next((p for p in resumen if p["id"] == p_id), None)
+        self.assertIsNotNone(omara)
+        self.assertIn("saldo_pendiente", omara, "La clave 'saldo_pendiente' DEBE existir en el diccionario de proveedor.")
+        self.assertIn("saldo_acumulado", omara)
+        self.assertIn("documento_nit", omara)
+
+    def test_09_sincronizacion_cxp_retroactiva_venta_anulada(self):
+        """Verifica que una venta de producto de proveedor anulada se sincronice y aparezca como Anulada en CXP."""
+        conn = conectar_db(self.db_ventas)
+        cur = conn.cursor()
+        cur.execute("INSERT INTO proveedores (nombre, telefono, saldo_acumulado) VALUES ('Omara Sierra Retro', '3147774001', 0.0)")
+        p_id = cur.lastrowid
+
+        cur.execute("""
+            INSERT INTO productos (codigo, nombre, precio, costo, stock, tipo_producto, proveedor_id, estado)
+            VALUES ('PROD-OMARA', 'Producto Omara', 20000.0, 14000.0, 10, 'Producto', ?, 'Activo')
+        """, (p_id,))
+
+        # Crear venta directamente en estado 'Anulada' simulando historial
+        cur.execute("""
+            INSERT INTO ventas (fecha_venta, hora_venta, documento_cliente, total_venta, metodo_pago, operario, estado, motivo_anulacion)
+            VALUES ('2026-11-09', '10:00:00', '12345', 20000.0, 'Efectivo', 'Admin', 'Anulada', 'Cliente canceló')
+        """)
+        v_id = cur.lastrowid
+
+        cur.execute("""
+            INSERT INTO detalle_ventas (id_venta, codigo_producto, nombre_producto, cantidad, precio_unitario, subtotal, costo_unitario)
+            VALUES (?, 'PROD-OMARA', 'Producto Omara', 1, 20000.0, 20000.0, 14000.0)
+        """, (v_id,))
+        conn.commit()
+        conn.close()
+
+        # Ejecutar sincronización retroactiva
+        res_sync = sincronizar_cxp_retroactivas(conn=conectar_db(self.db_ventas))
+        self.assertTrue(res_sync.get("ok", False))
+        self.assertGreaterEqual(res_sync.get("creadas", 0), 1)
+
+        # Consultar cuentas del proveedor (con solo_pendientes=False para ver anuladas)
+        cuentas = obtener_detalle_cuentas_proveedor(p_id, solo_pendientes=False, conn=conectar_db(self.db_ventas))
+        self.assertGreaterEqual(len(cuentas), 1)
+        cxp_anulada = cuentas[0]
+        self.assertEqual(cxp_anulada["estado"], "Anulada")
+        self.assertEqual(float(cxp_anulada["saldo_pendiente"]), 0.0)
+        self.assertEqual(cxp_anulada["nombre_servicio"], "Producto Omara")
 
 
 if __name__ == "__main__":

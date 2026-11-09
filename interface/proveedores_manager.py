@@ -336,6 +336,144 @@ def revertir_cxp_por_venta_anulada(
             conn.close()
 
 
+def sincronizar_cxp_retroactivas(conn: Optional[sqlite3.Connection] = None) -> Dict[str, Any]:
+    """
+    Sincronización retroactiva completa de cuentas por pagar:
+    1. Escanea detalle_ventas cruzado con ventas y productos/servicios.
+    2. Identifica cualquier venta de un producto o servicio que pertenezca a un proveedor
+       pero cuya cuenta por pagar no esté registrada en cuentas_por_pagar_proveedores.
+    3. Si la venta está Anulada, crea el registro en estado 'Anulada' (saldo_pendiente = 0.0).
+       Si la venta está activa/completada, crea el registro en estado 'Pendiente'.
+    4. Sincroniza estados de cuentas existentes cuya venta figure como 'Anulada'.
+    5. Recalcula los saldos de todos los proveedores afectados.
+    """
+    cerrar_conn = False
+    if conn is None:
+        conn = conectar_db()
+        cerrar_conn = True
+
+    try:
+        cur = conn.cursor()
+        
+        # 1. Reconciliar cuentas existentes vinculadas a ventas anuladas
+        try:
+            sincronizar_cxp_ventas_anuladas(conn=conn)
+        except Exception as e_anc:
+            print(f"Aviso en reconciliación anuladas: {e_anc}")
+
+        # 2. Localizar ítems de ventas con proveedor asignado sin registro en CXP
+        cur.execute("PRAGMA table_info(detalle_ventas)")
+        dv_cols = [c[1] for c in cur.fetchall()]
+        col_id_v = "id_venta" if "id_venta" in dv_cols else "venta_id"
+        col_cod = "codigo_producto" if "codigo_producto" in dv_cols else "codigo"
+        col_nom = "nombre_producto" if "nombre_producto" in dv_cols else "nombre"
+        col_sub = "subtotal" if "subtotal" in dv_cols else "total"
+        col_cant = "cantidad" if "cantidad" in dv_cols else "cant"
+
+        query_faltantes = f"""
+            SELECT 
+                dv.{col_id_v},
+                COALESCE(v.fecha_venta, ''),
+                COALESCE(v.hora_venta, '00:00:00'),
+                COALESCE(v.estado, 'Completada'),
+                COALESCE(v.operario, 'Administrador'),
+                dv.{col_cod},
+                dv.{col_nom},
+                dv.{col_cant},
+                dv.{col_sub},
+                COALESCE(p.proveedor_id, ''),
+                COALESCE(p.costo, 0.0),
+                COALESCE(pr.nombre, 'Proveedor'),
+                COALESCE(p.porcentaje_comision, 0.0)
+            FROM detalle_ventas dv
+            JOIN ventas v ON dv.{col_id_v} = v.id_venta
+            LEFT JOIN productos p ON (p.codigo = dv.{col_cod} OR p.nombre = dv.{col_nom})
+            JOIN proveedores pr ON pr.id = p.proveedor_id
+            WHERE p.proveedor_id IS NOT NULL
+              AND p.proveedor_id != ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM cuentas_por_pagar_proveedores cxp
+                  WHERE cxp.id_venta = dv.{col_id_v}
+                    AND (cxp.codigo_servicio = dv.{col_cod} OR cxp.nombre_servicio = dv.{col_nom})
+              )
+        """
+        cur.execute(query_faltantes)
+        faltantes = cur.fetchall()
+
+        creadas = 0
+        provs_afectados = set()
+
+        for r in faltantes:
+            v_id = r[0]
+            f_v = str(r[1] or "")
+            h_v = str(r[2] or "00:00:00")
+            v_estado = str(r[3] or "Completada")
+            op_v = str(r[4] or "Administrador")
+            it_cod = str(r[5] or "")
+            it_nom = str(r[6] or "")
+            it_cant = float(r[7] or 1.0)
+            it_sub = float(r[8] or 0.0)
+            prov_id_raw = r[9]
+            costo_unit = float(r[10] or 0.0)
+            prov_nom = str(r[11] or "")
+            pct_com = float(r[12] or 0.0)
+
+            try:
+                prov_id = int(str(prov_id_raw).strip())
+            except Exception:
+                continue
+
+            provs_afectados.add(prov_id)
+            num_v = f"V-{v_id:05d}"
+
+            if costo_unit > 0:
+                monto_pagar = costo_unit * it_cant
+                monto_com = max(0.0, it_sub - monto_pagar)
+            elif pct_com > 0:
+                monto_com = it_sub * (pct_com / 100.0)
+                monto_pagar = max(0.0, it_sub - monto_com)
+            else:
+                monto_com = 0.0
+                monto_pagar = it_sub
+
+            if v_estado == "Anulada":
+                estado_cxp = "Anulada"
+                saldo_pend = 0.0
+            else:
+                estado_cxp = "Pendiente"
+                saldo_pend = monto_pagar
+
+            cur.execute("""
+                INSERT INTO cuentas_por_pagar_proveedores (
+                    proveedor_id, proveedor_nombre, id_venta, numero_venta,
+                    codigo_servicio, nombre_servicio, precio_venta, porcentaje_comision,
+                    monto_comision, monto_por_pagar, monto_pagado, saldo_pendiente,
+                    estado, fecha, hora, usuario
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, ?)
+            """, (
+                prov_id, prov_nom, v_id, num_v,
+                it_cod, it_nom, it_sub, pct_com,
+                monto_com, monto_pagar, saldo_pend,
+                estado_cxp, f_v, h_v, op_v
+            ))
+            creadas += 1
+
+        for pid in provs_afectados:
+            recalcular_saldo_proveedor(pid, conn=conn)
+
+        if cerrar_conn:
+            conn.commit()
+
+        return {"ok": True, "creadas": creadas, "proveedores_actualizados": len(provs_afectados)}
+    except Exception as e:
+        if cerrar_conn and conn:
+            conn.rollback()
+        return {"ok": False, "error": str(e)}
+    finally:
+        if cerrar_conn and conn:
+            conn.close()
+
+
 def sincronizar_cxp_ventas_anuladas(conn: Optional[sqlite3.Connection] = None) -> Dict[str, Any]:
     """
     Rutina de reconciliación automática:
@@ -412,12 +550,16 @@ def obtener_resumen_proveedores(
                 provs = resp.json()
                 res = []
                 for p in provs:
+                    saldo_val = float(p.get("saldo_acumulado") or p.get("saldo_pendiente") or 0.0)
+                    doc_nit = p.get("documento_nit") or p.get("nit") or ""
                     res.append({
                         "id": p.get("id"),
                         "nombre": p.get("nombre") or "",
-                        "nit": p.get("documento_nit") or "",
+                        "nit": doc_nit,
+                        "documento_nit": doc_nit,
                         "telefono": p.get("telefono") or "",
-                        "saldo_acumulado": float(p.get("saldo_acumulado") or 0.0),
+                        "saldo_acumulado": saldo_val,
+                        "saldo_pendiente": saldo_val,
                         "total_ventas": float(p.get("total_ventas") or 0.0),
                         "total_comisiones": float(p.get("total_comisiones") or 0.0),
                         "total_pagado": float(p.get("total_pagado") or 0.0),
@@ -435,9 +577,9 @@ def obtener_resumen_proveedores(
     try:
         cur = conn.cursor()
         try:
-            sincronizar_cxp_ventas_anuladas(conn=conn)
+            sincronizar_cxp_retroactivas(conn=conn)
         except Exception as e_sync:
-            print(f"Aviso en sincronizar_cxp_ventas_anuladas: {e_sync}")
+            print(f"Aviso en sincronizar_cxp_retroactivas: {e_sync}")
 
         query = """
             SELECT 
@@ -479,8 +621,10 @@ def obtener_resumen_proveedores(
                 "id": p_id,
                 "nombre": r[1],
                 "documento_nit": r[2],
+                "nit": r[2],
                 "telefono": r[3],
                 "saldo_pendiente": rec["saldo_pendiente"],
+                "saldo_acumulado": rec["saldo_pendiente"],
                 "total_ventas": rec["total_ventas"],
                 "total_comisiones": rec["total_comisiones"],
                 "total_pagado": rec["total_pagado"]
@@ -506,6 +650,11 @@ def obtener_detalle_cuentas_proveedor(
         cerrar_conn = True
 
     try:
+        try:
+            sincronizar_cxp_retroactivas(conn=conn)
+        except Exception as e_retro:
+            print(f"Aviso sincronizando cxp retroactivas: {e_retro}")
+
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         query = """
@@ -544,6 +693,11 @@ def obtener_historial_liquidaciones_proveedor(
         cerrar_conn = True
 
     try:
+        try:
+            sincronizar_cxp_retroactivas(conn=conn)
+        except Exception as e_retro:
+            print(f"Aviso sincronizando cxp retroactivas: {e_retro}")
+
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         query = """
