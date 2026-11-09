@@ -296,34 +296,53 @@ def hacer_combobox_buscable(combobox, var_texto, articulos_func, on_select_callb
         q = var_texto.get().strip().lower()
         articulos = _obtener_lista()
 
-        if not q:
-            combobox["values"] = [f"{a['codigo']} - {a['nombre']}" for a in articulos]
-            return
-
+        vistos = set()
         coincidencias = []
         for a in articulos:
-            nom = (a.get("nombre") or "").lower()
-            cod = (a.get("codigo") or "").lower()
-            cb = str(a.get("codigo_barras") or "").lower()
-            if q in nom or q in cod or (cb and q in cb):
-                coincidencias.append(f"{a['codigo']} - {a['nombre']}")
+            cod = str(a.get("codigo") or "").strip()
+            nom = str(a.get("nombre") or "").strip()
+            if not cod or cod in vistos:
+                continue
+            vistos.add(cod)
+            nom_l = nom.lower()
+            cod_l = cod.lower()
+            cb_l = str(a.get("codigo_barras") or "").lower()
+            if not q or (q in nom_l or q in cod_l or (cb_l and q in cb_l)):
+                u = a.get("unidad_medida") or "Und"
+                coincidencias.append(f"{cod} - {nom} ({u})")
 
         if coincidencias:
             combobox["values"] = coincidencias
         else:
             combobox["values"] = [f"⚠️ (Sin coincidencias para '{var_texto.get()}')"]
 
+    _en_seleccion = [False]
+
     def _on_select(e=None):
-        sel = var_texto.get()
-        if sel.startswith("⚠️ (Sin coincidencias"):
+        _en_seleccion[0] = True
+        try:
+            sel = var_texto.get()
+            if sel.startswith("⚠️ (Sin coincidencias"):
+                return
+            if on_select_callback:
+                on_select_callback(e)
+        finally:
+            _en_seleccion[0] = False
+
+    def _on_var_write(*a):
+        if _en_seleccion[0]:
             return
-        if on_select_callback:
-            on_select_callback(e)
+        _filtrar()
+
+    try:
+        var_texto.trace_add("write", _on_var_write)
+    except Exception:
+        pass
 
     def _on_focus_in(e=None):
         _recargar_cache()
-        if not var_texto.get().strip():
-            combobox["values"] = [f"{a['codigo']} - {a['nombre']}" for a in _obtener_lista()]
+        if not var_texto.get().strip() or var_texto.get().startswith("⚠️"):
+            _filtrar()
 
     def _on_return(e=None):
         vals = combobox["values"]
@@ -342,7 +361,7 @@ def hacer_combobox_buscable(combobox, var_texto, articulos_func, on_select_callb
             lambda: modal_buscar_articulo_catalogo(
                 parent_modal or combobox.winfo_toplevel(),
                 _obtener_lista,
-                lambda a: (var_texto.set(f"{a['codigo']} - {a['nombre']}"), _on_select())
+                lambda a: (var_texto.set(f"{a['codigo']} - {a['nombre']} ({a.get('unidad_medida') or 'Und'})"), _on_select())
             ),
             tipo="secondary", icono="🔍", tam_fuente=8, padx=5, pady=2,
             tooltip="Buscar artículo en catálogo visual"
@@ -1302,41 +1321,77 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         tk.Label(f_aj, text=f"⚖️ Conteo Físico en {ubicacion_fija}", font=("Segoe UI", 13, "bold"),
                  bg=t_mod["bg_surface"], fg=t_mod["text_main"]).pack(anchor="w", pady=(0, 10))
 
+        art_seleccionado = [None]
+        var_art_aj = tk.StringVar()
+
+        lbl_saldo_actual = tk.Label(f_aj, text="Stock registrado en sistema: —", font=("Segoe UI", 10, "bold"),
+                                    bg=t_mod["bg_surface"], fg=t_mod["text_muted"])
+        lbl_saldo_actual.pack(anchor="w", pady=(0, 4))
+
+        lbl_diferencia = tk.Label(f_aj, text="Diferencia física vs sistema: —", font=("Segoe UI", 10, "italic"),
+                                  bg=t_mod["bg_surface"], fg=t_mod["text_muted"])
+        lbl_diferencia.pack(anchor="w", pady=(0, 10))
+
+        def recalcular_diferencia(*a):
+            art = art_seleccionado[0]
+            if not art:
+                lbl_diferencia.config(text="Diferencia física vs sistema: —", fg=t_mod["text_muted"])
+                return
+            st_val = art["stock_bodega"] if ubicacion_fija == "BODEGA" else art["stock_vitrina"]
+            u = art.get("unidad_medida") or "Unidad"
+            txt = e_conteo.get().strip()
+            if not txt:
+                lbl_diferencia.config(text="Diferencia física vs sistema: —", fg=t_mod["text_muted"])
+                return
+            try:
+                c_real = float(txt)
+                diff = c_real - st_val
+                if diff < 0:
+                    lbl_diferencia.config(text=f"📉 Diferencia: {diff:g} {u} (Faltante)", fg="#DC2626")
+                elif diff > 0:
+                    lbl_diferencia.config(text=f"📈 Diferencia: +{diff:g} {u} (Sobrante)", fg="#10B981")
+                else:
+                    lbl_diferencia.config(text=f"✅ Diferencia: 0 {u} (Conteo exacto)", fg="#059669")
+            except Exception:
+                lbl_diferencia.config(text="Diferencia física vs sistema: —", fg=t_mod["text_muted"])
+
+        def on_art_aj_sel(e=None):
+            sel_txt = var_art_aj.get()
+            if sel_txt and not sel_txt.startswith("⚠️"):
+                cod = sel_txt.split(" - ")[0].strip()
+                art = obtener_articulo_por_codigo(cod)
+                if art:
+                    art_seleccionado[0] = art
+                    u = art.get("unidad_medida") or "Unidad"
+                    st_val = art["stock_bodega"] if ubicacion_fija == "BODEGA" else art["stock_vitrina"]
+                    lbl_saldo_actual.config(
+                        text=f"📦 {art['nombre']} ({cod}) | Stock en {ubicacion_fija}: {formato_cant(st_val, u)}",
+                        fg=t_mod["text_main"]
+                    )
+                    e_conteo.delete(0, tk.END)
+                    e_conteo.insert(0, str(int(st_val) if float(st_val).is_integer() else st_val))
+                    recalcular_diferencia()
+
         tk.Label(f_aj, text="Seleccione Artículo Físico:", font=("Segoe UI", 9, "bold"),
                  bg=t_mod["bg_surface"], fg=t_mod["text_main"]).pack(anchor="w", pady=(5, 2))
         articulos = obtener_catalogo(tipo="Fisico", solo_activos=True)
         lista_arts = [f"{a['codigo']} - {a['nombre']}" for a in articulos]
-        var_art_aj = tk.StringVar()
         f_cb_aj = tk.Frame(f_aj, bg=t_mod["bg_surface"])
         f_cb_aj.pack(fill="x", pady=(0, 10))
         cb_art_aj = ttk.Combobox(f_cb_aj, textvariable=var_art_aj, values=lista_arts, width=38)
         cb_art_aj.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        hacer_combobox_buscable(cb_art_aj, var_art_aj, lambda: articulos, on_select_callback=on_art_aj_sel, parent_modal=modal, boton_lupa_parent=f_cb_aj)
-
-        lbl_saldo_actual = tk.Label(f_aj, text="Stock registrado en sistema: —", font=("Segoe UI", 10),
-                                    bg=t_mod["bg_surface"], fg=t_mod["text_muted"])
-        lbl_saldo_actual.pack(anchor="w", pady=(0, 10))
+        hacer_combobox_buscable(cb_art_aj, var_art_aj, lambda: articulos, on_select_callback=lambda *a: on_art_aj_sel(*a), parent_modal=modal, boton_lupa_parent=f_cb_aj)
 
         tk.Label(f_aj, text="Cantidad Real Contada (Física):", font=("Segoe UI", 9, "bold"),
                  bg=t_mod["bg_surface"], fg=t_mod["text_main"]).pack(anchor="w", pady=(5, 2))
         e_conteo = tk.Entry(f_aj, font=("Segoe UI", 11), bg=t_mod["input_bg"], fg=t_mod["input_fg"], insertbackground=t_mod["input_insert"])
         e_conteo.pack(fill="x", pady=(0, 10))
+        e_conteo.bind("<KeyRelease>", recalcular_diferencia)
 
         tk.Label(f_aj, text="Motivo / Observación del Ajuste:", font=("Segoe UI", 9),
                  bg=t_mod["bg_surface"], fg=t_mod["text_main"]).pack(anchor="w", pady=(5, 2))
         e_motivo = tk.Entry(f_aj, font=("Segoe UI", 10), bg=t_mod["input_bg"], fg=t_mod["input_fg"], insertbackground=t_mod["input_insert"])
         e_motivo.pack(fill="x", pady=(0, 15))
-
-        def on_art_aj_sel(e=None):
-            sel_txt = var_art_aj.get()
-            if sel_txt:
-                cod = sel_txt.split(" - ")[0]
-                art = obtener_articulo_por_codigo(cod)
-                if art:
-                    st_val = art["stock_bodega"] if ubicacion_fija == "BODEGA" else art["stock_vitrina"]
-                    lbl_saldo_actual.config(text=f"Stock registrado en {ubicacion_fija}: {formato_cant(st_val, art['unidad_medida'])}")
-                    e_conteo.delete(0, tk.END)
-                    e_conteo.insert(0, str(int(st_val) if st_val.is_integer() else st_val))
 
         cb_art_aj.bind("<<ComboboxSelected>>", on_art_aj_sel)
 
@@ -1481,7 +1536,7 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     f_cb_tras.pack(fill="x", pady=(0, 10))
     cb_tras_prod = ttk.Combobox(f_cb_tras, textvariable=var_tras_prod, width=30)
     cb_tras_prod.pack(side="left", fill="x", expand=True, padx=(0, 4))
-    hacer_combobox_buscable(cb_tras_prod, var_tras_prod, lambda: obtener_catalogo(tipo="Fisico", solo_activos=True), on_select_callback=actualizar_info_traslado, parent_modal=ventana, boton_lupa_parent=f_cb_tras)
+    hacer_combobox_buscable(cb_tras_prod, var_tras_prod, lambda: obtener_catalogo(tipo="Fisico", solo_activos=True), on_select_callback=lambda *a: actualizar_info_traslado(*a), parent_modal=ventana, boton_lupa_parent=f_cb_tras)
 
     # Origen y Destino
     f_orig_dest = tk.Frame(f_tras_form, bg=t["bg_surface"])

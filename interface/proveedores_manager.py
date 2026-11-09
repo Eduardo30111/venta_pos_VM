@@ -154,7 +154,7 @@ def registrar_cxp_servicio_venta(
 
         # Consultar datos maestros del producto/servicio en la base de datos
         cur.execute("""
-            SELECT p.tipo_producto, p.proveedor_id, COALESCE(p.porcentaje_comision, 0.0), prov.nombre
+            SELECT p.tipo_producto, p.proveedor_id, COALESCE(p.porcentaje_comision, 0.0), prov.nombre, COALESCE(p.costo, 0.0)
             FROM productos p
             LEFT JOIN proveedores prov ON p.proveedor_id = prov.id
             WHERE p.codigo = ? OR p.codigo = ?
@@ -168,9 +168,10 @@ def registrar_cxp_servicio_venta(
         prov_id = p_row[1]
         porcentaje_com = float(p_row[2] or 0.0)
         prov_nom = str(p_row[3] or "").strip()
+        costo_prod = float(p_row[4] or 0.0)
 
-        # Solo aplica a servicios que tengan un proveedor asignado
-        if tipo_prod != "Servicio" or not prov_id or prov_id <= 0:
+        # Aplica a cualquier producto o servicio que tenga un proveedor asignado
+        if not prov_id or prov_id <= 0:
             return None
 
         # Si el proveedor no tiene nombre en la relación, buscar directamente
@@ -182,11 +183,16 @@ def registrar_cxp_servicio_venta(
         # Validar porcentaje de comisión (0 a 100%)
         porcentaje_com = max(0.0, min(100.0, porcentaje_com))
 
-        # Fórmulas requeridas:
-        # comisión = precio_real_de_venta * porcentaje_comisión / 100
-        # importe_por_pagar_al_proveedor = precio_real_de_venta - comisión
-        monto_comision = round(subtotal_real * (porcentaje_com / 100.0), 2)
-        monto_por_pagar = round(subtotal_real - monto_comision, 2)
+        # Cálculo de obligación a pagar al proveedor:
+        if porcentaje_com > 0:
+            monto_comision = round(subtotal_real * (porcentaje_com / 100.0), 2)
+            monto_por_pagar = round(max(0.0, subtotal_real - monto_comision), 2)
+        elif costo_prod > 0:
+            monto_por_pagar = round(costo_prod * cant, 2)
+            monto_comision = round(max(0.0, subtotal_real - monto_por_pagar), 2)
+        else:
+            monto_por_pagar = subtotal_real
+            monto_comision = 0.0
 
         # Evitar registros duplicados para la misma venta y código de servicio
         cur.execute("""

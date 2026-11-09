@@ -1330,11 +1330,14 @@ def iniciar_nomina(parent_pid="", parent=None):
         for c in cuentas:
             pct_str = f"{c.get('porcentaje_comision', 0.0):.1f}%"
             estado_tag = c.get("estado", "")
+            f_v = c.get("fecha_venta") or c.get("fecha") or ""
+            v_ref = c.get("numero_venta") or (f"#{c.get('venta_id') or c.get('id_venta')}" if (c.get('venta_id') or c.get('id_venta')) else "Manual")
+            item_nom = c.get("servicio_nombre") or c.get("nombre_servicio") or c.get("item_nombre") or "Artículo"
             tree_cxp.insert("", "end", values=(
                 c.get("id"),
-                c.get("fecha_venta", ""),
-                f"#{c.get('venta_id')}" if c.get("venta_id") else "Manual",
-                c.get("servicio_nombre", ""),
+                f_v,
+                v_ref,
+                item_nom,
                 _fmt_cop(c.get("precio_venta", 0.0)),
                 pct_str,
                 _fmt_cop(c.get("monto_comision", 0.0)),

@@ -461,6 +461,44 @@ class VentaService:
                                     estado=estado_comision,
                                 )
                             )
+
+                        # Cuenta por Pagar a proveedor para Producto físico con proveedor asignado
+                        if producto.proveedor_id:
+                            costo_prod = float(producto.precio_costo or 0.0)
+                            pct_prov = float(getattr(producto, "porcentaje_comision", 0.0) or 0.0)
+                            precio_total_prod = round(float(item.precio_vendido) * cantidad_item, 2)
+                            if pct_prov > 0:
+                                comision_prov = round((precio_total_prod * pct_prov) / 100.0, 2)
+                                monto_cxp_prod = round(max(0.0, precio_total_prod - comision_prov), 2)
+                            elif costo_prod > 0:
+                                monto_cxp_prod = round(costo_prod * cantidad_item, 2)
+                                comision_prov = round(max(0.0, precio_total_prod - monto_cxp_prod), 2)
+                            else:
+                                monto_cxp_prod = precio_total_prod
+                                comision_prov = 0.0
+
+                            if monto_cxp_prod > 0:
+                                cxp_prod = CuentaPorPagar(
+                                    proveedor_id=producto.proveedor_id,
+                                    venta_id=venta.id,
+                                    numero_venta=numero,
+                                    codigo_servicio=producto.codigo,
+                                    nombre_servicio=producto.nombre,
+                                    precio_venta=precio_total_prod,
+                                    porcentaje_comision=pct_prov,
+                                    monto_comision=comision_prov,
+                                    concepto=f"Producto {producto.nombre} - Venta {numero}",
+                                    monto=monto_cxp_prod,
+                                    monto_pagado=0.0,
+                                    saldo_pendiente=monto_cxp_prod,
+                                    estado="Pendiente",
+                                    fecha=f_str,
+                                    hora=h_str,
+                                    usuario=op_nombre,
+                                )
+                                db.add(cxp_prod)
+                                await db.flush()
+                                await VentaService._recalcular_acumulados_proveedor(db, producto.proveedor_id)
                     else:
                         # Servicio
                         servicio = None

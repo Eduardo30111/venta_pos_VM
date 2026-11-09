@@ -44,6 +44,14 @@ except ImportError:
     from interface.caja_manager import anular_venta_completa, editar_venta_completa
     from interface.database_manager import conectar_db
 
+try:
+    from client.api_client import api
+except ImportError:
+    try:
+        from interface.network_manager import api
+    except ImportError:
+        api = None
+
 
 def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid=""):
     """Abre la ventana administrativa de gestión, anulación y edición de ventas."""
@@ -188,22 +196,43 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
         id_venta = vals[0]
         estado = vals[8]
 
-        conn = conectar_db()
-        if conn:
-            conn.row_factory = __import__("sqlite3").Row
-            cur = conn.cursor()
-            cur.execute("SELECT nombre_producto, cantidad, subtotal FROM detalle_ventas WHERE id_venta = ?", (id_venta,))
-            for r in cur.fetchall():
-                tree_det.insert("", "end", values=(r["nombre_producto"], r["cantidad"], f"${r['subtotal']:,.0f}"))
+        detalles_cargados = False
+        if api is not None:
+            try:
+                resp = api.get(f"/ventas/{id_venta}", timeout=2.5)
+                if resp.status_code == 200:
+                    v_data = resp.json()
+                    for d in v_data.get("detalles") or []:
+                        tree_det.insert("", "end", values=(
+                            d.get("item_nombre") or "Producto",
+                            d.get("cantidad", 1),
+                            f"${float(d.get('subtotal', 0.0)):,.0f}"
+                        ))
+                    if estado == "Anulada" and v_data.get("motivo_anulacion"):
+                        lbl_info_anulacion.config(
+                            text=f"🚫 ANULADA por {v_data.get('anulado_por', 'Admin')} el {v_data.get('fecha_anulacion', '')}\nMotivo: {v_data.get('motivo_anulacion')}"
+                        )
+                    detalles_cargados = True
+            except Exception:
+                detalles_cargados = False
 
-            if estado == "Anulada":
-                cur.execute("SELECT motivo_anulacion, anulado_por, fecha_anulacion FROM ventas WHERE id_venta = ?", (id_venta,))
-                v_row = cur.fetchone()
-                if v_row and v_row["motivo_anulacion"]:
-                    lbl_info_anulacion.config(
-                        text=f"🚫 ANULADA por {v_row['anulado_por']} el {v_row['fecha_anulacion']}\nMotivo: {v_row['motivo_anulacion']}"
-                    )
-            conn.close()
+        if not detalles_cargados:
+            conn = conectar_db()
+            if conn:
+                conn.row_factory = __import__("sqlite3").Row
+                cur = conn.cursor()
+                cur.execute("SELECT nombre_producto, cantidad, subtotal FROM detalle_ventas WHERE id_venta = ?", (id_venta,))
+                for r in cur.fetchall():
+                    tree_det.insert("", "end", values=(r["nombre_producto"], r["cantidad"], f"${r['subtotal']:,.0f}"))
+
+                if estado == "Anulada":
+                    cur.execute("SELECT motivo_anulacion, anulado_por, fecha_anulacion FROM ventas WHERE id_venta = ?", (id_venta,))
+                    v_row = cur.fetchone()
+                    if v_row and v_row["motivo_anulacion"]:
+                        lbl_info_anulacion.config(
+                            text=f"🚫 ANULADA por {v_row['anulado_por']} el {v_row['fecha_anulacion']}\nMotivo: {v_row['motivo_anulacion']}"
+                        )
+                conn.close()
 
     tree.bind("<<TreeviewSelect>>", cargar_detalles_seleccion)
 
@@ -217,47 +246,81 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
         filtro_txt = var_busq.get().strip().lower()
         filtro_est = var_estado.get()
 
-        conn = conectar_db()
-        if not conn:
-            return
-        try:
-            conn.row_factory = __import__("sqlite3").Row
-            cur = conn.cursor()
-
-            query = "SELECT id_venta, fecha_venta, hora_venta, documento_cliente, total_venta, metodo_pago, operario, estado FROM ventas"
-            where_clauses = []
-            params = []
-
-            if filtro_est != "Todos":
-                where_clauses.append("estado = ?")
-                params.append(filtro_est)
-
-            if where_clauses:
-                query += " WHERE " + " AND ".join(where_clauses)
-            query += " ORDER BY id_venta DESC LIMIT 100"
-
-            cur.execute(query, params)
-            for r in cur.fetchall():
-                doc = str(r["documento_cliente"] or "")
-                op = str(r["operario"] or "")
-                id_v = r["id_venta"]
-                fac = f"V-{id_v:06d}"
-                est = r["estado"] or "Completada"
-
+        ventas_cargadas = False
+        if api is not None:
+            try:
+                params_api = {"limit": 200}
+                if filtro_est != "Todos":
+                    params_api["estado"] = filtro_est
                 if filtro_txt:
-                    if (filtro_txt not in str(id_v).lower() and
-                        filtro_txt not in fac.lower() and
-                        filtro_txt not in doc.lower() and
-                        filtro_txt not in op.lower()):
-                        continue
+                    params_api["busqueda"] = filtro_txt
 
-                tree.insert("", "end", values=(
-                    id_v, fac, r["fecha_venta"], r["hora_venta"],
-                    op, doc, r["metodo_pago"] or "Efectivo",
-                    f"${float(r['total_venta']):,.0f}", est
-                ), tags=(est,))
-        finally:
-            conn.close()
+                resp = api.get("/ventas", params=params_api, timeout=3.0)
+                if resp.status_code == 200:
+                    v_list = resp.json()
+                    for v in v_list:
+                        id_v = v.get("id")
+                        fac = v.get("numero") or f"V-{id_v:06d}"
+                        f_v = v.get("fecha") or (v.get("created_at", "")[:10] if v.get("created_at") else "")
+                        h_v = v.get("hora") or (v.get("created_at", "")[11:19] if v.get("created_at") else "")
+                        op = v.get("operario_nombre") or "Administrador"
+                        doc = v.get("cliente_documento") or "Consumidor Final"
+                        pags = v.get("pagos") or []
+                        met = pags[0].get("metodo") if pags else "Efectivo"
+                        tot = float(v.get("total") or 0.0)
+                        est = v.get("estado") or "Completada"
+
+                        tree.insert("", "end", values=(
+                            id_v, fac, f_v, h_v,
+                            op, doc, met,
+                            f"${tot:,.0f}", est
+                        ), tags=(est,))
+                    ventas_cargadas = True
+            except Exception as e_api:
+                print(f"Aviso consultando ventas desde servidor: {e_api}")
+
+        if not ventas_cargadas:
+            conn = conectar_db()
+            if not conn:
+                return
+            try:
+                conn.row_factory = __import__("sqlite3").Row
+                cur = conn.cursor()
+
+                query = "SELECT id_venta, fecha_venta, hora_venta, documento_cliente, total_venta, metodo_pago, operario, estado FROM ventas"
+                where_clauses = []
+                params = []
+
+                if filtro_est != "Todos":
+                    where_clauses.append("estado = ?")
+                    params.append(filtro_est)
+
+                if where_clauses:
+                    query += " WHERE " + " AND ".join(where_clauses)
+                query += " ORDER BY id_venta DESC LIMIT 100"
+
+                cur.execute(query, params)
+                for r in cur.fetchall():
+                    doc = str(r["documento_cliente"] or "")
+                    op = str(r["operario"] or "")
+                    id_v = r["id_venta"]
+                    fac = f"V-{id_v:06d}"
+                    est = r["estado"] or "Completada"
+
+                    if filtro_txt:
+                        if (filtro_txt not in str(id_v).lower() and
+                            filtro_txt not in fac.lower() and
+                            filtro_txt not in doc.lower() and
+                            filtro_txt not in op.lower()):
+                            continue
+
+                    tree.insert("", "end", values=(
+                        id_v, fac, r["fecha_venta"], r["hora_venta"],
+                        op, doc, r["metodo_pago"] or "Efectivo",
+                        f"${float(r['total_venta']):,.0f}", est
+                    ), tags=(est,))
+            finally:
+                conn.close()
 
     def abrir_modal_anular():
         vals = obtener_venta_seleccionada()

@@ -206,24 +206,23 @@ def guardar_venta_sqlite(
             d_copy["costo_unitario"] = costo_unit
             detalles_enriquecidos.append(d_copy)
 
-            # Si el ítem es un Servicio asociado a un proveedor habitual, registrar la Cuenta por Pagar
-            if tipo_prod == "Servicio":
+            # Registrar la Cuenta por Pagar al proveedor si el ítem (producto físico o servicio) tiene proveedor asignado
+            try:
                 try:
-                    try:
-                        from interface.proveedores_manager import registrar_cxp_servicio_venta
-                    except ImportError:
-                        from proveedores_manager import registrar_cxp_servicio_venta
-                    registrar_cxp_servicio_venta(
-                        id_venta=id_venta,
-                        detalle_item=d_copy,
-                        operario_nombre=operario_nombre,
-                        numero_venta=numero_factura or f"V-{id_venta:05d}",
-                        fecha_str=hoy_str,
-                        hora_str=hora_str,
-                        conn=conn
-                    )
-                except Exception as e_cxp:
-                    print(f"Aviso registrando cuenta por pagar a proveedor: {e_cxp}")
+                    from interface.proveedores_manager import registrar_cxp_servicio_venta
+                except ImportError:
+                    from proveedores_manager import registrar_cxp_servicio_venta
+                registrar_cxp_servicio_venta(
+                    id_venta=id_venta,
+                    detalle_item=d_copy,
+                    operario_nombre=operario_nombre,
+                    numero_venta=numero_factura or f"V-{id_venta:05d}",
+                    fecha_str=hoy_str,
+                    hora_str=hora_str,
+                    conn=conn
+                )
+            except Exception as e_cxp:
+                print(f"Aviso registrando cuenta por pagar a proveedor: {e_cxp}")
 
             if tipo_prod != "Servicio":
                 try:
@@ -3441,6 +3440,23 @@ class App:
                         self.cancelar_orden_activa()
                     else:
                         self.limpiar_formulario()
+
+                    # Persistencia local en SQLite para Registro de Ventas, auditoría permanente y modo offline
+                    try:
+                        guardar_venta_sqlite(
+                            doc_cliente=doc_final,
+                            total=total,
+                            metodo_pago=metodo_pago,
+                            detalles=detalles_payload,
+                            operario_nombre=operario_nombre,
+                            cliente_id=cliente_id_val,
+                            recibido=recibido_payload,
+                            cambio=cambio_payload,
+                            numero_factura=numero_factura,
+                            snapshot_negocio=snapshot_actual
+                        )
+                    except Exception as e_sq:
+                        print(f"Aviso en persistencia local SQLite de venta #{id_central}: {e_sq}")
 
                     # Actualizar catálogo, existencias, caja e indicadores desde el servidor central
                     self.productos_inventario = self.obtener_productos()
