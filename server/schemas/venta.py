@@ -15,6 +15,8 @@ class DetalleVentaCreate(BaseModel):
     subtotal: float = 0.0
     costo_unitario: Optional[float] = 0.0
     ubicacion: Optional[str] = "Vitrina"
+    proveedor_id: Optional[int] = None
+    porcentaje_comision: Optional[float] = 0.0
 
     @model_validator(mode="before")
     @classmethod

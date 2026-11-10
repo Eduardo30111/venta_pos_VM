@@ -463,9 +463,10 @@ class VentaService:
                             )
 
                         # Cuenta por Pagar a proveedor para Producto físico con proveedor asignado
-                        if producto.proveedor_id:
-                            costo_prod = float(producto.precio_costo or 0.0)
-                            pct_prov = float(getattr(producto, "porcentaje_comision", 0.0) or 0.0)
+                        prov_id_prod = producto.proveedor_id or getattr(item, "proveedor_id", None)
+                        if prov_id_prod:
+                            costo_prod = float(producto.precio_costo or item.costo_unitario or 0.0)
+                            pct_prov = float(getattr(producto, "porcentaje_comision", 0.0) or getattr(item, "porcentaje_comision", 0.0) or 0.0)
                             precio_total_prod = round(float(item.precio_vendido) * cantidad_item, 2)
                             if pct_prov > 0:
                                 comision_prov = round((precio_total_prod * pct_prov) / 100.0, 2)
@@ -479,15 +480,15 @@ class VentaService:
 
                             if monto_cxp_prod > 0:
                                 cxp_prod = CuentaPorPagar(
-                                    proveedor_id=producto.proveedor_id,
+                                    proveedor_id=prov_id_prod,
                                     venta_id=venta.id,
                                     numero_venta=numero,
-                                    codigo_servicio=producto.codigo,
-                                    nombre_servicio=producto.nombre,
+                                    codigo_servicio=producto.codigo or item.item_codigo,
+                                    nombre_servicio=producto.nombre or item.item_nombre,
                                     precio_venta=precio_total_prod,
                                     porcentaje_comision=pct_prov,
                                     monto_comision=comision_prov,
-                                    concepto=f"Producto {producto.nombre} - Venta {numero}",
+                                    concepto=f"Producto {producto.nombre or item.item_nombre} - Venta {numero}",
                                     monto=monto_cxp_prod,
                                     monto_pagado=0.0,
                                     saldo_pendiente=monto_cxp_prod,
@@ -498,7 +499,7 @@ class VentaService:
                                 )
                                 db.add(cxp_prod)
                                 await db.flush()
-                                await VentaService._recalcular_acumulados_proveedor(db, producto.proveedor_id)
+                                await VentaService._recalcular_acumulados_proveedor(db, prov_id_prod)
                     else:
                         # Servicio
                         servicio = None
@@ -516,11 +517,12 @@ class VentaService:
                                 detail=f"Servicio '{item.item_nombre}' ({item.item_codigo}) no encontrado o inactivo.",
                             )
 
-                        costo_prov = float(servicio.costo_proveedor or 0.0)
-                        pct_prov = float(getattr(servicio, "porcentaje_comision", 0.0) or 0.0)
+                        prov_id_serv = servicio.proveedor_id or getattr(item, "proveedor_id", None)
+                        costo_prov = float(servicio.costo_proveedor or item.costo_unitario or 0.0)
+                        pct_prov = float(getattr(servicio, "porcentaje_comision", 0.0) or getattr(item, "porcentaje_comision", 0.0) or 0.0)
                         precio_total_item = round(float(item.precio_vendido) * cantidad_item, 2)
 
-                        if servicio.proveedor_id:
+                        if prov_id_serv:
                             if pct_prov > 0:
                                 comision_prov = round((precio_total_item * pct_prov) / 100.0, 2)
                                 monto_cxp = round(max(0.0, precio_total_item - comision_prov), 2)
@@ -581,18 +583,18 @@ class VentaService:
                                 )
                             )
 
-                        # Cuenta por Pagar a proveedor (solo para Servicios de proveedor)
-                        if servicio.proveedor_id and monto_cxp > 0:
+                        # Cuenta por Pagar a proveedor (para Servicios con proveedor asignado)
+                        if prov_id_serv and monto_cxp > 0:
                             cxp = CuentaPorPagar(
-                                proveedor_id=servicio.proveedor_id,
+                                proveedor_id=prov_id_serv,
                                 venta_id=venta.id,
                                 numero_venta=numero,
-                                codigo_servicio=servicio.codigo,
-                                nombre_servicio=servicio.nombre,
+                                codigo_servicio=servicio.codigo or item.item_codigo,
+                                nombre_servicio=servicio.nombre or item.item_nombre,
                                 precio_venta=precio_total_item,
                                 porcentaje_comision=pct_prov,
                                 monto_comision=comision_prov,
-                                concepto=f"Servicio {servicio.nombre} - Venta {numero}",
+                                concepto=f"Servicio {servicio.nombre or item.item_nombre} - Venta {numero}",
                                 monto=monto_cxp,
                                 monto_pagado=0.0,
                                 saldo_pendiente=monto_cxp,
@@ -603,7 +605,7 @@ class VentaService:
                             )
                             db.add(cxp)
                             await db.flush()
-                            await VentaService._recalcular_acumulados_proveedor(db, servicio.proveedor_id)
+                            await VentaService._recalcular_acumulados_proveedor(db, prov_id_serv)
 
                 # 7. Registrar pagos, cuentas por cobrar y movimientos contables/caja (TODO en la misma transacción)
                 if estado_venta != "Pendiente_Caja":

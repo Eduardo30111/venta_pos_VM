@@ -203,7 +203,9 @@ def guardar_venta_sqlite(
             d_copy["tipo_item"] = "Servicio" if tipo_prod == "Servicio" else "Producto"
             d_copy["item_nombre"] = nom
             d_copy["subtotal"] = sub
-            d_copy["costo_unitario"] = costo_unit
+            d_copy["costo_unitario"] = d.get("costo_unitario") or costo_unit
+            d_copy["proveedor_id"] = d.get("proveedor_id")
+            d_copy["porcentaje_comision"] = d.get("porcentaje_comision")
             detalles_enriquecidos.append(d_copy)
 
             # Registrar la Cuenta por Pagar al proveedor si el ítem (producto físico o servicio) tiene proveedor asignado
@@ -3251,7 +3253,9 @@ class App:
                 for p in self.productos_inventario:
                     cod_p = str(p[0]).strip()
                     cod_c = str(codigo).strip()
-                    if cod_p.lower() == cod_c.lower() or cod_p.zfill(5) == cod_c.zfill(5):
+                    nom_p = str(p[1]).strip().lower()
+                    nom_c = str(nombre).strip().lower()
+                    if cod_p.lower() == cod_c.lower() or cod_p.zfill(5) == cod_c.zfill(5) or (nom_p and nom_p == nom_c):
                         tipo_item = "Servicio" if p[4] == "Servicio" else "Producto"
                         item_id = p[6]
                         costo = p[7]
@@ -3260,6 +3264,21 @@ class App:
                         if tipo_item == "Servicio" and prov_id and (costo is None or float(costo or 0) <= 0):
                             costo = precio_limpio
                         break
+
+                if not prov_id:
+                    try:
+                        from interface.database_manager import conectar_db
+                        conn_chk = conectar_db()
+                        c_chk = conn_chk.cursor()
+                        c_chk.execute("SELECT proveedor_id, costo FROM productos WHERE codigo = ? OR LOWER(nombre) = LOWER(?)", (str(codigo), str(nombre)))
+                        r_chk = c_chk.fetchone()
+                        if r_chk and r_chk[0]:
+                            prov_id = int(r_chk[0])
+                            if costo is None or float(costo or 0) <= 0:
+                                costo = float(r_chk[1] or 0.0)
+                        conn_chk.close()
+                    except Exception:
+                        pass
 
                 if not item_id and not getattr(self, "orden_id_activa", None):
                     if callable(on_error_restore):

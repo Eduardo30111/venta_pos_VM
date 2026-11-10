@@ -90,14 +90,26 @@ def formato_cant(val, unidad=""):
         return f"{val} {unidad}".strip()
 
 def obtener_proveedores_locales():
-    """Consulta proveedores desde el servidor central."""
+    """Consulta proveedores desde el servidor central con respaldo en SQLite local."""
     try:
         from client.api_client import api
         resp = api.get("/proveedores")
         if resp.status_code == 200:
             items = resp.json()
-            if isinstance(items, list):
+            if isinstance(items, list) and items:
                 return [(p["id"], p["nombre"]) for p in items if p.get("estado", "Activo") != "Inactivo"]
+    except Exception:
+        pass
+
+    try:
+        from interface.database_manager import conectar_db
+        conn = conectar_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, nombre FROM proveedores ORDER BY nombre ASC")
+        rows = cur.fetchall()
+        conn.close()
+        if rows:
+            return [(r[0], r[1]) for r in rows]
     except Exception:
         pass
     return []

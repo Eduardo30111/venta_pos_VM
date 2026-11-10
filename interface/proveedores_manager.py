@@ -199,21 +199,53 @@ def registrar_cxp_servicio_venta(
         if not p_row:
             return None
 
-        tipo_prod = str(p_row[0] or "Fisico").strip()
-        prov_id = p_row[1]
-        porcentaje_com = float(p_row[2] or 0.0)
-        prov_nom = str(p_row[3] or "").strip()
-        costo_prod = float(p_row[4] or 0.0)
+        tipo_prod = str(p_row[0] or "Fisico").strip() if p_row else str(detalle_item.get("tipo_item") or "Fisico")
+        prov_id = p_row[1] if p_row else None
+        porcentaje_com = float(p_row[2] or 0.0) if p_row else 0.0
+        prov_nom = str(p_row[3] or "").strip() if p_row else ""
+        costo_prod = float(p_row[4] or 0.0) if p_row else 0.0
+
+        # Si en BD local no tenía proveedor_id asignado pero en el ítem vendido sí viene:
+        if (not prov_id or prov_id <= 0) and detalle_item.get("proveedor_id"):
+            try:
+                raw_prov = detalle_item.get("proveedor_id")
+                if raw_prov and str(raw_prov).strip().isdigit() and int(str(raw_prov).strip()) > 0:
+                    prov_id = int(str(raw_prov).strip())
+            except (ValueError, TypeError):
+                prov_id = None
+
+        if porcentaje_com <= 0 and detalle_item.get("porcentaje_comision"):
+            try:
+                porcentaje_com = float(detalle_item.get("porcentaje_comision"))
+            except (ValueError, TypeError):
+                pass
+
+        if costo_prod <= 0 and (detalle_item.get("costo_unitario") or detalle_item.get("costo")):
+            try:
+                costo_prod = float(detalle_item.get("costo_unitario") or detalle_item.get("costo") or 0.0)
+            except (ValueError, TypeError):
+                pass
 
         # Aplica a cualquier producto o servicio que tenga un proveedor asignado
         if not prov_id or prov_id <= 0:
             return None
 
         # Si el proveedor no tiene nombre en la relación, buscar directamente
-        if not prov_nom:
+        if not prov_nom or prov_nom.startswith("Proveedor #"):
             cur.execute("SELECT nombre FROM proveedores WHERE id = ?", (prov_id,))
             p_nom_row = cur.fetchone()
             prov_nom = str(p_nom_row[0] if p_nom_row else f"Proveedor #{prov_id}")
+
+        # Sincronizar el proveedor hacia productos en SQLite si estaba vacío
+        if prov_id and cod:
+            try:
+                cur.execute("""
+                    UPDATE productos 
+                    SET proveedor_id = ? 
+                    WHERE (codigo = ? OR id = ?) AND (proveedor_id IS NULL OR proveedor_id = '')
+                """, (prov_id, cod, item_id or 0))
+            except Exception:
+                pass
 
         # Validar porcentaje de comisión (0 a 100%)
         porcentaje_com = max(0.0, min(100.0, porcentaje_com))
@@ -726,6 +758,40 @@ def obtener_resumen_proveedores(
                         "total_pagado": float(p.get("total_pagado") or 0.0),
                         "estado": p.get("estado") or "Activo",
                     })
+
+                # Reconciliar con cuentas por pagar de SQLite local para reflejar ventas pendientes de inmediato
+                try:
+                    sincronizar_cxp_retroactivas()
+                    conn_loc = conectar_db()
+                    cur_loc = conn_loc.cursor()
+                    for item in res:
+                        pid = item.get("id")
+                        if pid:
+                            cur_loc.execute("""
+                                SELECT 
+                                    COALESCE(SUM(precio_venta), 0.0),
+                                    COALESCE(SUM(monto_comision), 0.0),
+                                    COALESCE(SUM(monto_pagado), 0.0),
+                                    COALESCE(SUM(saldo_pendiente), 0.0)
+                                FROM cuentas_por_pagar_proveedores
+                                WHERE proveedor_id = ? AND estado != 'Anulada'
+                            """, (pid,))
+                            cxp_r = cur_loc.fetchone()
+                            if cxp_r and float(cxp_r[3] or 0.0) > 0:
+                                loc_v = float(cxp_r[0] or 0.0)
+                                loc_c = float(cxp_r[1] or 0.0)
+                                loc_p = float(cxp_r[2] or 0.0)
+                                loc_s = float(cxp_r[3] or 0.0)
+                                if item["saldo_pendiente"] <= 0 or loc_s > item["saldo_pendiente"]:
+                                    item["saldo_pendiente"] = loc_s
+                                    item["saldo_acumulado"] = loc_s
+                                    item["total_ventas"] = max(item["total_ventas"], loc_v)
+                                    item["total_comisiones"] = max(item["total_comisiones"], loc_c)
+                                    item["total_pagado"] = max(item["total_pagado"], loc_p)
+                    conn_loc.close()
+                except Exception as e_rec:
+                    print(f"Aviso reconciliando saldos locales con API: {e_rec}")
+
                 return res
         except Exception:
             pass

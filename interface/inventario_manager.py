@@ -132,6 +132,79 @@ def sugerir_proximo_codigo(tipo="Fisico", conn=None) -> str:
     return f"{prefix}00001"
 
 
+def upsert_articulo_sqlite(datos: Dict[str, Any], conn=None):
+    """Persiste y sincroniza inmediatamente el artículo en la base de datos SQLite local."""
+    cerrar = False
+    if conn is None:
+        try:
+            from interface.database_manager import conectar_db
+        except ImportError:
+            from database_manager import conectar_db
+        conn = conectar_db()
+        cerrar = True
+    try:
+        cur = conn.cursor()
+        cod = str(datos.get("codigo", "")).strip()
+        nom = str(datos.get("nombre", "")).strip()
+        t_prod = str(datos.get("tipo_producto", "Fisico")).strip()
+        pre = float(datos.get("precio", 0.0) or 0.0)
+        cos = float(datos.get("costo", 0.0) or 0.0)
+        cat = str(datos.get("categoria", "General") or "General").strip()
+        mar = str(datos.get("marca", "") or "").strip()
+        bar = str(datos.get("codigo_barras", "") or "").strip()
+        uni = str(datos.get("unidad_medida", "Unidad") or "Unidad").strip()
+        des = str(datos.get("descripcion", "") or "").strip()
+        
+        raw_prov = datos.get("proveedor_id")
+        prov_id = None
+        if raw_prov is not None:
+            s_prov = str(raw_prov).strip()
+            if s_prov.isdigit() and int(s_prov) > 0:
+                prov_id = int(s_prov)
+
+        est = str(datos.get("estado", "Activo") or "Activo").strip()
+        p_var = 1 if datos.get("precio_variable") else 0
+        p_com = float(datos.get("porcentaje_comision", 0.0) or 0.0)
+        s_b = float(datos.get("stock_bodega", 0.0) or 0.0)
+        s_v = float(datos.get("stock_vitrina", 0.0) or 0.0)
+        s_tot = s_b + s_v
+        sm_b = float(datos.get("stock_minimo_bodega", 5.0) or 5.0)
+        sm_v = float(datos.get("stock_minimo_vitrina", 3.0) or 3.0)
+        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        cur.execute("SELECT id FROM productos WHERE codigo = ?", (cod,))
+        r = cur.fetchone()
+        if r:
+            cur.execute("""
+                UPDATE productos SET
+                    nombre = ?, tipo_producto = ?, precio = ?, costo = ?,
+                    categoria = ?, marca = ?, codigo_barras = ?, unidad_medida = ?,
+                    descripcion = ?, proveedor_id = ?, estado = ?, precio_variable = ?,
+                    porcentaje_comision = ?, stock_bodega = ?, stock_vitrina = ?,
+                    stock = ?, stock_minimo_bodega = ?, stock_minimo_vitrina = ?,
+                    fecha_modificacion = ?
+                WHERE id = ?
+            """, (nom, t_prod, pre, cos, cat, mar, bar, uni, des, prov_id, est, p_var, p_com, s_b, s_v, s_tot, sm_b, sm_v, ahora, r[0]))
+        else:
+            cur.execute("""
+                INSERT INTO productos (
+                    codigo, nombre, tipo_producto, precio, costo,
+                    categoria, marca, codigo_barras, unidad_medida,
+                    descripcion, proveedor_id, estado, precio_variable,
+                    porcentaje_comision, stock_bodega, stock_vitrina,
+                    stock, stock_minimo_bodega, stock_minimo_vitrina,
+                    fecha_creacion, fecha_modificacion
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (cod, nom, t_prod, pre, cos, cat, mar, bar, uni, des, prov_id, est, p_var, p_com, s_b, s_v, s_tot, sm_b, sm_v, ahora, ahora))
+        if cerrar:
+            conn.commit()
+    except Exception as e_upsert:
+        print(f"Aviso al upsert de artículo en SQLite local: {e_upsert}")
+    finally:
+        if cerrar and conn:
+            conn.close()
+
+
 def crear_articulo(datos: Dict[str, Any], usuario="Administrador", conn=None) -> Dict[str, Any]:
     payload = {
         "codigo": str(datos.get("codigo", "")).strip(),
@@ -153,16 +226,36 @@ def crear_articulo(datos: Dict[str, Any], usuario="Administrador", conn=None) ->
         "stock_minimo_bodega": float(datos.get("stock_minimo_bodega", 5.0) or 5.0),
         "stock_minimo_vitrina": float(datos.get("stock_minimo_vitrina", 3.0) or 3.0),
     }
-    resp = api.post("/inventario/articulo", json=payload)
-    return _asegurar_respuesta_ok(resp)
+
+    # Sincronizar en base de datos SQLite local para garantizar persistencia inmediata
+    upsert_articulo_sqlite(payload, conn=conn)
+
+    resp_data = None
+    try:
+        resp = api.post("/inventario/articulo", json=payload)
+        resp_data = _asegurar_respuesta_ok(resp)
+    except Exception as e_api:
+        print(f"Aviso registrando artículo en servidor central: {e_api}")
+        if not resp_data:
+            resp_data = {"codigo": payload["codigo"], "nombre": payload["nombre"], "tipo_producto": payload["tipo_producto"], "local": True}
+    return resp_data
 
 
 def actualizar_articulo(id_o_codigo, datos: Dict[str, Any], conn=None) -> bool:
     payload = dict(datos)
     if "precio_variable" in payload and payload["precio_variable"] is not None:
         payload["precio_variable"] = bool(payload["precio_variable"])
-    resp = api.put(f"/inventario/articulo/{id_o_codigo}", json=payload)
-    _asegurar_respuesta_ok(resp)
+    if "codigo" not in payload:
+        payload["codigo"] = str(id_o_codigo)
+
+    # Sincronizar en base de datos SQLite local
+    upsert_articulo_sqlite(payload, conn=conn)
+
+    try:
+        resp = api.put(f"/inventario/articulo/{id_o_codigo}", json=payload)
+        _asegurar_respuesta_ok(resp)
+    except Exception as e_api:
+        print(f"Aviso actualizando artículo en servidor central: {e_api}")
     return True
 
 

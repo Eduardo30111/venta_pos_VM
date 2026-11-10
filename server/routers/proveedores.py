@@ -1,6 +1,7 @@
 from datetime import datetime
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Optional, Dict, Any
@@ -35,7 +36,26 @@ async def list_proveedores(
         query = query.where(Proveedor.estado == "Activo")
     query = query.order_by(Proveedor.nombre.asc())
     result = await db.execute(query)
-    return result.scalars().all()
+    provs = result.scalars().all()
+    for p in provs:
+        try:
+            res_cxp = await db.execute(
+                select(
+                    func.coalesce(func.sum(CuentaPorPagar.precio_venta), 0.0),
+                    func.coalesce(func.sum(CuentaPorPagar.monto_comision), 0.0),
+                    func.coalesce(func.sum(CuentaPorPagar.monto_pagado), 0.0),
+                    func.coalesce(func.sum(CuentaPorPagar.saldo_pendiente), 0.0),
+                ).where(CuentaPorPagar.proveedor_id == p.id, CuentaPorPagar.estado != "Anulada")
+            )
+            row = res_cxp.first()
+            if row:
+                p.total_ventas = float(row[0] or 0.0)
+                p.total_comisiones = float(row[1] or 0.0)
+                p.total_pagado = float(row[2] or 0.0)
+                p.saldo_acumulado = float(row[3] or 0.0)
+        except Exception:
+            pass
+    return provs
 
 
 @router.get("/{id}", response_model=ProveedorResponse)
