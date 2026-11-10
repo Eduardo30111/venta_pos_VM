@@ -70,6 +70,8 @@ base_dir = USER_DATA_DIR
 database_dir = DATABASE_DIR
 ruta_db = DB_VENTAS_PATH
 
+_RECORDATORIO_ASISTENCIA_FECHA = None
+
 # Intentar importar el generador de códigos de barras
 GENERADOR_DISPONIBLE = False
 iniciar_generador_barras = None
@@ -229,16 +231,16 @@ class VmPOSDashboard(tk.Tk):
         self._create_footer()
         self._bind_shortcuts()
         business_mgr.agregar_listener(self.refrescar_identidad_negocio)
-        self.bind("<FocusIn>", lambda e: (self._actualizar_estadisticas(), self._actualizar_estadisticas_empleado()))
+        self.bind("<FocusIn>", lambda e: (self._actualizar_estadisticas(), self._actualizar_estadisticas_empleado()) if e.widget == self else None)
         
         # Actualizar estadísticas cada 30 segundos
         self._actualizar_estadisticas()
         
-        # Verificar asistencia diaria
+        # Actualizar indicador de asistencia del empleado (si aplica)
         self._verificar_asistencia()
         
-        # Verificar asistencia diaria
-        self._verificar_asistencia()
+        # Recordatorio único al administrador al iniciar sesión (se muestra a lo sumo 1 vez al día)
+        self.after(2000, self._recordar_asistencia_admin)
         self.after(30000, self._programa_actualizacion_stats)
         
         # Ocultar la pantalla de carga después de inicializar el dashboard
@@ -961,12 +963,19 @@ class VmPOSDashboard(tk.Tk):
             print(f"Error aplicando datos al dashboard: {e}")
 
 
-    def _verificar_asistencia(self):
+    def _recordar_asistencia_admin(self):
+        """Muestra un recordatorio al administrador para comprobar la asistencia del personal (máximo 1 vez al día)."""
+        global _RECORDATORIO_ASISTENCIA_FECHA
         try:
-            if self.rol_usuario in ["admin", "gerente", "administrador"]:
+            import datetime
+            hoy = datetime.date.today().strftime('%Y-%m-%d')
+            if _RECORDATORIO_ASISTENCIA_FECHA == hoy:
+                return  # Ya se mostró hoy en esta sesión
+
+            rol = str(getattr(self, "rol_usuario", "")).lower()
+            if rol in ["admin", "gerente", "administrador"]:
+                _RECORDATORIO_ASISTENCIA_FECHA = hoy
                 from usuarios_db import conectar_usuarios_db
-                import datetime
-                hoy = datetime.date.today().strftime('%Y-%m-%d')
                 
                 conn = conectar_usuarios_db()
                 cur = conn.cursor()
@@ -981,10 +990,10 @@ class VmPOSDashboard(tk.Tk):
                             "Recordatorio de Asistencia", 
                             "¡Hola! Recuerda comprobar la asistencia del personal hoy para cargar sus nóminas diarias.",
                             parent=self
-                        ))
+                        ) if (hasattr(self, 'winfo_exists') and self.winfo_exists()) else None)
                 conn.close()
         except Exception as e:
-            print("Error verificando asistencia:", e)
+            print("Error verificando asistencia admin:", e)
 
     def _actualizar_estadisticas(self):
         """Actualiza todas las estadísticas del dashboard en segundo plano sin congelar la interfaz."""
