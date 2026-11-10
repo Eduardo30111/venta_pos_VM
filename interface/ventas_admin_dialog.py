@@ -10,7 +10,7 @@ Módulo de Supervisión, Edición y Anulación de Ventas con Auditoría 100% par
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-from datetime import datetime
+from datetime import datetime, timedelta, date
 import os
 import sys
 
@@ -53,6 +53,25 @@ except ImportError:
         api = None
 
 
+def _normalizar_fecha(txt):
+    """Normaliza formatos de fecha DD/MM/YYYY o YYYY-MM-DD a YYYY-MM-DD."""
+    if not txt:
+        return ""
+    txt = txt.strip()
+    if "/" in txt:
+        partes = txt.split("/")
+        if len(partes) == 3 and len(partes[2]) == 4:
+            return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
+    elif "-" in txt:
+        partes = txt.split("-")
+        if len(partes) == 3:
+            if len(partes[0]) == 4:
+                return f"{partes[0]}-{partes[1].zfill(2)}-{partes[2].zfill(2)}"
+            elif len(partes[2]) == 4:
+                return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
+    return txt
+
+
 def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid=""):
     """Abre la ventana administrativa de gestión, anulación y edición de ventas."""
     dialog = tk.Toplevel(parent) if parent else tk.Tk()
@@ -87,18 +106,94 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
     filter_bar = tk.Frame(dialog, bg=t["bg_card"], relief="solid", bd=1, padx=12, pady=8)
     filter_bar.pack(fill="x", padx=12, pady=(10, 6))
 
+    # 1. Búsqueda por texto (Factura, operario, cliente, ID)
     tk.Label(filter_bar, text="🔍 Buscar:", font=("Segoe UI", 9, "bold"), bg=t["bg_card"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
     var_busq = tk.StringVar()
-    e_busq = tk.Entry(filter_bar, textvariable=var_busq, font=("Segoe UI", 10), width=20, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"], relief="solid", bd=1)
-    e_busq.pack(side="left", padx=(0, 10))
+    e_busq = tk.Entry(filter_bar, textvariable=var_busq, font=("Segoe UI", 10), width=16, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"], relief="solid", bd=1)
+    e_busq.pack(side="left", padx=(0, 8))
 
-    tk.Label(filter_bar, text="Estado:", font=("Segoe UI", 9, "bold"), bg=t["bg_card"], fg=t["text_main"]).pack(side="left", padx=(5, 4))
+    # 2. Estado
+    tk.Label(filter_bar, text="Estado:", font=("Segoe UI", 9, "bold"), bg=t["bg_card"], fg=t["text_main"]).pack(side="left", padx=(2, 4))
     var_estado = tk.StringVar(value="Todos")
-    cb_estado = ttk.Combobox(filter_bar, textvariable=var_estado, values=["Todos", "Completada", "Anulada", "Modificada"], state="readonly", width=12)
-    cb_estado.pack(side="left", padx=(0, 10))
+    cb_estado = ttk.Combobox(filter_bar, textvariable=var_estado, values=["Todos", "Completada", "Anulada", "Modificada"], state="readonly", width=11)
+    cb_estado.pack(side="left", padx=(0, 8))
+
+    # 3. Período / Fecha (Hoy, Ayer, Antes de ayer, o por fecha)
+    tk.Label(filter_bar, text="📅 Período:", font=("Segoe UI", 9, "bold"), bg=t["bg_card"], fg=t["text_main"]).pack(side="left", padx=(2, 4))
+    var_periodo = tk.StringVar(value="Hoy")
+    cb_periodo = ttk.Combobox(
+        filter_bar,
+        textvariable=var_periodo,
+        values=["Hoy", "Ayer", "Antes de ayer", "Por fecha", "Todas las fechas"],
+        state="readonly",
+        width=14
+    )
+    cb_periodo.pack(side="left", padx=(0, 4))
+
+    var_fecha = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+    e_fecha = tk.Entry(
+        filter_bar,
+        textvariable=var_fecha,
+        font=("Segoe UI", 10),
+        width=11,
+        bg=t["input_bg"],
+        fg=t["input_fg"],
+        insertbackground=t["input_insert"],
+        relief="solid",
+        bd=1
+    )
+    e_fecha.pack(side="left", padx=(0, 6))
 
     btn_filtrar = crear_boton(filter_bar, "Filtrar", lambda: cargar_ventas(), tipo="primary", icono="🔍", tam_fuente=9)
-    btn_filtrar.pack(side="left", padx=5)
+    btn_filtrar.pack(side="left", padx=(2, 6))
+
+    # Botones directos de acceso rápido: Hoy, Ayer, Antier, Todas
+    f_rapido = tk.Frame(filter_bar, bg=t["bg_card"])
+    f_rapido.pack(side="left", padx=(2, 0))
+
+    def _seleccionar_periodo(op):
+        var_periodo.set(op)
+        if op == "Hoy":
+            var_fecha.set(datetime.now().strftime("%Y-%m-%d"))
+        elif op == "Ayer":
+            var_fecha.set((datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"))
+        elif op == "Antes de ayer":
+            var_fecha.set((datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d"))
+        elif op == "Todas las fechas":
+            var_fecha.set("")
+        cargar_ventas()
+
+    crear_boton(f_rapido, "Hoy", lambda: _seleccionar_periodo("Hoy"), tipo="secondary", tam_fuente=8, pady=2, padx=5).pack(side="left", padx=1)
+    crear_boton(f_rapido, "Ayer", lambda: _seleccionar_periodo("Ayer"), tipo="secondary", tam_fuente=8, pady=2, padx=5).pack(side="left", padx=1)
+    crear_boton(f_rapido, "Antier", lambda: _seleccionar_periodo("Antes de ayer"), tipo="secondary", tam_fuente=8, pady=2, padx=5).pack(side="left", padx=1)
+    crear_boton(f_rapido, "Todas", lambda: _seleccionar_periodo("Todas las fechas"), tipo="secondary", tam_fuente=8, pady=2, padx=5).pack(side="left", padx=1)
+
+    # Resumen de ventas encontradas (conteo y total dinero)
+    lbl_resumen_ventas = tk.Label(filter_bar, text="", font=("Segoe UI", 9, "bold"), bg=t["bg_card"], fg=t["accent"])
+    lbl_resumen_ventas.pack(side="right", padx=10)
+
+    def _on_combo_periodo():
+        op = var_periodo.get()
+        if op == "Hoy":
+            var_fecha.set(datetime.now().strftime("%Y-%m-%d"))
+            cargar_ventas()
+        elif op == "Ayer":
+            var_fecha.set((datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"))
+            cargar_ventas()
+        elif op == "Antes de ayer":
+            var_fecha.set((datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d"))
+            cargar_ventas()
+        elif op == "Todas las fechas":
+            var_fecha.set("")
+            cargar_ventas()
+        elif op == "Por fecha":
+            e_fecha.focus()
+            e_fecha.select_range(0, tk.END)
+
+    cb_periodo.bind("<<ComboboxSelected>>", lambda e: _on_combo_periodo())
+    cb_estado.bind("<<ComboboxSelected>>", lambda e: cargar_ventas())
+    e_busq.bind("<Return>", lambda e: cargar_ventas())
+    e_fecha.bind("<Return>", lambda e: cargar_ventas())
 
     # Cuerpo principal con Split
     body = tk.Frame(dialog, bg=t["bg_app"])
@@ -246,14 +341,35 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
         filtro_txt = var_busq.get().strip().lower()
         filtro_est = var_estado.get()
 
+        p_sel = var_periodo.get()
+        f_raw = var_fecha.get().strip()
+        fecha_filtro = ""
+
+        if p_sel == "Hoy":
+            fecha_filtro = datetime.now().strftime("%Y-%m-%d")
+        elif p_sel == "Ayer":
+            fecha_filtro = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        elif p_sel == "Antes de ayer":
+            fecha_filtro = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+        elif p_sel == "Todas las fechas":
+            fecha_filtro = ""
+        else:
+            fecha_filtro = _normalizar_fecha(f_raw)
+
+        ventas_totales_sum = 0.0
+        ventas_contador = 0
+
         ventas_cargadas = False
         if api is not None:
             try:
-                params_api = {"limit": 200}
+                params_api = {"limit": 500}
                 if filtro_est != "Todos":
                     params_api["estado"] = filtro_est
                 if filtro_txt:
                     params_api["busqueda"] = filtro_txt
+                if fecha_filtro:
+                    params_api["fecha_inicio"] = fecha_filtro
+                    params_api["fecha_fin"] = fecha_filtro
 
                 resp = api.get("/ventas", params=params_api, timeout=3.0)
                 if resp.status_code == 200:
@@ -269,6 +385,9 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                         met = pags[0].get("metodo") if pags else "Efectivo"
                         tot = float(v.get("total") or 0.0)
                         est = v.get("estado") or "Completada"
+
+                        ventas_totales_sum += tot
+                        ventas_contador += 1
 
                         tree.insert("", "end", values=(
                             id_v, fac, f_v, h_v,
@@ -295,9 +414,13 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                     where_clauses.append("estado = ?")
                     params.append(filtro_est)
 
+                if fecha_filtro:
+                    where_clauses.append("(fecha_venta = ? OR fecha_venta LIKE ?)")
+                    params.extend([fecha_filtro, f"{fecha_filtro}%"])
+
                 if where_clauses:
                     query += " WHERE " + " AND ".join(where_clauses)
-                query += " ORDER BY id_venta DESC LIMIT 100"
+                query += " ORDER BY id_venta DESC LIMIT 500"
 
                 cur.execute(query, params)
                 for r in cur.fetchall():
@@ -314,13 +437,19 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                             filtro_txt not in op.lower()):
                             continue
 
+                    tot_item = float(r['total_venta'] or 0.0)
+                    ventas_totales_sum += tot_item
+                    ventas_contador += 1
+
                     tree.insert("", "end", values=(
                         id_v, fac, r["fecha_venta"], r["hora_venta"],
                         op, doc, r["metodo_pago"] or "Efectivo",
-                        f"${float(r['total_venta']):,.0f}", est
+                        f"${tot_item:,.0f}", est
                     ), tags=(est,))
             finally:
                 conn.close()
+
+        lbl_resumen_ventas.config(text=f"📊 {ventas_contador} ventas | ${ventas_totales_sum:,.0f} COP")
 
     def abrir_modal_anular():
         vals = obtener_venta_seleccionada()
