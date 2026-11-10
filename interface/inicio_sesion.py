@@ -481,57 +481,32 @@ usuario_var = tk.StringVar()
 pass_var = tk.StringVar()
 
 crear_etiqueta(login_content, text="👤 USUARIO", font=(FONT_FAMILY, 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"], anchor="w").pack(fill="x", pady=(0, 3))
-entry_user = tk.Entry(
-    login_content,
-    textvariable=usuario_var,
-    font=(FONT_FAMILY, 11),
-    bg=t["input_bg"],
-    fg=t["input_fg"],
-    insertbackground=t["input_insert"],
-    relief="solid",
-    bd=1,
-    highlightthickness=1,
-    highlightcolor=COLOR_LOGIN,
-    highlightbackground=t["border"]
-)
-entry_user.pack(fill="x", ipady=4, pady=(0, 12))
+entry_user = ttk.Entry(login_content, textvariable=usuario_var, font=(FONT_FAMILY, 11))
+entry_user.pack(fill="x", ipady=3, pady=(0, 12))
 
 crear_etiqueta(login_content, text="🔒 CONTRASEÑA", font=(FONT_FAMILY, 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"], anchor="w").pack(fill="x", pady=(0, 3))
-entry_pass = tk.Entry(
-    login_content,
-    textvariable=pass_var,
-    font=(FONT_FAMILY, 11),
-    show="*",
-    bg=t["input_bg"],
-    fg=t["input_fg"],
-    insertbackground=t["input_insert"],
-    relief="solid",
-    bd=1,
-    highlightthickness=1,
-    highlightcolor=COLOR_LOGIN,
-    highlightbackground=t["border"]
-)
-entry_pass.pack(fill="x", ipady=4, pady=(0, 16))
+entry_pass = ttk.Entry(login_content, textvariable=pass_var, font=(FONT_FAMILY, 11), show="*")
+entry_pass.pack(fill="x", ipady=3, pady=(0, 16))
 
-btn_login = ModernCardButton(
+btn_login = crear_boton(
     login_content,
-    texto="INICIAR SESIÓN",
-    subtexto="Ingresar al sistema VmPOS",
-    icono="🚀",
-    color_acento=COLOR_LOGIN,
+    "🚀 INICIAR SESIÓN",
     comando=validar_usuario,
-    tipo="compact"
+    tam_fuente=11,
+    negrita=True,
+    bg_color=COLOR_LOGIN,
+    fg_color=FG_LOGIN
 )
 btn_login.pack(fill="x", pady=(0, 8))
 
-btn_clear = ModernCardButton(
+btn_clear = crear_boton(
     login_content,
-    texto="LIMPIAR CAMPOS",
-    subtexto="Borrar usuario y contraseña",
-    icono="🧹",
-    color_acento=t["secondary"],
+    "🧹 LIMPIAR CAMPOS",
     comando=limpiar_campos,
-    tipo="compact"
+    tam_fuente=10,
+    negrita=True,
+    bg_color=t["btn_secondary_bg"],
+    fg_color=t["btn_secondary_fg"]
 )
 btn_clear.pack(fill="x", pady=(0, 8))
 
@@ -569,6 +544,7 @@ def recargar_identidad_login():
         lbl_acceso_txt.configure(bg=c_login, fg=fg_login)
         btn_theme_login.configure(bg=c_login, fg=fg_login, activebackground=c_login, activeforeground=fg_login, highlightbackground=c_login)
         btn_net_login.configure(bg=c_login, fg=fg_login, activebackground=c_login, activeforeground=fg_login, highlightbackground=c_login)
+        btn_login.configure(bg=c_login, fg=fg_login)
         btn_red_link.configure(fg=c_login if c_login != "#FFFFFF" else t["accent"], activeforeground=c_login)
     except Exception as e_ref:
         print(f"Aviso refrescando identidad en login: {e_ref}")
@@ -579,28 +555,6 @@ business_mgr.agregar_listener(recargar_identidad_login)
 ventana.bind("<Return>", validar_usuario)
 ventana.bind("<Escape>", limpiar_campos)
 entry_user.focus()
-
-def forzar_repintado_mac(event=None):
-    if sys.platform != "darwin":
-        return
-    try:
-        if not ventana.winfo_exists():
-            return
-        ventana.update_idletasks()
-        w = ventana.winfo_width()
-        h = ventana.winfo_height()
-        if w > 50 and h > 50:
-            ventana.geometry(f"{w+1}x{h}")
-            ventana.update_idletasks()
-            ventana.geometry(f"{w}x{h}")
-            ventana.update_idletasks()
-        ventana.lift()
-        ventana.focus_force()
-    except Exception:
-        pass
-
-if sys.platform == "darwin":
-    ventana.bind("<Map>", lambda e: ventana.after(80, forzar_repintado_mac))
 
 
 def _autoarrancar_o_sincronizar_red():
@@ -627,9 +581,10 @@ threading.Thread(target=_autoarrancar_o_sincronizar_red, daemon=True).start()
 
 if __name__ == "__main__":
     if sys.platform == "darwin":
-        ventana.after(50, forzar_repintado_mac)
-        ventana.after(200, forzar_repintado_mac)
-        ventana.after(500, forzar_repintado_mac)
+        try:
+            ventana.update_idletasks()
+        except Exception:
+            pass
     ventana.lift()
     ventana.focus_force()
     ventana.mainloop()

@@ -1455,6 +1455,18 @@ def editar_venta_completa(
                 id_venta, usuario_admin, fecha_str, hora_str, motivo, str(nuevos_items), total_anterior, nuevo_total
             ))
 
+        # 6.5 Ajustar obligaciones y saldos de proveedores si la venta contenía ítems de proveedores
+        try:
+            from interface.proveedores_manager import ajustar_cxp_por_edicion_venta
+            ajustar_cxp_por_edicion_venta(
+                id_venta=id_venta,
+                nuevos_detalles=nuevos_items or [],
+                motivo=f"Edición de venta #{id_venta}: {motivo}",
+                conn=conn
+            )
+        except Exception as e_cxp_ed:
+            print(f"Aviso ajustando CXP de proveedores en edición de venta: {e_cxp_ed}")
+
         conn.commit()
         return {
             "ok": True,

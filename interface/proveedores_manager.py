@@ -152,14 +152,49 @@ def registrar_cxp_servicio_venta(
             p_unit = float(detalle_item.get("precio_vendido", detalle_item.get("precio_unitario", detalle_item.get("precio", 0.0))) or 0.0)
             subtotal_real = p_unit * cant
 
-        # Consultar datos maestros del producto/servicio en la base de datos
-        cur.execute("""
-            SELECT p.tipo_producto, p.proveedor_id, COALESCE(p.porcentaje_comision, 0.0), prov.nombre, COALESCE(p.costo, 0.0)
-            FROM productos p
-            LEFT JOIN proveedores prov ON p.proveedor_id = prov.id
-            WHERE p.codigo = ? OR p.codigo = ?
-        """, (cod, cod.zfill(5)))
-        p_row = cur.fetchone()
+        item_id = detalle_item.get("item_id") or detalle_item.get("producto_id")
+        p_row = None
+        if item_id:
+            cur.execute("""
+                SELECT p.tipo_producto, p.proveedor_id, COALESCE(p.porcentaje_comision, 0.0), prov.nombre, COALESCE(p.costo, 0.0)
+                FROM productos p
+                LEFT JOIN proveedores prov ON p.proveedor_id = prov.id
+                WHERE p.id = ?
+            """, (item_id,))
+            p_row = cur.fetchone()
+
+        if not p_row and cod:
+            cur.execute("""
+                SELECT p.tipo_producto, p.proveedor_id, COALESCE(p.porcentaje_comision, 0.0), prov.nombre, COALESCE(p.costo, 0.0)
+                FROM productos p
+                LEFT JOIN proveedores prov ON p.proveedor_id = prov.id
+                WHERE p.codigo = ? OR p.codigo = ? OR p.codigo_barras = ?
+            """, (cod, cod.zfill(5), cod))
+            p_row = cur.fetchone()
+
+        if not p_row and nom:
+            cur.execute("""
+                SELECT p.tipo_producto, p.proveedor_id, COALESCE(p.porcentaje_comision, 0.0), prov.nombre, COALESCE(p.costo, 0.0)
+                FROM productos p
+                LEFT JOIN proveedores prov ON p.proveedor_id = prov.id
+                WHERE LOWER(p.nombre) = LOWER(?)
+            """, (nom,))
+            p_row = cur.fetchone()
+
+        if not p_row:
+            # Si no está en BD local pero viene explícito en el payload
+            raw_prov = detalle_item.get("proveedor_id")
+            if raw_prov:
+                try:
+                    prov_id = int(str(raw_prov).strip())
+                    costo_p = float(detalle_item.get("costo_unitario") or detalle_item.get("costo") or 0.0)
+                    pct_p = float(detalle_item.get("porcentaje_comision") or 0.0)
+                    cur.execute("SELECT nombre FROM proveedores WHERE id = ?", (prov_id,))
+                    p_nom_r = cur.fetchone()
+                    prov_nom = str(p_nom_r[0] if p_nom_r else f"Proveedor #{prov_id}")
+                    p_row = ("Fisico", prov_id, pct_p, prov_nom, costo_p)
+                except Exception:
+                    pass
 
         if not p_row:
             return None
@@ -184,12 +219,17 @@ def registrar_cxp_servicio_venta(
         porcentaje_com = max(0.0, min(100.0, porcentaje_com))
 
         # Cálculo de obligación a pagar al proveedor:
-        if porcentaje_com > 0:
+        # Prioridad 1: Costo unitario fijo pactado por unidad vendida (ej. Omara Sierra $12,000 COP)
+        costo_unitario_efectivo = costo_prod
+        if costo_unitario_efectivo <= 0:
+            costo_unitario_efectivo = float(detalle_item.get("costo_unitario") or detalle_item.get("costo") or 0.0)
+
+        if costo_unitario_efectivo > 0:
+            monto_por_pagar = round(costo_unitario_efectivo * cant, 2)
+            monto_comision = round(max(0.0, subtotal_real - monto_por_pagar), 2)
+        elif porcentaje_com > 0:
             monto_comision = round(subtotal_real * (porcentaje_com / 100.0), 2)
             monto_por_pagar = round(max(0.0, subtotal_real - monto_comision), 2)
-        elif costo_prod > 0:
-            monto_por_pagar = round(costo_prod * cant, 2)
-            monto_comision = round(max(0.0, subtotal_real - monto_por_pagar), 2)
         else:
             monto_por_pagar = subtotal_real
             monto_comision = 0.0
@@ -326,6 +366,127 @@ def revertir_cxp_por_venta_anulada(
             "afectados": len(detalles_anulados),
             "detalles": detalles_anulados,
             "proveedores": list(proveedores_afectados)
+        }
+    except Exception as e:
+        if cerrar_conn and conn:
+            conn.rollback()
+        raise e
+    finally:
+        if cerrar_conn and conn:
+            conn.close()
+
+
+def ajustar_cxp_por_edicion_venta(
+    id_venta: int,
+    nuevos_detalles: List[Dict[str, Any]],
+    motivo: str = "Edición / Devolución parcial de venta",
+    conn: Optional[sqlite3.Connection] = None
+) -> Dict[str, Any]:
+    """
+    Ajusta proporcionalmente las obligaciones a proveedores cuando una venta es editada
+    o se realiza una devolución parcial (ej. 5 unidades vendidas, 2 devueltas -> 3 unidades).
+    - Preserva los montos ya pagados/liquidados al proveedor.
+    - Recalcula el saldo_pendiente y el saldo_acumulado del proveedor de forma atómica.
+    """
+    cerrar_conn = False
+    if conn is None:
+        conn = conectar_db()
+        cerrar_conn = True
+
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, proveedor_id, codigo_servicio, nombre_servicio,
+                   monto_por_pagar, monto_pagado, saldo_pendiente, estado
+            FROM cuentas_por_pagar_proveedores
+            WHERE id_venta = ? AND estado != 'Anulada'
+        """, (id_venta,))
+        cxp_existentes = cur.fetchall()
+
+        # Mapear nuevos detalles por código/nombre
+        mapa_nuevos = {}
+        for d in nuevos_detalles:
+            k_cod = str(d.get("codigo_producto", d.get("item_codigo", d.get("codigo", "")))).strip()
+            k_nom = str(d.get("nombre_producto", d.get("item_nombre", d.get("nombre", "")))).strip().lower()
+            if k_cod:
+                mapa_nuevos[k_cod] = d
+            if k_nom:
+                mapa_nuevos[k_nom] = d
+
+        provs_afectados = set()
+        ajustados = 0
+
+        for c_id, p_id, c_cod, c_nom, m_pagar, m_pagado, s_pend, estado in cxp_existentes:
+            c_cod_s = str(c_cod or "").strip()
+            c_nom_s = str(c_nom or "").strip().lower()
+
+            item_nuevo = mapa_nuevos.get(c_cod_s) or mapa_nuevos.get(c_nom_s)
+
+            if item_nuevo is None:
+                # El ítem fue devuelto en su totalidad
+                cur.execute("""
+                    UPDATE cuentas_por_pagar_proveedores
+                    SET estado = 'Anulada',
+                        saldo_pendiente = 0.0
+                    WHERE id = ?
+                """, (c_id,))
+                provs_afectados.add(p_id)
+                ajustados += 1
+            else:
+                # El ítem continúa, recalcular por la nueva cantidad
+                nueva_cant = float(item_nuevo.get("cantidad", 1) or 1)
+                costo_u = float(item_nuevo.get("costo_unitario", item_nuevo.get("costo", 0.0)) or 0.0)
+                subtot_n = float(item_nuevo.get("subtotal", 0.0) or 0.0)
+
+                if costo_u <= 0:
+                    # Buscar costo en productos
+                    cur.execute("SELECT COALESCE(costo, 0.0), COALESCE(porcentaje_comision, 0.0) FROM productos WHERE codigo = ?", (c_cod_s,))
+                    p_info = cur.fetchone()
+                    if p_info:
+                        costo_u = float(p_info[0] or 0.0)
+                        pct_c = float(p_info[1] or 0.0)
+                    else:
+                        pct_c = 0.0
+                else:
+                    pct_c = float(item_nuevo.get("porcentaje_comision", 0.0) or 0.0)
+
+                if costo_u > 0:
+                    nuevo_monto_pagar = round(costo_u * nueva_cant, 2)
+                    nuevo_monto_com = max(0.0, round(subtot_n - nuevo_monto_pagar, 2))
+                elif pct_c > 0:
+                    nuevo_monto_com = round(subtot_n * (pct_c / 100.0), 2)
+                    nuevo_monto_pagar = max(0.0, round(subtot_n - nuevo_monto_com, 2))
+                else:
+                    nuevo_monto_pagar = subtot_n
+                    nuevo_monto_com = 0.0
+
+                m_pagado_flt = float(m_pagado or 0.0)
+                nuevo_saldo_pend = max(0.0, round(nuevo_monto_pagar - m_pagado_flt, 2))
+                nuevo_estado = "Pagada" if nuevo_saldo_pend <= 0.0 else ("Abonada" if m_pagado_flt > 0 else "Pendiente")
+
+                cur.execute("""
+                    UPDATE cuentas_por_pagar_proveedores
+                    SET precio_venta = ?,
+                        monto_por_pagar = ?,
+                        monto_comision = ?,
+                        saldo_pendiente = ?,
+                        estado = ?
+                    WHERE id = ?
+                """, (subtot_n, nuevo_monto_pagar, nuevo_monto_com, nuevo_saldo_pend, nuevo_estado, c_id))
+                provs_afectados.add(p_id)
+                ajustados += 1
+
+        for pid in provs_afectados:
+            recalcular_saldo_proveedor(pid, conn=conn)
+
+        if cerrar_conn:
+            conn.commit()
+
+        return {
+            "ok": True,
+            "id_venta": id_venta,
+            "ajustados": ajustados,
+            "proveedores": list(provs_afectados)
         }
     except Exception as e:
         if cerrar_conn and conn:
