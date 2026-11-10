@@ -2355,28 +2355,6 @@ class VmPOSDashboard(tk.Tk):
             else:
                 messagebox.showerror("❌ Error al abrir Turnos", f"No se pudo abrir control de turnos:\n{e}")
 
-
-    def _abrir_nomina(self):
-        """Abre el módulo de nómina y liquidación usando subprocess."""
-        try:
-            import subprocess
-            import sys
-            import os
-            
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            script_path = os.path.join(base_dir, 'nomina_menu.py')
-            
-            if os.path.exists(script_path):
-                print("Abriendo módulo de nómina en proceso separado...")
-
-                with open('debug_nomina.txt', 'w') as f:
-                    subprocess.Popen([sys.executable, script_path], stdout=f, stderr=f)
-
-            else:
-                messagebox.showerror("❌ Error", f"No se encontró el módulo: {script_path}")
-        except Exception as e:
-            messagebox.showerror("❌ Error", f"Error al abrir el módulo de nómina: {e}")
-
 # --- Punto de entrada desde el login ---
 def iniciar_dashboard(usuario, datos_usuario):
     """

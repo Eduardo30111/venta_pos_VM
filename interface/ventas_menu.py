@@ -999,7 +999,7 @@ class App:
         btn_eliminar = crear_boton(cart_in_frame, "🗑️", command=self.eliminar_seleccionado, tipo="danger", tam_fuente=8, pady=2, padx=6)
         btn_eliminar.pack(side="left", padx=1)
 
-        btn_editar = crear_boton(cart_in_frame, "✏️", command=self.editar_item_carrito_click, tipo="secondary", tam_fuente=8, pady=2, padx=6, tooltip="Modificar cantidad o precio del ítem")
+        btn_editar = crear_boton(cart_in_frame, "✏️ Modificar", command=self.editar_item_carrito_click, tipo="secondary", tam_fuente=8, pady=2, padx=6, tooltip="Modificar cantidad o precio del ítem")
         btn_editar.pack(side="left", padx=1)
 
         if self.puede_procesar_venta:
@@ -1021,6 +1021,7 @@ class App:
         sc_cart_x = ttk.Scrollbar(cart_table_frame, orient="horizontal", command=self.tabla.xview)
         self.tabla.configure(yscrollcommand=sc_cart_y.set, xscrollcommand=sc_cart_x.set)
         self.tabla.bind("<Double-1>", self.editar_item_carrito_click)
+        self.tabla.bind("<Return>", self.editar_item_carrito_click)
 
         self.tabla.grid(row=0, column=0, sticky="nsew")
         sc_cart_y.grid(row=0, column=1, sticky="ns")
@@ -2429,6 +2430,9 @@ class App:
                 nueva_cantidad, 
                 self.formato_peso(nuevo_total)
             ))
+            self.tabla.selection_set(item_existente)
+            self.tabla.focus(item_existente)
+            self.tabla.see(item_existente)
             
             # Sumar solo el precio unitario al total general
             self.total_general.set(self.total_general.get() + precio)
@@ -2450,8 +2454,11 @@ class App:
                 return
             
             # Agregar nuevo producto
-            self.tabla.insert("", tk.END, text=codigo, values=(nombre, self.formato_peso(precio), 1, 
+            nuevo_item = self.tabla.insert("", tk.END, text=codigo, values=(nombre, self.formato_peso(precio), 1, 
                                                  self.formato_peso(precio)))
+            self.tabla.selection_set(nuevo_item)
+            self.tabla.focus(nuevo_item)
+            self.tabla.see(nuevo_item)
             self.total_general.set(self.total_general.get() + precio)
             
             print(f"DEBUG: Nuevo producto agregado: {nombre}")
@@ -2512,7 +2519,7 @@ class App:
     def editar_item_carrito_click(self, event=None):
         """Permite modificar directamente la cantidad y el precio del producto seleccionado en el carrito."""
         sel = self.tabla.selection()
-        if not sel and event:
+        if not sel and event and hasattr(event, "y"):
             row_id = self.tabla.identify_row(event.y)
             if row_id:
                 sel = (row_id,)
@@ -2522,6 +2529,13 @@ class App:
             if item_foc:
                 sel = (item_foc,)
                 self.tabla.selection_set(item_foc)
+
+        if not sel:
+            hijos = self.tabla.get_children()
+            if hijos:
+                sel = (hijos[-1],)
+                self.tabla.selection_set(hijos[-1])
+                self.tabla.focus(hijos[-1])
 
         if not sel:
             messagebox.showinfo("Modificar Ítem", "Seleccione un producto en la tabla del carrito para modificar su cantidad o precio.", parent=self.ventana)
@@ -2702,6 +2716,16 @@ class App:
 
         dialog.bind("<Return>", confirmar_cambios)
         dialog.bind("<Escape>", lambda e: dialog.destroy())
+
+        try:
+            dialog.lift()
+            dialog.attributes("-topmost", True)
+            dialog.after_idle(lambda: dialog.attributes("-topmost", False))
+            dialog.focus_force()
+            e_cant.focus_set()
+            e_cant.select_range(0, tk.END)
+        except Exception:
+            pass
 
     def pagar(self):
         """Abre la ventana para procesar el pago con layout responsive, clientes centrales y confirmación asíncrona idempotente."""
