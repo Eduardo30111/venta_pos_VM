@@ -49,6 +49,26 @@ except ImportError:
     )
     from interface.database_manager import conectar_db
 
+DENOM_BILLETES = [
+    {"valor": 100000, "nombre": "Billete de $100.000", "archivo": "billete_100000.png"},
+    {"valor": 50000,  "nombre": "Billete de $50.000",  "archivo": "billete_50000.png"},
+    {"valor": 20000,  "nombre": "Billete de $20.000",  "archivo": "billete_20000.png"},
+    {"valor": 10000,  "nombre": "Billete de $10.000",  "archivo": "billete_10000.png"},
+    {"valor": 5000,   "nombre": "Billete de $5.000",   "archivo": "billete_5000.png"},
+    {"valor": 2000,   "nombre": "Billete de $2.000",   "archivo": "billete_2000.png"},
+]
+
+DENOM_MONEDAS = [
+    {"valor": 2000, "nombre": "Moneda de $2.000", "archivo": "moneda_2000.png"},
+    {"valor": 1000, "nombre": "Moneda de $1.000", "archivo": "moneda_1000.png"},
+    {"valor": 500,  "nombre": "Moneda de $500",    "archivo": "moneda_500.png"},
+    {"valor": 200,  "nombre": "Moneda de $200",    "archivo": "moneda_200.png"},
+    {"valor": 100,  "nombre": "Moneda de $100",    "archivo": "moneda_100.png"},
+    {"valor": 50,   "nombre": "Moneda de $50",     "archivo": "moneda_50.png"},
+]
+
+DENOMINACIONES = DENOM_BILLETES + DENOM_MONEDAS
+
 
 def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrador", parent_pid="", parent=None):
     """Inicia la interfaz gráfica de Control de Caja y Arqueo Físico."""
@@ -455,36 +475,339 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
     # =========================================================================
     # MODAL 1: ABRIR TURNO DE CAJA
     # =========================================================================
+    # =========================================================================
+    # MODAL 1: ABRIR TURNO DE CAJA CON ARQUEO VISUAL DE DENOMINACIONES
+    # =========================================================================
     def modal_abrir_caja():
         dlg = tk.Toplevel(ventana)
-        dlg.title("🟢 Apertura de Turno de Caja")
+        dlg.title("🟢 Apertura de Turno — Arqueo de Efectivo Inicial")
         t_dlg = aplicar_tema(dlg)
-        calcular_geometria_segura(dlg, 420, 270, 360, 220)
+        calcular_geometria_segura(dlg, 620, 680, 540, 560)
         dlg.configure(bg=t_dlg["bg_surface"])
         dlg.transient(ventana)
         dlg.grab_set()
 
-        tk.Label(dlg, text="🟢 APERTURA DE TURNO DE CAJA", font=("Segoe UI", 12, "bold"), bg=t_dlg["bg_surface"], fg=t_dlg["text_main"]).pack(pady=12)
-        tk.Label(dlg, text="Ingrese el monto base inicial en efectivo para la gaveta:", font=("Segoe UI", 9), bg=t_dlg["bg_surface"], fg=t_dlg["text_muted"]).pack(pady=4)
+        try:
+            from PIL import Image, ImageTk
+            pil_activa = True
+        except Exception:
+            pil_activa = False
 
-        entry_base = CurrencyEntry(dlg, initial_value=0, show_symbol=True, font=("Segoe UI", 14, "bold"), width=16, bg=t_dlg["input_bg"], fg=t_dlg["input_fg"], insertbackground=t_dlg["input_insert"], relief="solid", bd=1)
-        entry_base.pack(pady=10)
-        entry_base.focus()
+        _base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        assets_denom_dir = os.path.join(_base_dir, "assets", "denominaciones")
+
+        DENOM_BILLETES = [
+            {"valor": 100000, "nombre": "Billete de $100.000", "archivo": "billete_100000.png"},
+            {"valor": 50000,  "nombre": "Billete de $50.000",  "archivo": "billete_50000.png"},
+            {"valor": 20000,  "nombre": "Billete de $20.000",  "archivo": "billete_20000.png"},
+            {"valor": 10000,  "nombre": "Billete de $10.000",  "archivo": "billete_10000.png"},
+            {"valor": 5000,   "nombre": "Billete de $5.000",   "archivo": "billete_5000.png"},
+            {"valor": 2000,   "nombre": "Billete de $2.000",   "archivo": "billete_2000.png"},
+        ]
+
+        DENOM_MONEDAS = [
+            {"valor": 2000, "nombre": "Moneda de $2.000", "archivo": "moneda_2000.png"},
+            {"valor": 1000, "nombre": "Moneda de $1.000", "archivo": "moneda_1000.png"},
+            {"valor": 500,  "nombre": "Moneda de $500",    "archivo": "moneda_500.png"},
+            {"valor": 200,  "nombre": "Moneda de $200",    "archivo": "moneda_200.png"},
+            {"valor": 100,  "nombre": "Moneda de $100",    "archivo": "moneda_100.png"},
+            {"valor": 50,   "nombre": "Moneda de $50",     "archivo": "moneda_50.png"},
+        ]
+
+        img_cache = []
+
+        # Cabecera
+        header_f = tk.Frame(dlg, bg=t_dlg["primary"], height=48)
+        header_f.pack(fill="x")
+        header_f.pack_propagate(False)
+        tk.Label(
+            header_f,
+            text="🟢 APERTURA DE TURNO DE CAJA — CONTEO DE EFECTIVO",
+            font=("Segoe UI", 11, "bold"),
+            bg=t_dlg["primary"],
+            fg="white"
+        ).pack(side="left", padx=15, pady=10)
+
+        # Tarjeta Resumen Total Superior
+        total_card = tk.Frame(dlg, bg=t_dlg["bg_card"], bd=1, relief="solid", padx=16, pady=10)
+        total_card.pack(fill="x", padx=15, pady=(10, 6))
+
+        tk.Label(
+            total_card,
+            text="TOTAL EFECTIVO CONTADO PARA APERTURA:",
+            font=("Segoe UI", 9, "bold"),
+            bg=t_dlg["bg_card"],
+            fg=t_dlg["text_muted"]
+        ).pack(anchor="w")
+
+        row_total_box = tk.Frame(total_card, bg=t_dlg["bg_card"])
+        row_total_box.pack(fill="x", pady=(2, 0))
+
+        lbl_total_contado = tk.Label(
+            row_total_box,
+            text="$ 0 COP",
+            font=("Segoe UI", 18, "bold"),
+            bg=t_dlg["bg_card"],
+            fg="#059669"
+        )
+        lbl_total_contado.pack(side="left")
+
+        def poner_en_cero():
+            for v_entry in list(cant_vars.values()):
+                v_entry.set("0")
+            recalcular_totales()
+
+        btn_cero = crear_boton(
+            row_total_box,
+            "🧹 Poner en 0",
+            poner_en_cero,
+            tipo="secondary",
+            tam_fuente=9
+        )
+        btn_cero.pack(side="right")
+
+        cant_vars = {}
+        subtotal_lbls = {}
+
+        # Notebook de Pestañas: Billetes / Monedas
+        nb = ttk.Notebook(dlg)
+        nb.pack(fill="both", expand=True, padx=15, pady=(4, 8))
+
+        tab_billetes = tk.Frame(nb, bg=t_dlg["bg_surface"])
+        tab_monedas = tk.Frame(nb, bg=t_dlg["bg_surface"])
+
+        nb.add(tab_billetes, text="💵 Billetes (COP)")
+        nb.add(tab_monedas, text="🪙 Monedas (COP)")
+
+        def construir_filas_denominacion(parent, lista_denoms, es_moneda=False):
+            scroll_c = ScrollableContainer(parent, bg=t_dlg["bg_surface"])
+            scroll_c.pack(fill="both", expand=True, padx=4, pady=4)
+            interior = scroll_c.interior
+
+            for item in lista_denoms:
+                val = item["valor"]
+                nom = item["nombre"]
+                fname = item["archivo"]
+                fpath = os.path.join(assets_denom_dir, fname)
+
+                row_f = tk.Frame(interior, bg=t_dlg["bg_surface"], bd=1, relief="ridge", padx=8, pady=5)
+                row_f.pack(fill="x", pady=2)
+
+                # Icono o imagen
+                lbl_img = None
+                if pil_activa and os.path.exists(fpath):
+                    try:
+                        im = Image.open(fpath)
+                        target_size = (36, 22) if not es_moneda else (26, 26)
+                        im.thumbnail(target_size, Image.Resampling.LANCZOS)
+                        im_tk = ImageTk.PhotoImage(im, master=dlg)
+                        img_cache.append(im_tk)
+                        lbl_img = tk.Label(row_f, image=im_tk, bg=t_dlg["bg_surface"])
+                        lbl_img.pack(side="left", padx=(2, 8))
+                    except Exception:
+                        lbl_img = None
+
+                if not lbl_img:
+                    icono_txt = "🪙" if es_moneda else "💵"
+                    tk.Label(
+                        row_f,
+                        text=icono_txt,
+                        font=("Segoe UI", 13),
+                        bg=t_dlg["bg_surface"]
+                    ).pack(side="left", padx=(4, 8))
+
+                # Nombre de denominación
+                tk.Label(
+                    row_f,
+                    text=nom,
+                    font=("Segoe UI", 9, "bold"),
+                    bg=t_dlg["bg_surface"],
+                    fg=t_dlg["text_main"],
+                    width=17,
+                    anchor="w"
+                ).pack(side="left")
+
+                # Stepper: [-]
+                def _dec(v=val):
+                    cur_str = cant_vars[v].get().strip()
+                    try:
+                        cur_i = int(cur_str or 0)
+                    except ValueError:
+                        cur_i = 0
+                    if cur_i > 0:
+                        cant_vars[v].set(str(cur_i - 1))
+                    recalcular_totales()
+
+                def _inc(v=val):
+                    cur_str = cant_vars[v].get().strip()
+                    try:
+                        cur_i = int(cur_str or 0)
+                    except ValueError:
+                        cur_i = 0
+                    cant_vars[v].set(str(cur_i + 1))
+                    recalcular_totales()
+
+                btn_sub = tk.Button(
+                    row_f,
+                    text="−",
+                    command=lambda v=val: _dec(v),
+                    width=2,
+                    font=("Segoe UI", 10, "bold"),
+                    bg=t_dlg["bg_surface_alt"],
+                    fg=t_dlg["text_main"],
+                    relief="solid",
+                    bd=1,
+                    cursor="hand2"
+                )
+                btn_sub.pack(side="left", padx=(8, 2))
+
+                # Entry cantidad
+                var_q = tk.StringVar(value="0")
+                cant_vars[val] = var_q
+
+                ent = tk.Entry(
+                    row_f,
+                    textvariable=var_q,
+                    width=5,
+                    font=("Segoe UI", 10, "bold"),
+                    justify="center",
+                    bg=t_dlg["input_bg"],
+                    fg=t_dlg["input_fg"],
+                    insertbackground=t_dlg["input_insert"],
+                    relief="solid",
+                    bd=1
+                )
+                ent.pack(side="left", padx=2)
+
+                def on_entry_key(event=None):
+                    recalcular_totales()
+
+                ent.bind("<KeyRelease>", on_entry_key)
+                ent.bind("<FocusIn>", lambda e, en=ent: en.select_range(0, "end"))
+
+                btn_add = tk.Button(
+                    row_f,
+                    text="+",
+                    command=lambda v=val: _inc(v),
+                    width=2,
+                    font=("Segoe UI", 10, "bold"),
+                    bg=t_dlg["bg_surface_alt"],
+                    fg=t_dlg["text_main"],
+                    relief="solid",
+                    bd=1,
+                    cursor="hand2"
+                )
+                btn_add.pack(side="left", padx=(2, 10))
+
+                # Subtotal
+                lbl_sub = tk.Label(
+                    row_f,
+                    text="$ 0",
+                    font=("Segoe UI", 9, "bold"),
+                    bg=t_dlg["bg_surface"],
+                    fg=t_dlg["text_main"],
+                    width=14,
+                    anchor="e"
+                )
+                lbl_sub.pack(side="right", padx=6)
+                subtotal_lbls[val] = lbl_sub
+
+        construir_filas_denominacion(tab_billetes, DENOM_BILLETES, es_moneda=False)
+        construir_filas_denominacion(tab_monedas, DENOM_MONEDAS, es_moneda=True)
+
+        def recalcular_totales():
+            total = 0
+            for v, v_var in cant_vars.items():
+                s = v_var.get().strip()
+                try:
+                    c = int(s or 0)
+                    if c < 0:
+                        c = 0
+                        v_var.set("0")
+                except ValueError:
+                    c = 0
+                sub = c * v
+                total += sub
+                if v in subtotal_lbls:
+                    subtotal_lbls[v].config(text=f"${sub:,.0f}")
+
+            lbl_total_contado.config(text=f"${total:,.0f} COP")
+            btn_confirmar.config(text=f"Confirmar Apertura (${total:,.0f})")
+            return total
+
+        # Barra inferior de acciones
+        btn_f = tk.Frame(dlg, bg=t_dlg["bg_surface"], padx=15, pady=10)
+        btn_f.pack(side="bottom", fill="x")
 
         def confirmar():
-            base_val = entry_base.get_value()
+            total_val = recalcular_totales()
+            if total_val <= 0:
+                proceder = messagebox.askyesno(
+                    "Apertura en $0",
+                    "El total contado es de $0 COP.\n¿Desea abrir la caja registradora con base en cero?",
+                    parent=dlg
+                )
+                if not proceder:
+                    return
+
+            # Construir desglose estructurado del arqueo
+            desglose = {
+                "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "usuario": usuario_actual,
+                "total": float(total_val),
+                "billetes": [],
+                "monedas": []
+            }
+            for it in DENOM_BILLETES:
+                v = it["valor"]
+                try:
+                    q = int(cant_vars[v].get().strip() or 0)
+                except ValueError:
+                    q = 0
+                if q > 0:
+                    desglose["billetes"].append({
+                        "denominacion": v,
+                        "nombre": it["nombre"],
+                        "cantidad": q,
+                        "subtotal": q * v
+                    })
+
+            for it in DENOM_MONEDAS:
+                v = it["valor"]
+                try:
+                    q = int(cant_vars[v].get().strip() or 0)
+                except ValueError:
+                    q = 0
+                if q > 0:
+                    desglose["monedas"].append({
+                        "denominacion": v,
+                        "nombre": it["nombre"],
+                        "cantidad": q,
+                        "subtotal": q * v
+                    })
+
             try:
-                abrir_sesion_caja(usuario=usuario_actual, monto_inicial=base_val)
+                abrir_sesion_caja(
+                    usuario=usuario_actual,
+                    monto_inicial=float(total_val),
+                    arqueo_detalle=desglose
+                )
                 dlg.destroy()
                 refrescar_vista()
-                messagebox.showinfo("Caja Abierta", f"Turno de caja abierto exitosamente con base de ${base_val:,.0f} COP.", parent=ventana)
+                messagebox.showinfo(
+                    "Caja Abierta con Éxito",
+                    f"Turno de caja abierto correctamente con efectivo contado de ${total_val:,.0f} COP.\n\n"
+                    f"El detalle por billetes y monedas quedó registrado en la sesión.",
+                    parent=ventana
+                )
             except Exception as e:
-                messagebox.showerror("Error", f"No se pudo abrir la caja: {e}", parent=dlg)
+                messagebox.showerror("Error al abrir caja", f"No se pudo abrir la caja: {e}", parent=dlg)
 
-        btn_f = tk.Frame(dlg, bg=t_dlg["bg_surface"])
-        btn_f.pack(side="bottom", fill="x", padx=15, pady=12)
         crear_boton(btn_f, "Cancelar", dlg.destroy, tipo="secondary", tam_fuente=9).pack(side="right", padx=5)
-        crear_boton(btn_f, "Confirmar Apertura", confirmar, tipo="success", tam_fuente=9).pack(side="right", padx=5)
+        btn_confirmar = crear_boton(btn_f, "Confirmar Apertura ($0)", confirmar, tipo="success", tam_fuente=10, negrita=True)
+        btn_confirmar.pack(side="right", padx=5)
+
+        recalcular_totales()
 
     # =========================================================================
     # MODAL 2: REGISTRAR INGRESO AUTORIZADO (SENCILLO / APORTE)
@@ -817,9 +1140,71 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         tree_h.tag_configure("faltante", foreground="#dc2626")
         tree_h.tag_configure("sobrante", foreground="#2563eb")
 
+        def ver_detalle_arqueo_apertura(event=None):
+            sel = tree_h.selection()
+            if not sel:
+                messagebox.showwarning("Seleccione Turno", "Por favor seleccione un turno de la lista para ver el arqueo de apertura.", parent=dlg_h)
+                return
+            idx = tree_h.index(sel[0])
+            if idx >= len(cierres):
+                return
+            c_sel = cierres[idx]
+            raw_json = c_sel.get("arqueo_apertura_json") or ""
+            import json
+            datos_arq = None
+            if raw_json:
+                try:
+                    datos_arq = json.loads(raw_json)
+                except Exception:
+                    datos_arq = None
+
+            dlg_arq = tk.Toplevel(dlg_h)
+            dlg_arq.title(f"🔍 Detalle Arqueo de Apertura — Turno #{c_sel.get('id')}")
+            t_a = aplicar_tema(dlg_arq)
+            calcular_geometria_segura(dlg_arq, 480, 480, 400, 380)
+            dlg_arq.configure(bg=t_a["bg_surface"])
+            dlg_arq.transient(dlg_h)
+            dlg_arq.grab_set()
+
+            h_f = tk.Frame(dlg_arq, bg=t_a["primary"], height=40)
+            h_f.pack(fill="x")
+            h_f.pack_propagate(False)
+            tk.Label(h_f, text=f"DETALLE ARQUEO DE APERTURA (Turno #{c_sel.get('id')})", font=("Segoe UI", 10, "bold"), bg=t_a["primary"], fg="white").pack(side="left", padx=12)
+
+            body_f = tk.Frame(dlg_arq, bg=t_a["bg_surface"], padx=15, pady=12)
+            body_f.pack(fill="both", expand=True)
+
+            tk.Label(body_f, text=f"Fecha Apertura: {c_sel.get('fecha_apertura', '')} {c_sel.get('hora_apertura', '')}", font=("Segoe UI", 9), bg=t_a["bg_surface"], fg=t_a["text_main"]).pack(anchor="w")
+            tk.Label(body_f, text=f"Responsable: {c_sel.get('usuario_apertura', '')}", font=("Segoe UI", 9), bg=t_a["bg_surface"], fg=t_a["text_main"]).pack(anchor="w")
+            tk.Label(body_f, text=f"Base Inicial: ${float(c_sel.get('base_inicial', 0.0)):,.0f} COP", font=("Segoe UI", 12, "bold"), bg=t_a["bg_surface"], fg="#059669").pack(anchor="w", pady=(2, 8))
+
+            if not datos_arq or (not datos_arq.get("billetes") and not datos_arq.get("monedas")):
+                tk.Label(body_f, text="⚠️ Esta sesión fue registrada con valor numérico global sin desglose de billetes/monedas.", font=("Segoe UI", 9, "italic"), bg=t_a["bg_surface"], fg=t_a["text_muted"], wraplength=420, justify="left").pack(pady=20)
+            else:
+                txt_frame = tk.Frame(body_f, bg=t_a["bg_card"], bd=1, relief="solid")
+                txt_frame.pack(fill="both", expand=True, pady=4)
+                tree_d = ttk.Treeview(txt_frame, columns=("Denom", "Cant", "Subtotal"), show="headings", height=10)
+                tree_d.heading("Denom", text="Denominación")
+                tree_d.heading("Cant", text="Cantidad")
+                tree_d.heading("Subtotal", text="Subtotal")
+                tree_d.column("Denom", width=180, anchor="w")
+                tree_d.column("Cant", width=70, anchor="center")
+                tree_d.column("Subtotal", width=110, anchor="e")
+                tree_d.pack(fill="both", expand=True)
+
+                for b in datos_arq.get("billetes", []):
+                    tree_d.insert("", "end", values=(b.get("nombre", f"${b.get('denominacion', 0):,.0f}"), b.get("cantidad", 0), f"${b.get('subtotal', 0):,.0f}"))
+                for m in datos_arq.get("monedas", []):
+                    tree_d.insert("", "end", values=(m.get("nombre", f"${m.get('denominacion', 0):,.0f}"), m.get("cantidad", 0), f"${m.get('subtotal', 0):,.0f}"))
+
+            crear_boton(dlg_arq, "Cerrar", dlg_arq.destroy, tipo="secondary", tam_fuente=9).pack(pady=8)
+
+        tree_h.bind("<Double-1>", ver_detalle_arqueo_apertura)
+
         bot_f = tk.Frame(dlg_h, bg=t_h["bg_surface"])
         bot_f.pack(fill="x", padx=14, pady=8)
         crear_boton(bot_f, "Cerrar", dlg_h.destroy, tipo="secondary", tam_fuente=9).pack(side="right")
+        crear_boton(bot_f, "🔍 Ver Arqueo Apertura", ver_detalle_arqueo_apertura, tipo="info", tam_fuente=9).pack(side="right", padx=8)
         tk.Label(bot_f, text=f"Total de turnos cerrados consultados: {len(cierres)}", font=("Segoe UI", 9), bg=t_h["bg_surface"], fg=t_h["text_muted"]).pack(side="left")
 
     _last_focusin = [0.0]

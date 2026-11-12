@@ -23,6 +23,7 @@ class SesionCaja(Base):
     diferencia_banco = Column(Float, default=0.0)
     estado_banco = Column(String, default="Pendiente")
     observaciones = Column(String, nullable=True)
+    arqueo_apertura_json = Column(String, nullable=True)
     estado = Column(String, default="Abierta", index=True)  # Abierta / Cerrada
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

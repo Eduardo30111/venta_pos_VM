@@ -347,6 +347,34 @@ def iniciar_nomina(parent_pid="", parent=None):
     combo_mes_emp = ttk.Combobox(hist_top_bar, textvariable=mes_emp_var, state="readonly", width=12, font=("Segoe UI", 9))
     combo_mes_emp.pack(side="left", padx=2)
 
+    crear_boton(
+        hist_top_bar, text="🔍 Filtrar", command=lambda: cargar_historial_emp(),
+        bg=t["primary"], fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=2
+    ).pack(side="left", padx=(8, 4))
+
+    def limpiar_filtro_emp():
+        hist_desde_var.set("")
+        hist_hasta_var.set("")
+        hist_rol_var.set("Todos")
+        mes_emp_var.set("Todos")
+        cargar_historial_emp()
+
+    crear_boton(
+        hist_top_bar, text="🧹 Limpiar Filtro", command=limpiar_filtro_emp,
+        bg=t["bg_app"], fg=t["text_primary"], font=("Segoe UI", 9), padx=8, pady=2
+    ).pack(side="left", padx=4)
+
+    summary_emp_frame = tk.Frame(tab_historial, bg=t["bg_surface_alt"], padx=10, pady=5)
+    summary_emp_frame.pack(fill="x", side="bottom")
+    lbl_tot_hist_emp = tk.Label(
+        summary_emp_frame,
+        text="Total Pagado en Período: $0 COP (0 liquidaciones)",
+        font=("Segoe UI", 10, "bold"),
+        bg=t["bg_surface_alt"],
+        fg=t["primary"]
+    )
+    lbl_tot_hist_emp.pack(side="left")
+
     sub_nb_hist = ttk.Notebook(tab_historial)
     sub_nb_hist.pack(fill="both", expand=True, padx=10, pady=4)
 
@@ -581,7 +609,10 @@ def iniciar_nomina(parent_pid="", parent=None):
             rol=rol_h,
             mes_anio=mes_f if mes_f and mes_f != "Todos" else None
         )
+        tot_pagos = 0.0
         for p in pagos:
+            m_pag = float(p.get("monto_pagado", 0.0) or 0.0)
+            tot_pagos += m_pag
             periodo_str = f"{p.get('periodo_inicio', '')} a {p.get('periodo_fin', '')}".strip(" a ") or p.get("mes_anio", "")
             tree_hist_emp.insert(
                 "", "end",
@@ -594,12 +625,16 @@ def iniciar_nomina(parent_pid="", parent=None):
                     p.get("metodo_pago", "Efectivo"),
                     p.get("cuenta_afectada", "CAJA_FISICA"),
                     periodo_str,
-                    _fmt_cop(p.get("monto_pagado", 0.0)),
+                    _fmt_cop(m_pag),
                     _fmt_cop(p.get("saldo_restante", 0.0)),
                     p.get("responsable", "Administrador"),
                     p.get("observaciones", "")
                 )
             )
+
+        lbl_tot_hist_emp.config(
+            text=f"Total Pagado en Período: {_fmt_cop(tot_pagos)} ({len(pagos)} registros de pago)"
+        )
 
         devengos = obtener_devengos_nomina(
             fecha_inicio=f_ini,
@@ -638,10 +673,6 @@ def iniciar_nomina(parent_pid="", parent=None):
 
     combo_mes_emp.bind("<<ComboboxSelected>>", cargar_historial_emp)
     combo_hist_rol.bind("<<ComboboxSelected>>", cargar_historial_emp)
-    crear_boton(
-        hist_top_bar, text="🔍 Consultar Historial", command=cargar_historial_emp,
-        bg=t["primary"], fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=3
-    ).pack(side="left", padx=8)
 
     # =========================================================================
     # MODALES DE OPERACIÓN: LIQUIDACIÓN/PAGO, AJUSTE, CONFIGURACIÓN, ASISTENCIA
@@ -1252,16 +1283,78 @@ def iniciar_nomina(parent_pid="", parent=None):
     toolbar_hist = tk.Frame(subtab_historial, bg=t["bg_surface"])
     toolbar_hist.pack(fill="x", padx=6, pady=(4, 4))
 
-    tk.Label(toolbar_hist, text="Filtro Mes:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_primary"]).pack(side="left")
+    tk.Label(toolbar_hist, text="Filtro:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(side="left")
+    modo_filtro_prov_var = tk.StringVar(value="Todas las Fechas")
+    combo_modo_prov = ttk.Combobox(toolbar_hist, textvariable=modo_filtro_prov_var, values=["Todas las Fechas", "Fecha Específica", "Rango de Fechas", "Por Mes"], state="readonly", width=16, font=("Segoe UI", 9))
+    combo_modo_prov.pack(side="left", padx=(4, 8))
+
+    lbl_f_esp_prov = tk.Label(toolbar_hist, text="Fecha:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_primary"])
+    f_esp_prov_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+    e_f_esp_prov = tk.Entry(toolbar_hist, textvariable=f_esp_prov_var, width=11, font=("Segoe UI", 9))
+
+    lbl_f_desde_prov = tk.Label(toolbar_hist, text="Desde:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_primary"])
+    f_desde_prov_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-01"))
+    e_f_desde_prov = tk.Entry(toolbar_hist, textvariable=f_desde_prov_var, width=11, font=("Segoe UI", 9))
+
+    lbl_f_hasta_prov = tk.Label(toolbar_hist, text="Hasta:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_primary"])
+    f_hasta_prov_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+    e_f_hasta_prov = tk.Entry(toolbar_hist, textvariable=f_hasta_prov_var, width=11, font=("Segoe UI", 9))
+
+    lbl_mes_prov = tk.Label(toolbar_hist, text="Mes:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_primary"])
     mes_prov_var = tk.StringVar(value="Todos")
     combo_mes_prov = ttk.Combobox(toolbar_hist, textvariable=mes_prov_var, state="readonly", width=12, font=("Segoe UI", 9))
-    combo_mes_prov.pack(side="left", padx=(6, 15))
 
-    lbl_hist_info = tk.Label(
-        toolbar_hist, text="Historial inmutable de comprobantes y recibos de pago:",
-        font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_secondary"]
+    def on_modo_prov_change(event=None):
+        m = modo_filtro_prov_var.get()
+        lbl_f_esp_prov.pack_forget()
+        e_f_esp_prov.pack_forget()
+        lbl_f_desde_prov.pack_forget()
+        e_f_desde_prov.pack_forget()
+        lbl_f_hasta_prov.pack_forget()
+        e_f_hasta_prov.pack_forget()
+        lbl_mes_prov.pack_forget()
+        combo_mes_prov.pack_forget()
+
+        if m == "Fecha Específica":
+            lbl_f_esp_prov.pack(side="left", padx=(4, 2))
+            e_f_esp_prov.pack(side="left", padx=2)
+        elif m == "Rango de Fechas":
+            lbl_f_desde_prov.pack(side="left", padx=(4, 2))
+            e_f_desde_prov.pack(side="left", padx=2)
+            lbl_f_hasta_prov.pack(side="left", padx=(4, 2))
+            e_f_hasta_prov.pack(side="left", padx=2)
+        elif m == "Por Mes":
+            lbl_mes_prov.pack(side="left", padx=(4, 2))
+            combo_mes_prov.pack(side="left", padx=2)
+
+    combo_modo_prov.bind("<<ComboboxSelected>>", on_modo_prov_change)
+
+    crear_boton(
+        toolbar_hist, text="🔍 Filtrar", command=lambda: cargar_historial_prov(),
+        bg=t["primary"], fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=2
+    ).pack(side="left", padx=(8, 4))
+
+    def limpiar_filtro_prov():
+        modo_filtro_prov_var.set("Todas las Fechas")
+        on_modo_prov_change()
+        mes_prov_var.set("Todos")
+        cargar_historial_prov()
+
+    crear_boton(
+        toolbar_hist, text="🧹 Limpiar Filtro", command=limpiar_filtro_prov,
+        bg=t["bg_app"], fg=t["text_primary"], font=("Segoe UI", 9), padx=8, pady=2
+    ).pack(side="left", padx=4)
+
+    summary_prov_frame = tk.Frame(subtab_historial, bg=t["bg_surface_alt"], padx=10, pady=5)
+    summary_prov_frame.pack(fill="x", side="bottom")
+    lbl_tot_hist_prov = tk.Label(
+        summary_prov_frame,
+        text="Total Liquidado en Período: $0 COP (0 liquidaciones)",
+        font=("Segoe UI", 10, "bold"),
+        bg=t["bg_surface_alt"],
+        fg=t["primary"]
     )
-    lbl_hist_info.pack(side="left")
+    lbl_tot_hist_prov.pack(side="left")
 
     hist_tree_container = tk.Frame(subtab_historial, bg=t["bg_surface"])
     hist_tree_container.pack(fill="both", expand=True, padx=6, pady=(0, 4))
@@ -1425,11 +1518,26 @@ def iniciar_nomina(parent_pid="", parent=None):
     def cargar_historial_prov(*args):
         for i in tree_hist_prov.get_children():
             tree_hist_prov.delete(i)
-        filtro_mes = mes_prov_var.get()
-        hist = obtener_historial_liquidaciones_proveedor(mes_anio=filtro_mes)
+
+        modo = modo_filtro_prov_var.get()
+        f_esp = f_esp_prov_var.get().strip() if modo == "Fecha Específica" else None
+        f_ini = f_desde_prov_var.get().strip() if modo == "Rango de Fechas" else None
+        f_fin = f_hasta_prov_var.get().strip() if modo == "Rango de Fechas" else None
+        filtro_mes = mes_prov_var.get() if modo == "Por Mes" else None
+
+        hist = obtener_historial_liquidaciones_proveedor(
+            mes_anio=filtro_mes,
+            fecha_especifica=f_esp,
+            fecha_inicio=f_ini,
+            fecha_fin=f_fin
+        )
+        tot_monto = 0.0
         for r in hist:
-            monto_val = float(r.get("monto_liquidado", 0.0) or 0.0)
-            fecha_val = r.get("fecha_pago", "")
+            monto_val = float(r.get("monto_liquidado") or r.get("monto_pagado") or 0.0)
+            tot_monto += monto_val
+            fecha_val = r.get("fecha") or r.get("fecha_pago", "")
+            u_nom = r.get("usuario") or r.get("usuario_nombre", "Admin")
+            ref_val = r.get("referencia") or r.get("referencia_comprobante", "") or "N/A"
             tree_hist_prov.insert("", "end", values=(
                 r.get("numero_recibo", f"LP-{r.get('id')}"),
                 fecha_val,
@@ -1438,10 +1546,14 @@ def iniciar_nomina(parent_pid="", parent=None):
                 r.get("metodo_pago", "Efectivo"),
                 _fmt_cop(r.get("saldo_anterior", 0.0)),
                 _fmt_cop(r.get("saldo_restante", 0.0)),
-                r.get("usuario_nombre", "Admin"),
-                r.get("referencia_comprobante", "") or "N/A",
+                u_nom,
+                ref_val,
                 r.get("estado", "Aplicado")
             ))
+
+        lbl_tot_hist_prov.config(
+            text=f"Total Liquidado en Período: {_fmt_cop(tot_monto)} ({len(hist)} liquidaciones registradas)"
+        )
 
     def actualizar_combo_meses_prov():
         hist = obtener_historial_liquidaciones_proveedor()
@@ -1449,9 +1561,10 @@ def iniciar_nomina(parent_pid="", parent=None):
         if hist:
             meses_set = set()
             for r in hist:
-                f_str = r.get("fecha_pago", "")
+                f_str = r.get("fecha") or r.get("fecha_pago", "")
                 if len(f_str) >= 7:
                     meses_set.add(f_str[5:7] + "-" + f_str[0:4])
+                    meses_set.add(f_str[:7])
             meses.extend(sorted(list(meses_set), reverse=True))
         combo_mes_prov['values'] = meses
         if not mes_prov_var.get() or mes_prov_var.get() not in meses:

@@ -473,9 +473,9 @@ def registrar_abono_cartera(
         conn.close()
 
 
-def obtener_cierres_anteriores(limit: int = 50) -> List[Dict[str, Any]]:
+def obtener_cierres_anteriores(limit: int = 50, conn: Optional[sqlite3.Connection] = None) -> List[Dict[str, Any]]:
     """Consulta el historial inmutable de turnos de caja cerrados."""
-    if api is not None:
+    if conn is None and api is not None:
         try:
             resp = api.get(f"/caja/cierres?limit={limit}", timeout=4.0)
             if resp.status_code == 200:
@@ -483,7 +483,10 @@ def obtener_cierres_anteriores(limit: int = 50) -> List[Dict[str, Any]]:
         except Exception:
             pass
 
-    conn = conectar_db()
+    cerrar_conn = False
+    if conn is None:
+        conn = conectar_db()
+        cerrar_conn = True
     if not conn:
         return []
     try:
@@ -491,22 +494,28 @@ def obtener_cierres_anteriores(limit: int = 50) -> List[Dict[str, Any]]:
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(sesiones_caja)")
         cols_s = [c[1] for c in cur.fetchall()]
-        col_esp = "monto_esperado_efectivo" if "monto_esperado_efectivo" in cols_s else "monto_esperado"
-        col_base = "monto_base" if "monto_base" in cols_s else "monto_inicial"
+        col_esp = "COALESCE(monto_esperado_efectivo, 0.0)" if "monto_esperado_efectivo" in cols_s else ("COALESCE(monto_esperado, 0.0)" if "monto_esperado" in cols_s else "0.0")
+        col_base = "COALESCE(monto_base, 0.0)" if "monto_base" in cols_s else ("COALESCE(monto_inicial, 0.0)" if "monto_inicial" in cols_s else "0.0")
+        col_tr_esp = "COALESCE(monto_transferencias_esperado, 0.0)" if "monto_transferencias_esperado" in cols_s else "0.0"
+        col_tr_ver = "COALESCE(monto_transferencias_verificado, 0.0)" if "monto_transferencias_verificado" in cols_s else "0.0"
+        col_dif_banco = "COALESCE(diferencia_banco, 0.0)" if "diferencia_banco" in cols_s else "0.0"
+        col_est_banco = "COALESCE(estado_banco, 'Pendiente')" if "estado_banco" in cols_s else "'Pendiente'"
+        col_arq = "COALESCE(arqueo_apertura_json, '')" if "arqueo_apertura_json" in cols_s else "''"
 
         cur.execute(f"""
             SELECT 
                 id, fecha_apertura, hora_apertura, usuario_apertura,
-                COALESCE({col_base}, 0.0) as base_inicial,
+                {col_base} as base_inicial,
                 fecha_cierre, hora_cierre, usuario_cierre,
-                COALESCE({col_esp}, 0.0) as monto_esperado,
+                {col_esp} as monto_esperado,
                 COALESCE(monto_real_contado, 0.0) as monto_real_contado,
                 COALESCE(diferencia, 0.0) as diferencia,
                 COALESCE(observaciones, '') as observaciones,
-                COALESCE(monto_transferencias_esperado, 0.0) as transferencias_esperadas,
-                COALESCE(monto_transferencias_verificado, 0.0) as transferencias_verificadas,
-                COALESCE(diferencia_banco, 0.0) as diferencia_banco,
-                COALESCE(estado_banco, 'Pendiente') as estado_banco
+                {col_tr_esp} as transferencias_esperadas,
+                {col_tr_ver} as transferencias_verificadas,
+                {col_dif_banco} as diferencia_banco,
+                {col_est_banco} as estado_banco,
+                {col_arq} as arqueo_apertura_json
             FROM sesiones_caja
             WHERE estado = 'Cerrada'
             ORDER BY id DESC
@@ -514,7 +523,8 @@ def obtener_cierres_anteriores(limit: int = 50) -> List[Dict[str, Any]]:
         """, (limit,))
         return [dict(r) for r in cur.fetchall()]
     finally:
-        conn.close()
+        if cerrar_conn and conn:
+            conn.close()
 
 
 def abrir_sesion_caja(
@@ -522,21 +532,28 @@ def abrir_sesion_caja(
     monto_inicial: float = 0.0,
     terminal: str = "Terminal-1",
     monto_base: Optional[float] = None,
-    conn: Optional[sqlite3.Connection] = None
+    conn: Optional[sqlite3.Connection] = None,
+    arqueo_detalle: Optional[Dict[str, Any]] = None
 ) -> int:
     """Abre un nuevo turno de caja con una base inicial de efectivo."""
     if monto_base is not None:
         monto_inicial = monto_base
 
+    import json
+    arq_json_str = json.dumps(arqueo_detalle, ensure_ascii=False) if isinstance(arqueo_detalle, (dict, list)) else (arqueo_detalle if isinstance(arqueo_detalle, str) else "")
+
     if conn is None and api is not None:
         try:
+            req_data = {
+                "usuario": usuario,
+                "monto_inicial": float(monto_inicial),
+                "terminal_nombre": terminal,
+            }
+            if arqueo_detalle:
+                req_data["arqueo_apertura"] = arqueo_detalle
             resp = api.post(
                 "/caja/abrir",
-                json={
-                    "usuario": usuario,
-                    "monto_inicial": float(monto_inicial),
-                    "terminal_nombre": terminal,
-                },
+                json=req_data,
                 timeout=4.0,
             )
             if resp.status_code in (200, 201):
@@ -565,13 +582,26 @@ def abrir_sesion_caja(
 
         cur.execute("PRAGMA table_info(sesiones_caja)")
         cols_s = [c[1] for c in cur.fetchall()]
+        if "arqueo_apertura_json" not in cols_s:
+            try:
+                cur.execute("ALTER TABLE sesiones_caja ADD COLUMN arqueo_apertura_json TEXT")
+                cols_s.append("arqueo_apertura_json")
+            except Exception:
+                pass
         col_monto = "monto_base" if "monto_base" in cols_s else "monto_inicial"
 
-        cur.execute(f"""
-            INSERT INTO sesiones_caja (
-                fecha_apertura, hora_apertura, usuario_apertura, {col_monto}, estado
-            ) VALUES (?, ?, ?, ?, 'Abierta')
-        """, (fecha_str, hora_str, usuario, float(monto_inicial)))
+        if "arqueo_apertura_json" in cols_s:
+            cur.execute(f"""
+                INSERT INTO sesiones_caja (
+                    fecha_apertura, hora_apertura, usuario_apertura, {col_monto}, estado, arqueo_apertura_json
+                ) VALUES (?, ?, ?, ?, 'Abierta', ?)
+            """, (fecha_str, hora_str, usuario, float(monto_inicial), arq_json_str))
+        else:
+            cur.execute(f"""
+                INSERT INTO sesiones_caja (
+                    fecha_apertura, hora_apertura, usuario_apertura, {col_monto}, estado
+                ) VALUES (?, ?, ?, ?, 'Abierta')
+            """, (fecha_str, hora_str, usuario, float(monto_inicial)))
         sesion_id = cur.lastrowid
 
         # Registrar movimiento de apertura en libro mayor de caja física

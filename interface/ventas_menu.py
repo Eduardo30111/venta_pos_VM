@@ -12,7 +12,10 @@ import time
 import sqlite3
 import subprocess
 import threading
-import httpx
+try:
+    import httpx
+except ImportError:
+    httpx = None
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from client.api_client import api
 
@@ -3126,17 +3129,8 @@ class App:
         clientes_fiado_map = {}
         total_val = int(round(self.total_general.get()))
 
-        imprimir_ticket_var = tk.BooleanVar(value=True)
-        chk_imp = tk.Checkbutton(
-            footer_p,
-            text="🖨️ Imprimir comprobante",
-            variable=imprimir_ticket_var,
-            bg=t_p["bg_app"], fg=t_p["text_main"],
-            selectcolor=t_p["bg_surface_alt"],
-            activebackground=t_p["bg_app"],
-            font=("Segoe UI", 9)
-        )
-        chk_imp.pack(side="left", padx=5)
+        # Casilla de impresión eliminada según requerimiento: la confirmación se realiza mediante modal interactivo post-venta
+        imprimir_ticket_var = tk.BooleanVar(value=False)
 
         def abrir_preview_recibo():
             if getattr(self, "_registrando_venta", False):
@@ -4108,23 +4102,6 @@ class App:
                     if self.printer_manager:
                         self.printer_manager.ultima_factura = datos_venta
 
-                    aviso_impresion = ""
-                    cajon_abierto_en_impresion = False
-                    if imprimir_recibo:
-                        cfg_over = {"formato_papel": formato_impresion} if formato_impresion else None
-                        try:
-                            try:
-                                from receipt_manager import imprimir_factura_unificada
-                            except ImportError:
-                                from interface.receipt_manager import imprimir_factura_unificada
-                            imp_ok, _ = imprimir_factura_unificada(datos_venta, config_override=cfg_over)
-                            if imp_ok:
-                                cajon_abierto_en_impresion = True
-                            else:
-                                aviso_impresion = "\n\n⚠️ Nota: No se detectó impresora física activa; puedes reimprimir o exportar PDF en Historial."
-                        except Exception as e_imp:
-                            print(f"Aviso en impresión de comprobante: {e_imp}")
-
                     # Regla comercial: Apertura automática de gaveta si la venta incluye efectivo
                     try:
                         try:
@@ -4133,47 +4110,26 @@ class App:
                             from receipt_manager import evaluar_apertura_cajon_por_venta, pulsar_apertura_cajon
 
                         if evaluar_apertura_cajon_por_venta(metodo_pago, pagos=pagos):
-                            # Solo pulsar si no se imprimió recibo físico o si la impresión física falló
-                            if not imprimir_recibo or not cajon_abierto_en_impresion:
-                                pulsar_apertura_cajon()
+                            pulsar_apertura_cajon()
                     except Exception as e_caj:
                         print(f"Aviso control de gaveta en venta: {e_caj}")
 
-                    extra_info = f"\n\n{msg_asistencia}" if msg_asistencia else ""
-                    extra_info += aviso_impresion
-
-                    if str(metodo_pago) == "Fiado":
-                        messagebox.showinfo(
-                            "✅ Venta Registrada",
-                            f"Venta registrada correctamente. La deuda fue asociada al cliente.\n\n"
-                            f"🧾 Número de venta: {numero_factura} (ID #{id_central})\n"
-                            f"👤 Cliente: {cli_nombre_final} ({doc_final})\n"
-                            f"💸 Saldo pendiente asociado: {self.formato_peso(total)}"
-                            f"{extra_info}",
-                            parent=self.ventana,
-                        )
-                    elif str(metodo_pago) == "Efectivo":
-                        messagebox.showinfo(
-                            "✅ Venta Registrada",
-                            f"Venta registrada correctamente.\n\n"
-                            f"🧾 Número de venta: {numero_factura} (ID #{id_central})\n"
-                            f"💳 Método de pago: Efectivo\n"
-                            f"💸 Total: {self.formato_peso(total)}\n"
-                            f"💵 Recibido: {self.formato_peso(recibido_payload)}\n"
-                            f"💰 Cambio: {self.formato_peso(cambio_payload)}"
-                            f"{extra_info}",
-                            parent=self.ventana,
-                        )
+                    if imprimir_recibo:
+                        try:
+                            try:
+                                from interface.receipt_manager import imprimir_factura_unificada
+                            except ImportError:
+                                from receipt_manager import imprimir_factura_unificada
+                            cfg_over = {"abrir_cajon": False}
+                            if formato_impresion:
+                                cfg_over["formato_papel"] = formato_impresion
+                            imprimir_factura_unificada(datos_venta, config_override=cfg_over)
+                        except Exception as e_imp:
+                            print(f"Aviso en impresión de comprobante: {e_imp}")
                     else:
-                        messagebox.showinfo(
-                            "✅ Venta Registrada",
-                            f"Venta registrada correctamente.\n\n"
-                            f"🧾 Número de venta: {numero_factura} (ID #{id_central})\n"
-                            f"💳 Método de pago: {metodo_pago}\n"
-                            f"💸 Total: {self.formato_peso(total)}"
-                            f"{extra_info}",
-                            parent=self.ventana,
-                        )
+                        # Modal interactivo post-venta: ¿Deseas imprimir la factura de esta venta?
+                        self.ventana.after(60, lambda: self._dialogo_confirmar_impresion(datos_venta, formato_papel=formato_impresion))
+
                     return venta_respuesta
 
                 # Caso de error real del servidor o pérdida de red
@@ -4214,6 +4170,100 @@ class App:
                 on_error_restore()
             messagebox.showerror("Error", f"Error preparando la venta: {e}", parent=parent_err)
             return None
+
+    def _dialogo_confirmar_impresion(self, datos_venta, formato_papel=None):
+        """
+        Ventana emergente interactiva post-venta que pregunta de forma clara:
+        '¿Deseas imprimir la factura de esta venta?'
+        - Botón [ ✅ SÍ, IMPRIMIR ]: enfocado por defecto, activable con ENTER
+        - Botón [ ❌ NO, GRACIAS ]: activable con ESC
+        - La venta ya está 100% guardada y la gaveta abierta previamente si hubo efectivo
+        - Evita doble apertura de gaveta al imprimir
+        """
+        dlg = tk.Toplevel(self.ventana)
+        dlg.title("🖨️ ¿Imprimir Factura?")
+        t_d = aplicar_tema(dlg)
+        calcular_geometria_segura(dlg, 460, 270, 400, 230)
+        dlg.configure(bg=t_d["bg_surface"])
+        dlg.transient(self.ventana)
+        dlg.grab_set()
+
+        hdr = tk.Frame(dlg, bg=t_d["primary"], height=46)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="🖨️ CONFIRMACIÓN DE IMPRESIÓN", font=("Segoe UI", 11, "bold"), bg=t_d["primary"], fg="white").pack(pady=10)
+
+        body = tk.Frame(dlg, bg=t_d["bg_surface"], padx=20, pady=16)
+        body.pack(fill="both", expand=True)
+
+        num_fac = datos_venta.get("numero_factura", "") or f"Venta #{datos_venta.get('id', '')}"
+        tot_val = datos_venta.get("total", 0.0)
+        metodo = datos_venta.get("metodo_pago", "")
+
+        tk.Label(
+            body,
+            text="¿Deseas imprimir la factura de esta venta?",
+            font=("Segoe UI", 12, "bold"),
+            bg=t_d["bg_surface"],
+            fg=t_d["text_main"],
+            justify="center"
+        ).pack(pady=(4, 6))
+
+        tk.Label(
+            body,
+            text=f"🧾 {num_fac}   |   💳 {metodo}   |   💰 {self.formato_peso(tot_val)}",
+            font=("Segoe UI", 10),
+            bg=t_d["bg_surface"],
+            fg=t_d["text_secondary"],
+            justify="center"
+        ).pack(pady=(0, 10))
+
+        btn_box = tk.Frame(dlg, bg=t_d["bg_surface"], padx=20, pady=14)
+        btn_box.pack(fill="x", side="bottom")
+
+        def accion_imprimir(event=None):
+            dlg.destroy()
+            try:
+                try:
+                    from interface.receipt_manager import imprimir_factura_unificada
+                except ImportError:
+                    from receipt_manager import imprimir_factura_unificada
+                cfg_over = {"abrir_cajon": False}
+                if formato_papel:
+                    cfg_over["formato_papel"] = formato_papel
+                imp_ok, err = imprimir_factura_unificada(datos_venta, config_override=cfg_over)
+                if not imp_ok and err:
+                    messagebox.showwarning("Impresora Térmica", f"No se pudo imprimir el comprobante:\n{err}", parent=self.ventana)
+            except Exception as e_pr:
+                print(f"Aviso imprimiendo factura pos-venta: {e_pr}")
+
+        def accion_no_imprimir(event=None):
+            dlg.destroy()
+
+        btn_no = crear_boton(
+            btn_box,
+            "❌ No, Gracias (Esc)",
+            accion_no_imprimir,
+            tipo="secondary",
+            tam_fuente=10
+        )
+        btn_no.pack(side="left", padx=(0, 8), fill="x", expand=True)
+
+        btn_si = crear_boton(
+            btn_box,
+            "✅ Sí, Imprimir (Enter)",
+            accion_imprimir,
+            tipo="success",
+            tam_fuente=10,
+            negrita=True
+        )
+        btn_si.pack(side="right", padx=(8, 0), fill="x", expand=True)
+
+        dlg.bind("<Return>", lambda e: accion_imprimir())
+        dlg.bind("<KP_Enter>", lambda e: accion_imprimir())
+        dlg.bind("<Escape>", lambda e: accion_no_imprimir())
+
+        btn_si.focus_set()
 
     def confirmar_asistencia_y_recaudo_vendedor(self, operario_nombre, total_venta, detalles_payload, id_venta=None, metodo_pago="Efectivo"):
         """

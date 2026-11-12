@@ -19,6 +19,7 @@ class AbrirCajaRequest(BaseModel):
     monto_inicial: float = 0.0
     terminal_id: Optional[int] = 1
     terminal_nombre: Optional[str] = "CAJA-01"
+    arqueo_apertura: Optional[Dict[str, Any]] = None
 
 
 class CerrarCajaRequest(BaseModel):
@@ -86,6 +87,7 @@ async def post_abrir_caja(
         monto_inicial=req.monto_inicial,
         terminal_id=req.terminal_id,
         terminal_nombre=req.terminal_nombre,
+        arqueo_apertura=req.arqueo_apertura,
     )
     await db.commit()
     await db.refresh(sesion)

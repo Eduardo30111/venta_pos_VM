@@ -407,12 +407,13 @@ def inicializar_base_datos(db_path=None):
         except Exception:
             pass
 
-        # C. Conciliación bancaria en sesiones_caja
+        # C. Conciliación bancaria y Arqueo de Apertura en sesiones_caja
         for col_def in [
             "monto_transferencias_esperado REAL DEFAULT 0.0",
             "monto_transferencias_verificado REAL DEFAULT 0.0",
             "diferencia_banco REAL DEFAULT 0.0",
-            "estado_banco TEXT DEFAULT 'Pendiente'"
+            "estado_banco TEXT DEFAULT 'Pendiente'",
+            "arqueo_apertura_json TEXT"
         ]:
             try:
                 cursor.execute(f"ALTER TABLE sesiones_caja ADD COLUMN {col_def}")

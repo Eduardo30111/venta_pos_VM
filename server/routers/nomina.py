@@ -398,25 +398,25 @@ async def list_proveedores_nomina(db: AsyncSession = Depends(get_db), current_us
 
 @router.get("/proveedores/historial")
 async def list_historial_proveedores(mes_anio: Optional[str] = None, db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
-    """Obtiene el historial de liquidaciones / pagos realizados a proveedores a través de Gastos de tipo 'Pago_Proveedor'"""
-    query = select(Gasto).where(Gasto.tipo == 'Pago_Proveedor').order_by(Gasto.id.desc())
+    """Obtiene el historial de liquidaciones / pagos realizados a proveedores a través de Gastos de tipo 'Pago_Proveedor' o 'Proveedor'"""
+    query = select(Gasto).where(Gasto.tipo.in_(["Pago_Proveedor", "Proveedor"])).order_by(Gasto.id.desc())
     res = await db.execute(query)
     gastos = res.scalars().all()
     
     historial = []
     for g in gastos:
-        fecha_str = g.created_at.strftime("%Y-%m-%d %H:%M") if g.created_at else ""
-        mes_str = g.created_at.strftime("%m-%Y") if g.created_at else ""
+        fecha_str = g.fecha or (g.created_at.strftime("%Y-%m-%d %H:%M") if g.created_at else "")
+        mes_str = g.fecha[:7] if g.fecha and len(g.fecha) >= 7 else (g.created_at.strftime("%m-%Y") if g.created_at else "")
         if mes_anio and mes_anio != "Todos" and mes_str != mes_anio:
             continue
         
-        nombre_prov = g.concepto.replace("Pago a Proveedor - ", "").strip()
+        nombre_prov = g.proveedor or g.concepto.replace("Pago a Proveedor - ", "").replace("Liquidación proveedor: ", "").strip()
         historial.append({
             "id": g.id,
             "id_liquidacion": g.id,
             "persona_id": g.referencia_id,
             "nombre_persona": nombre_prov,
-            "monto": float(g.valor),
+            "monto": float(g.valor or 0.0),
             "fecha": fecha_str,
             "mes_anio": mes_str,
             "concepto": g.concepto
@@ -424,52 +424,12 @@ async def list_historial_proveedores(mes_anio: Optional[str] = None, db: AsyncSe
     return historial
 
 @router.post("/proveedores/{id}/liquidar")
-async def liquidar_proveedor(id: int, db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
-    """Liquida las cuentas por pagar pendientes de un proveedor y genera el gasto contable"""
-    prov_res = await db.execute(select(Proveedor).where(Proveedor.id == id))
-    prov = prov_res.scalars().first()
-    if not prov:
-        raise HTTPException(status_code=404, detail="Proveedor no encontrado")
-        
-    cxp_res = await db.execute(
-        select(CuentaPorPagar).with_for_update().where(
-            CuentaPorPagar.proveedor_id == id,
-            CuentaPorPagar.estado == 'Pendiente'
-        )
-    )
-    cuentas_pendientes = cxp_res.scalars().all()
-    if not cuentas_pendientes:
-        raise HTTPException(status_code=400, detail=f"El proveedor '{prov.nombre}' no tiene deudas pendientes por liquidar.")
-        
-    total_pagar = sum(float(c.monto) for c in cuentas_pendientes)
-    
-    for c in cuentas_pendientes:
-        c.estado = 'Pagada'
-        c.saldo_pendiente = 0.0
-        c.monto_pagado = float(getattr(c, 'monto', 0.0) or getattr(c, 'monto_por_pagar', 0.0) or 0.0)
-
-    prov.saldo_acumulado = max(0.0, round(float(prov.saldo_acumulado or 0.0) - total_pagar, 2))
-    prov.total_pagado = round(float(prov.total_pagado or 0.0) + total_pagar, 2)
-        
-    gasto = Gasto(
-        concepto=f"Pago a Proveedor - {prov.nombre}",
-        categoria="Proveedores",
-        valor=total_pagar,
-        tipo="Pago_Proveedor",
-        referencia_id=prov.id,
-        usuario_id=current_user.id,
-        observacion=f"Liquidación de {len(cuentas_pendientes)} cuentas por pagar acumuladas"
-    )
-    db.add(gasto)
-    
-    await db.commit()
-    await db.refresh(gasto)
-    
-    return {
-        "ok": True,
-        "message": f"Se liquidaron {len(cuentas_pendientes)} cuentas con éxito",
-        "proveedor": prov.nombre,
-        "total_pagado": total_pagar,
-        "gasto_id": gasto.id
-    }
+async def liquidar_proveedor_nomina_proxy(
+    id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Reenvía de forma segura al endpoint canónico de liquidación de proveedores con todas las validaciones financieras"""
+    from .proveedores import liquidar_proveedor, LiquidarProveedorRequest
+    return await liquidar_proveedor(id=id, req=LiquidarProveedorRequest(monto=None, metodo_pago="Efectivo"), db=db, current_user=current_user)
 

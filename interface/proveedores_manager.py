@@ -115,14 +115,23 @@ def recalcular_saldo_proveedor(proveedor_id: int, conn: Optional[sqlite3.Connect
             saldo_p = float(p_row[2])
 
         # Actualizar tabla proveedores
-        cur.execute("""
-            UPDATE proveedores
-            SET saldo_acumulado = ?,
-                total_ventas = ?,
-                total_comisiones = ?,
-                total_pagado = ?
-            WHERE id = ?
-        """, (saldo_p, tot_v, tot_c, tot_p, proveedor_id))
+        cur.execute("PRAGMA table_info(proveedores)")
+        cols_p = [c[1] for c in cur.fetchall()]
+        if "total_ventas" in cols_p:
+            cur.execute("""
+                UPDATE proveedores
+                SET saldo_acumulado = ?,
+                    total_ventas = ?,
+                    total_comisiones = ?,
+                    total_pagado = ?
+                WHERE id = ?
+            """, (saldo_p, tot_v, tot_c, tot_p, proveedor_id))
+        else:
+            cur.execute("""
+                UPDATE proveedores
+                SET saldo_acumulado = ?
+                WHERE id = ?
+            """, (saldo_p, proveedor_id))
 
         if cerrar_conn:
             conn.commit()
@@ -837,6 +846,15 @@ def obtener_resumen_proveedores(
                                     item["total_ventas"] = max(item["total_ventas"], loc_v)
                                     item["total_comisiones"] = max(item["total_comisiones"], loc_c)
                                     item["total_pagado"] = max(item["total_pagado"], loc_p)
+                            # Asegurar que el proveedor esté registrado localmente en proveedores
+                            try:
+                                cur_loc.execute("""
+                                    INSERT OR REPLACE INTO proveedores (id, nombre, nit, telefono, saldo_acumulado, estado)
+                                    VALUES (?, ?, ?, ?, ?, ?)
+                                """, (pid, item["nombre"], item.get("nit") or "", item.get("telefono") or "", item["saldo_acumulado"], item.get("estado", "Activo")))
+                            except Exception:
+                                pass
+                    conn_loc.commit()
                     conn_loc.close()
                 except Exception as e_rec:
                     print(f"Aviso reconciliando saldos locales con API: {e_rec}")
@@ -1031,42 +1049,83 @@ def obtener_detalle_cuentas_proveedor(
 def obtener_historial_liquidaciones_proveedor(
     proveedor_id: Optional[int] = None,
     mes_anio: Optional[str] = None,
-    conn: Optional[sqlite3.Connection] = None
+    conn: Optional[sqlite3.Connection] = None,
+    fecha_inicio: Optional[str] = None,
+    fecha_fin: Optional[str] = None,
+    fecha_especifica: Optional[str] = None,
+    **kwargs
 ) -> List[Dict[str, Any]]:
     """
     Retorna el historial inmutable de pagos y liquidaciones realizadas a proveedores.
     Este historial se conserva de forma permanente aun cuando el saldo del proveedor llegue a $0.
     """
-    if conn is None and api is not None and proveedor_id:
+    if fecha_especifica is None and "fecha" in kwargs:
+        fecha_especifica = kwargs.get("fecha")
+
+    if conn is None and api is not None:
         try:
-            resp = api.get(f"/proveedores/{proveedor_id}/liquidaciones", timeout=5.0)
+            params = {}
+            if proveedor_id:
+                params["proveedor_id"] = proveedor_id
+            if fecha_especifica:
+                params["fecha"] = fecha_especifica
+            if fecha_inicio:
+                params["fecha_inicio"] = fecha_inicio
+            if fecha_fin:
+                params["fecha_fin"] = fecha_fin
+            if mes_anio and mes_anio != "Todos":
+                params["mes_anio"] = mes_anio
+
+            url_api = f"/proveedores/{proveedor_id}/liquidaciones" if proveedor_id else "/proveedores/liquidaciones"
+            resp = api.get(url_api, params=params, timeout=5.0)
             if resp.status_code == 200:
                 raw_l = resp.json()
                 items = []
                 for l in raw_l:
-                    f_val = l.get("fecha") or ""
+                    f_val = l.get("fecha") or l.get("fecha_pago") or ""
                     m_a = f_val[:7] if len(f_val) >= 7 else ""
-                    if mes_anio and mes_anio != "Todos" and m_a != mes_anio:
+                    # Filtro en memoria por si el backend remoto es versión previa
+                    if fecha_especifica and f_val[:10] != fecha_especifica:
                         continue
+                    if fecha_inicio and fecha_fin and not (fecha_inicio <= f_val[:10] <= fecha_fin):
+                        continue
+                    if mes_anio and mes_anio != "Todos":
+                        m_norm = mes_anio
+                        if len(m_norm) == 7 and m_norm[2] == "-":
+                            m_norm = f"{m_norm[3:]}-{m_norm[:2]}"
+                        if m_a != m_norm and mes_anio not in f_val:
+                            continue
+
+                    rec_num = l.get("numero_recibo") or f"LP-{l.get('id', 0):04d}"
+                    u_nom = l.get("usuario") or l.get("usuario_nombre") or "Administrador"
+                    ref_str = l.get("referencia") or l.get("referencia_comprobante") or l.get("comprobante") or ""
+                    monto_val = float(l.get("monto_pagado") or l.get("monto_liquidado") or 0.0)
+
                     items.append({
                         "id": l.get("id"),
-                        "numero_recibo": l.get("numero_recibo") or f"LQ-{l.get('id', 0):05d}",
+                        "numero_recibo": rec_num,
                         "proveedor_id": l.get("proveedor_id"),
                         "proveedor_nombre": l.get("proveedor_nombre", ""),
-                        "monto_liquidado": float(l.get("monto_pagado") or l.get("monto_liquidado") or 0.0),
+                        "monto_liquidado": monto_val,
+                        "monto_pagado": monto_val,
                         "saldo_anterior": float(l.get("saldo_anterior") or 0.0),
                         "saldo_restante": float(l.get("saldo_restante") or 0.0),
                         "tipo_pago": l.get("tipo_pago", "Total"),
                         "metodo_pago": l.get("metodo_pago", "Efectivo"),
-                        "referencia": l.get("comprobante") or l.get("referencia") or "",
+                        "referencia": ref_str,
+                        "referencia_comprobante": ref_str,
+                        "comprobante": ref_str,
                         "fecha": f_val,
+                        "fecha_pago": f_val,
                         "hora": l.get("hora", ""),
                         "mes_anio": m_a,
-                        "usuario": l.get("usuario", "Administrador"),
+                        "usuario": u_nom,
+                        "usuario_nombre": u_nom,
                         "observaciones": l.get("observaciones", ""),
-                        "estado": l.get("estado", "Completado")
+                        "estado": l.get("estado", "Aplicado")
                     })
-                return items
+                if items or proveedor_id or fecha_especifica or (fecha_inicio and fecha_fin):
+                    return items
         except Exception as e_api:
             print(f"Aviso consultando liquidaciones vía API: {e_api}")
 
@@ -1096,14 +1155,43 @@ def obtener_historial_liquidaciones_proveedor(
         if proveedor_id:
             query += " AND (proveedor_id = ? OR CAST(proveedor_id AS TEXT) = ?)"
             params.extend([proveedor_id, str(proveedor_id)])
+        if fecha_especifica:
+            query += " AND (fecha = ? OR fecha LIKE ? OR SUBSTR(fecha, 1, 10) = ?)"
+            params.extend([fecha_especifica, f"{fecha_especifica}%", fecha_especifica])
+        elif fecha_inicio and fecha_fin:
+            query += " AND SUBSTR(fecha, 1, 10) BETWEEN ? AND ?"
+            params.extend([fecha_inicio, fecha_fin])
+        elif fecha_inicio:
+            query += " AND SUBSTR(fecha, 1, 10) >= ?"
+            params.append(fecha_inicio)
+        elif fecha_fin:
+            query += " AND SUBSTR(fecha, 1, 10) <= ?"
+            params.append(fecha_fin)
+
         if mes_anio and mes_anio != "Todos":
-            query += " AND mes_anio = ?"
-            params.append(mes_anio)
+            m_norm = mes_anio
+            if len(m_norm) == 7 and m_norm[2] == "-":
+                m_norm = f"{m_norm[3:]}-{m_norm[:2]}"
+            query += " AND (mes_anio = ? OR mes_anio = ? OR fecha LIKE ? OR fecha LIKE ?)"
+            params.extend([mes_anio, m_norm, f"{m_norm}%", f"%{mes_anio}%"])
 
         query += " ORDER BY id DESC"
         cur.execute(query, params)
         rows = cur.fetchall()
-        return [dict(r) for r in rows]
+        res_items = []
+        for r in rows:
+            d = dict(r)
+            f_val = d.get("fecha") or ""
+            u_nom = d.get("usuario") or "Administrador"
+            ref_str = d.get("referencia") or ""
+            m_val = float(d.get("monto_liquidado") or 0.0)
+            d["fecha_pago"] = f_val
+            d["usuario_nombre"] = u_nom
+            d["referencia_comprobante"] = ref_str
+            d["comprobante"] = ref_str
+            d["monto_pagado"] = m_val
+            res_items.append(d)
+        return res_items
     finally:
         if cerrar_conn and conn:
             conn.close()
@@ -1188,8 +1276,8 @@ def liquidar_proveedor_db(
 
     if conn is None and api is not None:
         endpoints_to_try = [
-            f"/nomina/proveedores/{proveedor_id}/liquidar",
             f"/proveedores/{proveedor_id}/liquidar",
+            f"/nomina/proveedores/{proveedor_id}/liquidar",
         ]
         ultimo_error_api = None
         for ep in endpoints_to_try:
@@ -1199,6 +1287,7 @@ def liquidar_proveedor_db(
                     json={
                         "monto": float(monto) if monto is not None else None,
                         "metodo_pago": metodo_pago,
+                        "comprobante": referencia or "",
                         "referencia": referencia or "",
                         "observaciones": observaciones or "",
                         "sesion_caja_id": sesion_caja_id,
@@ -1232,11 +1321,23 @@ def liquidar_proveedor_db(
                 ultimo_error_api = str(e_api_post)
 
         # Si estamos en modo cliente conectado al servidor central, no recurrir a base de datos local vacía
+        es_cliente = False
         try:
-            from interface.network_manager import network_mgr
-            es_cliente = (network_mgr.modo == "cliente")
+            from interface.network_manager import obtener_config_red
+            cfg_n = obtener_config_red()
+            es_cliente = (cfg_n.get("modo") == "cliente")
         except Exception:
-            es_cliente = False
+            try:
+                from network_manager import obtener_config_red
+                cfg_n = obtener_config_red()
+                es_cliente = (cfg_n.get("modo") == "cliente")
+            except Exception:
+                pass
+        if not es_cliente and hasattr(api, "es_modo_cliente"):
+            try:
+                es_cliente = bool(api.es_modo_cliente())
+            except Exception:
+                pass
 
         if es_cliente:
             # Si el error indica que ya no tiene saldo pendiente por liquidar, informar con éxito
@@ -1278,6 +1379,18 @@ def liquidar_proveedor_db(
         if not prov_row:
             cur.execute("SELECT id, nombre, COALESCE(saldo_acumulado, 0.0) FROM proveedores WHERE CAST(id AS TEXT) = ? OR nombre LIKE ?", (str(proveedor_id), f"%{proveedor_id}%"))
             prov_row = cur.fetchone()
+
+        if not prov_row:
+            cur.execute("SELECT DISTINCT proveedor_nombre FROM cuentas_por_pagar_proveedores WHERE proveedor_id = ? OR CAST(proveedor_id AS TEXT) = ?", (proveedor_id, str(proveedor_id)))
+            nom_row = cur.fetchone()
+            prov_nom_fb = nom_row[0] if nom_row else f"Proveedor #{proveedor_id}"
+            try:
+                cur.execute("INSERT OR IGNORE INTO proveedores (id, nombre, saldo_acumulado, estado) VALUES (?, ?, 0.0, 'Activo')", (proveedor_id, prov_nom_fb))
+                conn.commit()
+                cur.execute("SELECT id, nombre, COALESCE(saldo_acumulado, 0.0) FROM proveedores WHERE id = ?", (proveedor_id,))
+                prov_row = cur.fetchone()
+            except Exception:
+                pass
 
         if not prov_row:
             return {

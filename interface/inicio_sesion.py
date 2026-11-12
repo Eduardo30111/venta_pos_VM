@@ -481,12 +481,31 @@ usuario_var = tk.StringVar()
 pass_var = tk.StringVar()
 
 crear_etiqueta(login_content, text="👤 USUARIO", font=(FONT_FAMILY, 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"], anchor="w").pack(fill="x", pady=(0, 3))
-entry_user = ttk.Entry(login_content, textvariable=usuario_var, font=(FONT_FAMILY, 11))
-entry_user.pack(fill="x", ipady=3, pady=(0, 12))
+entry_user = tk.Entry(
+    login_content,
+    textvariable=usuario_var,
+    font=(FONT_FAMILY, 11),
+    bg=t["input_bg"],
+    fg=t["input_fg"],
+    insertbackground=t["input_insert"],
+    relief="solid",
+    bd=1
+)
+entry_user.pack(fill="x", ipady=4, pady=(0, 12))
 
 crear_etiqueta(login_content, text="🔒 CONTRASEÑA", font=(FONT_FAMILY, 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"], anchor="w").pack(fill="x", pady=(0, 3))
-entry_pass = ttk.Entry(login_content, textvariable=pass_var, font=(FONT_FAMILY, 11), show="*")
-entry_pass.pack(fill="x", ipady=3, pady=(0, 16))
+entry_pass = tk.Entry(
+    login_content,
+    textvariable=pass_var,
+    font=(FONT_FAMILY, 11),
+    show="*",
+    bg=t["input_bg"],
+    fg=t["input_fg"],
+    insertbackground=t["input_insert"],
+    relief="solid",
+    bd=1
+)
+entry_pass.pack(fill="x", ipady=4, pady=(0, 16))
 
 btn_login = crear_boton(
     login_content,
@@ -526,8 +545,17 @@ btn_red_link = tk.Button(
 btn_red_link.pack(fill="x", pady=(4, 0))
 
 
+import threading
+
 def recargar_identidad_login():
     """Refresca en vivo el título, logo, datos comerciales y colores de la ventana de Login."""
+    if threading.current_thread() is not threading.main_thread():
+        try:
+            if ventana.winfo_exists():
+                ventana.after(0, recargar_identidad_login)
+        except Exception:
+            pass
+        return
     if not ventana.winfo_exists():
         return
     try:
@@ -556,6 +584,34 @@ ventana.bind("<Return>", validar_usuario)
 ventana.bind("<Escape>", limpiar_campos)
 entry_user.focus()
 
+def forzar_repintado_mac(event=None):
+    """
+    Fuerza a macOS Cocoa a componer el buffer de dibujo de Tkinter.
+    En macOS Aqua, al mapear una ventana Tkinter nueva, AppKit a veces solo renderiza
+    los NSButton nativos mientras que los Frames y Labels de Tkinter permanecen sin exponer
+    hasta que se produce un cambio de geometría.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        if not ventana.winfo_exists():
+            return
+        ventana.update_idletasks()
+        w = ventana.winfo_width()
+        h = ventana.winfo_height()
+        if w > 100 and h > 100:
+            ventana.geometry(f"{w+1}x{h}")
+            ventana.update_idletasks()
+            ventana.geometry(f"{w}x{h}")
+            ventana.update_idletasks()
+        ventana.lift()
+        ventana.focus_force()
+    except Exception:
+        pass
+
+if sys.platform == "darwin":
+    ventana.bind("<Map>", lambda e: ventana.after(80, forzar_repintado_mac))
+
 
 def _autoarrancar_o_sincronizar_red():
     try:
@@ -576,13 +632,14 @@ def _autoarrancar_o_sincronizar_red():
         print(f"Aviso en sincronización inicial de red: {e_srv}")
 
 
-import threading
 threading.Thread(target=_autoarrancar_o_sincronizar_red, daemon=True).start()
 
 if __name__ == "__main__":
     if sys.platform == "darwin":
         try:
             ventana.update_idletasks()
+            ventana.after(100, forzar_repintado_mac)
+            ventana.after(300, forzar_repintado_mac)
         except Exception:
             pass
     ventana.lift()

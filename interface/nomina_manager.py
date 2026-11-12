@@ -2430,11 +2430,79 @@ def obtener_historial_pagos_nomina(
     fecha_fin: Optional[str] = None,
     usuario_id: Optional[int] = None,
     rol: Optional[str] = None,
-    mes_anio: Optional[str] = None
+    mes_anio: Optional[str] = None,
+    fecha_especifica: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+    **kwargs
 ) -> List[Dict[str, Any]]:
     """Consulta el historial de pagos, liquidaciones y anticipos realizados."""
-    inicializar_tablas_nomina()
-    conn_u = conectar_usuarios_db()
+    if fecha_especifica is None and "fecha" in kwargs:
+        fecha_especifica = kwargs.get("fecha")
+
+    api_client = None
+    try:
+        from client.api_client import api as api_client
+    except Exception:
+        api_client = None
+
+    if conn is None and api_client is not None:
+        try:
+            resp = api_client.get("/nomina/liquidaciones", timeout=5.0)
+            if resp.status_code == 200:
+                raw_liqs = resp.json()
+                items = []
+                for l in raw_liqs:
+                    f_val = str(l.get("fecha_liquidacion") or l.get("created_at") or "")[:10]
+                    m_a = f_val[:7] if len(f_val) >= 7 else ""
+                    if fecha_especifica and f_val != fecha_especifica:
+                        continue
+                    if fecha_inicio and fecha_fin and not (fecha_inicio <= f_val <= fecha_fin):
+                        continue
+                    elif fecha_inicio and f_val < fecha_inicio:
+                        continue
+                    elif fecha_fin and f_val > fecha_fin:
+                        continue
+                    if mes_anio and mes_anio != "Todos":
+                        m_norm = mes_anio
+                        if len(m_norm) == 7 and m_norm[2] == "-":
+                            m_norm = f"{m_norm[3:]}-{m_norm[:2]}"
+                        if m_a != m_norm and mes_anio not in f_val:
+                            continue
+                    u_id_l = l.get("usuario_id")
+                    if usuario_id is not None and str(u_id_l) != str(usuario_id):
+                        continue
+
+                    items.append({
+                        "id": l.get("id"),
+                        "usuario_id": u_id_l,
+                        "usuario_nombre": l.get("usuario_nombre") or f"Empleado #{u_id_l}",
+                        "rol": l.get("rol", "Vendedor"),
+                        "fecha": f_val,
+                        "hora": str(l.get("created_at") or "")[11:19],
+                        "tipo_pago": "LIQUIDACION_TOTAL",
+                        "metodo_pago": l.get("metodo_pago", "Efectivo"),
+                        "cuenta_afectada": "CAJA_FISICA",
+                        "mes_anio": m_a,
+                        "periodo_inicio": str(l.get("periodo_inicio") or "")[:10],
+                        "periodo_fin": str(l.get("periodo_fin") or "")[:10],
+                        "monto_pagado": float(l.get("total_liquidado") or l.get("monto_pagado") or 0.0),
+                        "saldo_restante": 0.0,
+                        "responsable": "Administrador",
+                        "observaciones": l.get("observaciones") or ""
+                    })
+                if items or fecha_especifica or (fecha_inicio and fecha_fin):
+                    return items
+        except Exception as e_api_nom:
+            print(f"Aviso consultando liquidaciones de nómina vía API: {e_api_nom}")
+
+    cerrar_conn = False
+    if conn is None:
+        inicializar_tablas_nomina()
+        conn_u = conectar_usuarios_db()
+        cerrar_conn = True
+    else:
+        conn_u = conn
+
     if not conn_u:
         return []
     try:
@@ -2442,9 +2510,25 @@ def obtener_historial_pagos_nomina(
         cur = conn_u.cursor()
         conds = ["p.estado != 'Anulado'"]
         params: List[Any] = []
-        if fecha_inicio and fecha_fin:
-            conds.append("p.fecha_pago BETWEEN ? AND ?")
+        if fecha_especifica:
+            conds.append("SUBSTR(p.fecha_pago, 1, 10) = ?")
+            params.append(fecha_especifica)
+        elif fecha_inicio and fecha_fin:
+            conds.append("SUBSTR(p.fecha_pago, 1, 10) BETWEEN ? AND ?")
             params.extend([fecha_inicio, fecha_fin])
+        elif fecha_inicio:
+            conds.append("SUBSTR(p.fecha_pago, 1, 10) >= ?")
+            params.append(fecha_inicio)
+        elif fecha_fin:
+            conds.append("SUBSTR(p.fecha_pago, 1, 10) <= ?")
+            params.append(fecha_fin)
+            params.extend([fecha_inicio, fecha_fin])
+        elif fecha_inicio:
+            conds.append("p.fecha_pago >= ?")
+            params.append(fecha_inicio)
+        elif fecha_fin:
+            conds.append("p.fecha_pago <= ?")
+            params.append(fecha_fin)
         if usuario_id is not None:
             conds.append("p.usuario_id = ?")
             params.append(int(usuario_id))
@@ -2452,8 +2536,11 @@ def obtener_historial_pagos_nomina(
             conds.append("LOWER(COALESCE(NULLIF(p.rol, ''), u.rol)) = LOWER(?)")
             params.append(rol.strip())
         if mes_anio and mes_anio != "Todos":
-            conds.append("SUBSTR(p.fecha_pago, 1, 7) = ?")
-            params.append(mes_anio.strip())
+            m_norm = mes_anio
+            if len(m_norm) == 7 and m_norm[2] == "-":
+                m_norm = f"{m_norm[3:]}-{m_norm[:2]}"
+            conds.append("(SUBSTR(p.fecha_pago, 1, 7) = ? OR SUBSTR(p.fecha_pago, 1, 7) = ?)")
+            params.extend([mes_anio.strip(), m_norm.strip()])
 
         where_sql = " AND ".join(conds)
         cur.execute(f"""
@@ -2480,7 +2567,8 @@ def obtener_historial_pagos_nomina(
             res.append(d)
         return res
     finally:
-        conn_u.close()
+        if cerrar_conn and conn_u:
+            conn_u.close()
 
 
 def obtener_devengos_nomina(

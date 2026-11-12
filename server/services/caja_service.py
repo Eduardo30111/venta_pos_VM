@@ -28,15 +28,18 @@ class CajaService:
         monto_inicial: float = 0.0,
         terminal_id: Optional[int] = 1,
         terminal_nombre: Optional[str] = "CAJA-01",
+        arqueo_apertura: Optional[Any] = None,
     ) -> SesionCaja:
         activa = await CajaService.obtener_sesion_activa(db)
         if activa:
             return activa
 
+        import json
         ahora = datetime.now()
         f_str = ahora.strftime("%Y-%m-%d")
         h_str = ahora.strftime("%H:%M:%S")
         monto_ini = max(0.0, float(monto_inicial or 0.0))
+        arq_json = json.dumps(arqueo_apertura, ensure_ascii=False) if isinstance(arqueo_apertura, (dict, list)) else (arqueo_apertura if isinstance(arqueo_apertura, str) else None)
 
         sesion = SesionCaja(
             fecha_apertura=f_str,
@@ -45,6 +48,7 @@ class CajaService:
             terminal_id=terminal_id,
             terminal_nombre=terminal_nombre or "CAJA-01",
             monto_inicial=monto_ini,
+            arqueo_apertura_json=arq_json,
             estado="Abierta",
         )
         db.add(sesion)
@@ -260,6 +264,7 @@ class CajaService:
             "diferencia_banco": float(s.diferencia_banco or 0.0),
             "estado_banco": s.estado_banco or "Pendiente",
             "observaciones": s.observaciones or "",
+            "arqueo_apertura_json": getattr(s, "arqueo_apertura_json", "") or "",
             "estado": s.estado or "Abierta",
         }
 

@@ -862,11 +862,25 @@ def calcular_geometria_segura(ventana, target_w=1120, target_h=700, min_w=840, m
     ventana.minsize(min(min_w, w), min(min_h, h))
     ventana.resizable(True, True)
 
-    # En macOS asegurar que la ventana se eleve y actualice idletasks sin alterar la geometría
+    # En macOS asegurar que la ventana se eleve, actualice idletasks y fuerce la composición de Cocoa
     if sys.platform == "darwin":
         try:
             ventana.update_idletasks()
             ventana.lift()
+            def _nudge_mac():
+                try:
+                    if not ventana.winfo_exists():
+                        return
+                    nw = ventana.winfo_width()
+                    nh = ventana.winfo_height()
+                    if nw > 100 and nh > 100:
+                        ventana.geometry(f"{nw+1}x{nh}")
+                        ventana.update_idletasks()
+                        ventana.geometry(f"{nw}x{nh}")
+                        ventana.update_idletasks()
+                except Exception:
+                    pass
+            ventana.after(80, _nudge_mac)
         except Exception:
             pass
 

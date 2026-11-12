@@ -1,7 +1,7 @@
 from datetime import datetime
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, cast, String
+from sqlalchemy import func, cast, String, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Optional, Dict, Any
@@ -22,6 +22,7 @@ class LiquidarProveedorRequest(BaseModel):
     monto: Optional[float] = None
     metodo_pago: str = "Efectivo"
     comprobante: Optional[str] = ""
+    referencia: Optional[str] = ""
     observaciones: Optional[str] = ""
 
 
@@ -56,6 +57,68 @@ async def list_proveedores(
         except Exception:
             pass
     return provs
+
+
+@router.get("/liquidaciones")
+async def list_liquidaciones_proveedores(
+    proveedor_id: Optional[int] = Query(None),
+    fecha_inicio: Optional[str] = Query(None),
+    fecha_fin: Optional[str] = Query(None),
+    fecha: Optional[str] = Query(None),
+    mes_anio: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    query = select(LiquidacionProveedor)
+    if proveedor_id:
+        query = query.where(LiquidacionProveedor.proveedor_id == proveedor_id)
+    if fecha:
+        query = query.where(LiquidacionProveedor.fecha == fecha)
+    elif fecha_inicio and fecha_fin:
+        query = query.where(LiquidacionProveedor.fecha.between(fecha_inicio, fecha_fin))
+    elif fecha_inicio:
+        query = query.where(LiquidacionProveedor.fecha >= fecha_inicio)
+    elif fecha_fin:
+        query = query.where(LiquidacionProveedor.fecha <= fecha_fin)
+
+    if mes_anio and mes_anio != "Todos":
+        m_a = mes_anio
+        if len(m_a) == 7 and m_a[2] == "-":
+            m_a = f"{m_a[3:]}-{m_a[:2]}"
+        query = query.where(
+            or_(
+                LiquidacionProveedor.fecha.like(f"{m_a}%"),
+                LiquidacionProveedor.fecha.like(f"%{mes_anio}%")
+            )
+        )
+
+    query = query.order_by(LiquidacionProveedor.id.desc())
+    res = await db.execute(query)
+    liqs = res.scalars().all()
+    return [
+        {
+            "id": l.id,
+            "numero_recibo": f"LP-{l.id:04d}" if not (l.numero_liquidacion or "").startswith("LP-") else l.numero_liquidacion,
+            "proveedor_id": l.proveedor_id,
+            "proveedor_nombre": l.proveedor_nombre or "",
+            "monto_liquidado": float(l.monto_pagado or 0.0),
+            "monto_pagado": float(l.monto_pagado or 0.0),
+            "saldo_anterior": float(l.saldo_anterior or 0.0),
+            "saldo_restante": float(l.saldo_restante or 0.0),
+            "tipo_pago": "Total" if float(l.saldo_restante or 0.0) <= 0.01 else "Abono Parcial",
+            "metodo_pago": l.metodo_pago or "Efectivo",
+            "referencia": l.referencia or "",
+            "comprobante": l.referencia or "",
+            "fecha": l.fecha,
+            "fecha_pago": l.fecha,
+            "hora": l.hora or "",
+            "usuario": l.usuario or "",
+            "usuario_nombre": l.usuario or "",
+            "observaciones": l.observaciones or "",
+            "estado": l.estado or "Aplicado",
+        }
+        for l in liqs
+    ]
 
 
 @router.get("/{id}", response_model=ProveedorResponse)
@@ -380,6 +443,8 @@ async def liquidar_proveedor(
         prov.saldo_acumulado = max(0.0, round(float(prov.saldo_acumulado or 0.0) - monto_pagar, 2))
         prov.total_pagado = round(float(prov.total_pagado or 0.0) + monto_pagar, 2)
 
+    ref_val = (req.comprobante or req.referencia or "").strip()
+
     gasto = Gasto(
         concepto=f"Liquidación proveedor: {prov.nombre}",
         categoria="Operativo diario",
@@ -393,7 +458,7 @@ async def liquidar_proveedor(
         metodo_pago=metodo,
         tipo="Proveedor",
         proveedor=prov.nombre,
-        comprobante=req.comprobante or "",
+        comprobante=ref_val,
         usuario_id=current_user.id,
         usuario_nombre=u_nom,
         observacion=req.observaciones or "",
@@ -427,7 +492,7 @@ async def liquidar_proveedor(
         hora=h_str,
         monto_pagado=monto_pagar,
         metodo_pago=metodo,
-        referencia=req.comprobante or "",
+        referencia=ref_val,
         saldo_anterior=saldo_total,
         saldo_restante=saldo_restante_final,
         usuario=u_nom,
