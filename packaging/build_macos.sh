@@ -17,7 +17,10 @@ echo "🚀 INICIANDO EMPAQUETADO DE VmPOS PARA macOS"
 echo "=================================================================="
 
 # 1. Asegurar entorno virtual y dependencias compatibles con macOS (Tk >= 9.0 obligatorio)
-if [ -x "/Users/eduardosanchez/miniconda3/bin/python3" ]; then
+if [ -x "$PROJECT_ROOT/venv/bin/python" ] && [ -x "$PROJECT_ROOT/venv/bin/pyinstaller" ]; then
+    PYTHON_BIN="$PROJECT_ROOT/venv/bin/python"
+    export PYTHONPATH="$PROJECT_ROOT/.venv/lib/python3.9/site-packages:$PROJECT_ROOT/venv/lib/python3.9/site-packages:$PYTHONPATH"
+elif [ -x "/Users/eduardosanchez/miniconda3/bin/python3" ]; then
     PYTHON_BIN="/Users/eduardosanchez/miniconda3/bin/python3"
 elif [ -x "$HOME/miniconda3/bin/python3" ]; then
     PYTHON_BIN="$HOME/miniconda3/bin/python3"
@@ -76,8 +79,9 @@ if [ ! -f "$ICNS_PATH" ] && [ -f "$PNG_ICON" ]; then
 fi
 
 # 3. Limpiar compilaciones previas
-echo "Limpiando carpetas build/ y dist/..."
-rm -rf build dist
+echo "Limpiando compilaciones previas de macOS..."
+rm -rf build
+rm -rf dist/VmPOS.app dist/VmPOS dist/VmPOS_macOS.zip dist/VmPOS_macOS_Instalador.dmg
 
 # 4. Compilar con PyInstaller
 echo "Compilando VmPOS.app con PyInstaller..."

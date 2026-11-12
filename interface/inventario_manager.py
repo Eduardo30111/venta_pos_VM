@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 import os
 import sys
+import sqlite3
 
 try:
     from client.api_client import api
@@ -116,9 +117,33 @@ def obtener_articulo_por_codigo(codigo, conn=None) -> Optional[Dict[str, Any]]:
     cod_clean = str(codigo or "").strip()
     if not cod_clean:
         return None
-    resp = api.get(f"/inventario/articulo/{cod_clean}")
-    if resp.status_code == 200:
-        return resp.json()
+    if api is not None:
+        try:
+            resp = api.get(f"/inventario/articulo/{cod_clean}", timeout=2.0)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+    cerrar = False
+    if conn is None:
+        try:
+            from interface.database_manager import conectar_db
+        except ImportError:
+            from database_manager import conectar_db
+        conn = conectar_db()
+        cerrar = True
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM productos WHERE codigo = ? OR codigo = ? OR codigo_barras = ?", (cod_clean, cod_clean.zfill(5), cod_clean))
+        r = cur.fetchone()
+        if r:
+            return dict(r)
+    except Exception:
+        pass
+    finally:
+        if cerrar and conn:
+            conn.close()
     return None
 
 
@@ -158,7 +183,7 @@ def upsert_articulo_sqlite(datos: Dict[str, Any], conn=None):
         raw_prov = datos.get("proveedor_id")
         prov_id = None
         if raw_prov is not None:
-            s_prov = str(raw_prov).strip()
+            s_prov = str(raw_prov).split("-")[0].strip()
             if s_prov.isdigit() and int(s_prov) > 0:
                 prov_id = int(s_prov)
 
@@ -198,8 +223,10 @@ def upsert_articulo_sqlite(datos: Dict[str, Any], conn=None):
             """, (cod, nom, t_prod, pre, cos, cat, mar, bar, uni, des, prov_id, est, p_var, p_com, s_b, s_v, s_tot, sm_b, sm_v, ahora, ahora))
         if cerrar:
             conn.commit()
+        return True
     except Exception as e_upsert:
         print(f"Aviso al upsert de artículo en SQLite local: {e_upsert}")
+        return False
     finally:
         if cerrar and conn:
             conn.close()

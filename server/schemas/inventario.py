@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from typing import Optional, List, Any, Dict
 from datetime import datetime
 
@@ -61,6 +61,21 @@ class ArticuloCatalogoCreate(BaseModel):
     stock_minimo_bodega: float = 5.0
     stock_minimo_vitrina: float = 3.0
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalizar_datos(cls, data: Any):
+        if isinstance(data, dict):
+            d = dict(data)
+            raw_p = d.get("proveedor_id")
+            if raw_p is not None:
+                try:
+                    s_p = str(raw_p).split("-")[0].strip()
+                    d["proveedor_id"] = int(s_p) if s_p.isdigit() and int(s_p) > 0 else None
+                except Exception:
+                    d["proveedor_id"] = None
+            return d
+        return data
+
 
 class ArticuloCatalogoUpdate(BaseModel):
     nombre: Optional[str] = None
@@ -78,6 +93,20 @@ class ArticuloCatalogoUpdate(BaseModel):
     porcentaje_comision: Optional[float] = None
     stock_minimo_bodega: Optional[float] = None
     stock_minimo_vitrina: Optional[float] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalizar_datos(cls, data: Any):
+        if isinstance(data, dict):
+            d = dict(data)
+            if "proveedor_id" in d and d["proveedor_id"] is not None:
+                try:
+                    s_p = str(d["proveedor_id"]).split("-")[0].strip()
+                    d["proveedor_id"] = int(s_p) if s_p.isdigit() and int(s_p) > 0 else None
+                except Exception:
+                    d["proveedor_id"] = None
+            return d
+        return data
 
 
 class TrasladoCreate(BaseModel):

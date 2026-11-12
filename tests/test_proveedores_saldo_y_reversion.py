@@ -36,12 +36,12 @@ class TestProveedoresSaldoYReversion(unittest.TestCase):
         self.cur = self.conn.cursor()
         self.cur.execute("PRAGMA foreign_keys = OFF;")
         # Limpiar datos de prueba
-        self.cur.execute("DELETE FROM cuentas_por_pagar_proveedores WHERE proveedor_nombre LIKE 'Omara Sierra%'")
-        self.cur.execute("DELETE FROM liquidaciones_proveedores WHERE proveedor_nombre LIKE 'Omara Sierra%'")
+        self.cur.execute("DELETE FROM cuentas_por_pagar_proveedores WHERE proveedor_nombre LIKE 'Omara Sierra%' AND proveedor_id != 1")
+        self.cur.execute("DELETE FROM liquidaciones_proveedores WHERE proveedor_nombre LIKE 'Omara Sierra%' AND proveedor_id != 1")
         self.cur.execute("DELETE FROM detalle_ventas WHERE codigo_producto IN ('TEST-OMARA-01', 'TEST-GEN-01')")
         self.cur.execute("DELETE FROM ventas WHERE operario = 'TestRunner'")
         self.cur.execute("DELETE FROM productos WHERE codigo IN ('TEST-OMARA-01', 'TEST-GEN-01')")
-        self.cur.execute("DELETE FROM proveedores WHERE nombre = 'Omara Sierra'")
+        self.cur.execute("DELETE FROM proveedores WHERE nombre = 'Omara Sierra' AND id != 1")
         self.conn.commit()
 
         # Crear proveedor Omara Sierra
@@ -77,12 +77,12 @@ class TestProveedoresSaldoYReversion(unittest.TestCase):
     def tearDown(self):
         if self.conn:
             self.cur.execute("PRAGMA foreign_keys = OFF;")
-            self.cur.execute("DELETE FROM cuentas_por_pagar_proveedores WHERE proveedor_nombre LIKE 'Omara Sierra%'")
-            self.cur.execute("DELETE FROM liquidaciones_proveedores WHERE proveedor_nombre LIKE 'Omara Sierra%'")
+            self.cur.execute("DELETE FROM cuentas_por_pagar_proveedores WHERE proveedor_nombre LIKE 'Omara Sierra%' AND proveedor_id != 1")
+            self.cur.execute("DELETE FROM liquidaciones_proveedores WHERE proveedor_nombre LIKE 'Omara Sierra%' AND proveedor_id != 1")
             self.cur.execute("DELETE FROM detalle_ventas WHERE codigo_producto IN ('TEST-OMARA-01', 'TEST-GEN-01')")
             self.cur.execute("DELETE FROM ventas WHERE operario = 'TestRunner'")
             self.cur.execute("DELETE FROM productos WHERE codigo IN ('TEST-OMARA-01', 'TEST-GEN-01')")
-            self.cur.execute("DELETE FROM proveedores WHERE nombre = 'Omara Sierra'")
+            self.cur.execute("DELETE FROM proveedores WHERE nombre = 'Omara Sierra' AND id != 1")
             self.conn.commit()
             self.conn.close()
 

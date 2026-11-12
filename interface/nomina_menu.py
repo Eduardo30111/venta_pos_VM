@@ -1473,9 +1473,19 @@ def iniciar_nomina(parent_pid="", parent=None):
         nombre = datos["nombre"]
         doc = datos.get("documento_nit") or "Sin documento"
 
+        # Obtener saldo de la fila seleccionada como referencia base
+        saldo_tabla = 0.0
+        try:
+            saldo_raw = str(datos.get("saldo_pendiente", "0")).replace("$", "").replace("COP", "").replace(",", "").strip()
+            saldo_tabla = float(saldo_raw or 0.0)
+        except Exception:
+            saldo_tabla = 0.0
+
         # Obtener saldo fresco recalculado directamente de base de datos
         res_calc = recalcular_saldo_proveedor(id_prov)
-        saldo_actual = float(res_calc.get("saldo_pendiente", 0.0))
+        saldo_calc = float(res_calc.get("saldo_pendiente", 0.0))
+
+        saldo_actual = max(saldo_calc, saldo_tabla)
 
         if saldo_actual <= 0:
             messagebox.showinfo(
@@ -1675,7 +1685,7 @@ def iniciar_nomina(parent_pid="", parent=None):
                     notas=notas
                 )
 
-                if res.get("exito"):
+                if res.get("exito") or res.get("ok"):
                     recibo = res.get("numero_recibo", "")
                     messagebox.showinfo(
                         "✅ Pago Registrado con Éxito",

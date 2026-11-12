@@ -526,15 +526,32 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
 
         tk.Label(modal, text=f"✏️ EDITAR VENTA #{id_venta} ({vals[1]})", font=("Segoe UI", 12, "bold"), bg=t_m["bg_surface"], fg="#2563EB").pack(pady=10)
 
-        # Cargar items actuales de la venta
-        conn = conectar_db()
+        # Cargar items actuales de la venta (API centralizada primero, luego SQLite local)
         items_venta = []
-        if conn:
-            conn.row_factory = __import__("sqlite3").Row
-            cur = conn.cursor()
-            cur.execute("SELECT * FROM detalle_ventas WHERE id_venta = ?", (id_venta,))
-            items_venta = [dict(r) for r in cur.fetchall()]
-            conn.close()
+        if api is not None:
+            try:
+                resp = api.get(f"/ventas/{id_venta}")
+                if resp.status_code == 200:
+                    v_info = resp.json()
+                    raw_items = v_info.get("detalles") or v_info.get("items") or []
+                    for it in raw_items:
+                        items_venta.append({
+                            "codigo_producto": it.get("item_codigo") or it.get("codigo_producto") or it.get("codigo") or "",
+                            "nombre_producto": it.get("item_nombre") or it.get("nombre_producto") or it.get("nombre") or "",
+                            "precio_unitario": float(it.get("precio_vendido") or it.get("precio_unitario") or it.get("precio") or 0.0),
+                            "cantidad": float(it.get("cantidad") or it.get("cant") or 1.0)
+                        })
+            except Exception as e_api_v:
+                print(f"Aviso al cargar ítems de venta #{id_venta} desde API: {e_api_v}")
+
+        if not items_venta:
+            conn = conectar_db()
+            if conn:
+                conn.row_factory = __import__("sqlite3").Row
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM detalle_ventas WHERE id_venta = ?", (id_venta,))
+                items_venta = [dict(r) for r in cur.fetchall()]
+                conn.close()
 
         # Selector de método
         met_frame = tk.Frame(modal, bg=t_m["bg_surface"])
@@ -552,15 +569,23 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
         for it in items_venta:
             row_i = tk.Frame(items_frame, bg=t_m["bg_card"])
             row_i.pack(fill="x", pady=3)
-            tk.Label(row_i, text=it["nombre_producto"][:22], font=("Segoe UI", 9), bg=t_m["bg_card"], fg=t_m["text_main"], width=22, anchor="w").pack(side="left")
+            nom_it = str(it.get("nombre_producto") or it.get("item_nombre") or it.get("nombre") or "Producto")
+            tk.Label(row_i, text=nom_it[:22], font=("Segoe UI", 9), bg=t_m["bg_card"], fg=t_m["text_main"], width=22, anchor="w").pack(side="left")
             tk.Label(row_i, text="Cant:", font=("Segoe UI", 8), bg=t_m["bg_card"], fg=t_m["text_muted"]).pack(side="left", padx=2)
             e_c = tk.Spinbox(row_i, from_=1, to=999, width=5, font=("Segoe UI", 9))
             e_c.delete(0, "end")
-            e_c.insert(0, str(it["cantidad"]))
+            c_val = it.get("cantidad", 1.0)
+            try:
+                c_flt = float(c_val)
+                c_str = str(int(c_flt) if c_flt.is_integer() else c_flt)
+            except Exception:
+                c_str = str(c_val)
+            e_c.insert(0, c_str)
             e_c.pack(side="left", padx=4)
 
             tk.Label(row_i, text="Precio:", font=("Segoe UI", 8), bg=t_m["bg_card"], fg=t_m["text_muted"]).pack(side="left", padx=2)
-            e_p = CurrencyEntry(row_i, initial_value=it["precio_unitario"], show_symbol=True, width=12, font=("Segoe UI", 9))
+            pu_val = float(it.get("precio_unitario") or it.get("precio_vendido") or it.get("precio") or 0.0)
+            e_p = CurrencyEntry(row_i, initial_value=pu_val, show_symbol=True, width=12, font=("Segoe UI", 9))
             e_p.pack(side="left", padx=4)
 
             entries_items.append({"item": it, "entry_cant": e_c, "entry_precio": e_p})
@@ -572,20 +597,51 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
         def confirmar_edicion():
             motivo = e_motivo_ed.get().strip()
             if not motivo or len(motivo) < 3:
-                messagebox.showwarning("Atención", "Debes ingresar el motivo de la edición.", parent=modal)
+                messagebox.showwarning("Atención", "Debes ingresar el motivo de la edición (mínimo 3 caracteres).", parent=modal)
+                e_motivo_ed.focus_set()
                 return
 
             nuevos_items = []
             for row in entries_items:
-                cant = int(row["entry_cant"].get())
-                pu = float(row["entry_precio"].get_value())
                 it_orig = row["item"]
+                # 1. Obtener y validar cantidad (soporta float, int, y strings con decimales)
+                try:
+                    c_raw = float(str(row["entry_cant"].get()).strip() or 1.0)
+                except Exception:
+                    messagebox.showwarning("Cantidad Inválida", f"Por favor ingrese una cantidad numérica válida para '{it_orig.get('nombre_producto', 'el producto')}'.", parent=modal)
+                    row["entry_cant"].focus_set()
+                    return
+
+                if c_raw <= 0:
+                    messagebox.showwarning("Cantidad Inválida", "La cantidad debe ser mayor a cero.", parent=modal)
+                    row["entry_cant"].focus_set()
+                    return
+
+                cant = int(c_raw) if c_raw.is_integer() else round(c_raw, 3)
+
+                # 2. Obtener y validar precio
+                try:
+                    pu = float(row["entry_precio"].get_value())
+                except Exception:
+                    pu = float(it_orig.get("precio_unitario") or it_orig.get("precio_vendido") or it_orig.get("precio") or 0.0)
+
+                if pu < 0:
+                    messagebox.showwarning("Precio Inválido", "El precio unitario no puede ser negativo.", parent=modal)
+                    return
+
+                cod_prod = str(it_orig.get("codigo_producto") or it_orig.get("item_codigo") or it_orig.get("codigo") or "").strip()
+                nom_prod = str(it_orig.get("nombre_producto") or it_orig.get("item_nombre") or it_orig.get("nombre") or cod_prod or "Servicio").strip()
+
                 nuevos_items.append({
-                    "codigo_producto": it_orig["codigo_producto"],
-                    "nombre_producto": it_orig["nombre_producto"],
+                    "codigo_producto": cod_prod,
+                    "nombre_producto": nom_prod,
                     "precio_unitario": pu,
                     "cantidad": cant
                 })
+
+            if not nuevos_items:
+                messagebox.showwarning("Atención", "La venta debe conservar al menos un ítem.", parent=modal)
+                return
 
             try:
                 res = editar_venta_completa(
@@ -597,9 +653,10 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                 )
                 modal.destroy()
                 cargar_ventas()
-                messagebox.showinfo("Venta Modificada", f"Venta #{id_venta} actualizada exitosamente.\nNuevo total: ${res['nuevo_total']:,.0f} COP.", parent=dialog)
+                tot_nuevo = res.get("nuevo_total", res.get("total", 0.0))
+                messagebox.showinfo("Venta Modificada", f"Venta #{id_venta} actualizada exitosamente.\nNuevo total: ${tot_nuevo:,.0f} COP.", parent=dialog)
             except Exception as e:
-                messagebox.showerror("Error", f"Error al editar venta: {e}", parent=modal)
+                messagebox.showerror("Error al Editar Venta", f"No se pudo guardar la modificación:\n{e}", parent=modal)
 
         btn_box_ed = tk.Frame(modal, bg=t_m["bg_surface"])
         btn_box_ed.pack(side="bottom", fill="x", padx=20, pady=12)
@@ -631,22 +688,48 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
             tree_a.column(c, width=75, anchor="center")
         tree_a.column("Motivo", width=180, anchor="w")
 
-        conn = conectar_db()
-        if conn:
-            conn.row_factory = __import__("sqlite3").Row
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT id, accion, usuario, fecha, hora, motivo, valor_anterior, valor_nuevo
-                FROM auditoria_ventas
-                WHERE id_venta = ?
-                ORDER BY id DESC
-            """, (id_venta,))
-            for r in cur.fetchall():
-                tree_a.insert("", "end", values=(
-                    r["id"], r["accion"], r["usuario"], r["fecha"], r["hora"],
-                    r["motivo"], f"${float(r['valor_anterior'] or 0):,.0f}", f"${float(r['valor_nuevo'] or 0):,.0f}"
-                ))
-            conn.close()
+        cargado_api = False
+        if api is not None:
+            try:
+                resp = api.get(f"/ventas/{id_venta}/auditoria")
+                if resp.status_code == 200:
+                    raw_logs = resp.json()
+                    for lg in raw_logs:
+                        vn = lg.get("valor_nuevo") or {}
+                        va = lg.get("valor_anterior") or {}
+                        m_n = vn.get("nuevo_total", vn.get("total", 0.0)) if isinstance(vn, dict) else 0.0
+                        m_a = va.get("total_anterior", va.get("total", 0.0)) if isinstance(va, dict) else 0.0
+                        tree_a.insert("", "end", values=(
+                            lg.get("id"),
+                            lg.get("accion") or lg.get("evento", "Edición"),
+                            lg.get("usuario_nombre") or lg.get("usuario", "Admin"),
+                            lg.get("fecha", ""),
+                            lg.get("hora", ""),
+                            lg.get("motivo", ""),
+                            f"${float(m_a):,.0f}",
+                            f"${float(m_n):,.0f}"
+                        ))
+                    cargado_api = True
+            except Exception as e_aud_api:
+                print(f"Aviso al cargar auditoría vía API: {e_aud_api}")
+
+        if not cargado_api:
+            conn = conectar_db()
+            if conn:
+                conn.row_factory = __import__("sqlite3").Row
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT id, accion, usuario, fecha, hora, motivo, valor_anterior, valor_nuevo
+                    FROM auditoria_ventas
+                    WHERE id_venta = ?
+                    ORDER BY id DESC
+                """, (id_venta,))
+                for r in cur.fetchall():
+                    tree_a.insert("", "end", values=(
+                        r["id"], r["accion"], r["usuario"], r["fecha"], r["hora"],
+                        r["motivo"], f"${float(r['valor_anterior'] or 0):,.0f}", f"${float(r['valor_nuevo'] or 0):,.0f}"
+                    ))
+                conn.close()
 
         crear_boton(modal, "Cerrar", modal.destroy, tipo="secondary").pack(pady=10)
 

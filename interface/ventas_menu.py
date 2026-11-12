@@ -65,7 +65,8 @@ def guardar_venta_sqlite(
     recibido=0.0,
     cambio=0.0,
     numero_factura="",
-    snapshot_negocio=None
+    snapshot_negocio=None,
+    pagos=None
 ):
     """Guarda la venta de forma local en SQLite (database/ventas.db) para persistencia y respaldo."""
     try:
@@ -144,7 +145,13 @@ def guardar_venta_sqlite(
             except Exception:
                 pass
 
-        saldo_pend_venta = float(total) if str(metodo_pago) == "Fiado" else 0.0
+        monto_fiado_calc = 0.0
+        if str(metodo_pago) == "Fiado":
+            monto_fiado_calc = float(total)
+        elif str(metodo_pago) == "Mixto" and pagos:
+            monto_fiado_calc = sum(float(p.get("monto", 0.0) or 0.0) for p in pagos if p.get("metodo") == "Fiado")
+
+        saldo_pend_venta = monto_fiado_calc
 
         cur.execute("""
             INSERT INTO ventas (
@@ -263,10 +270,17 @@ def guardar_venta_sqlite(
 
         # Registrar medio de pago en libro mayor de pagos
         try:
-            cur.execute("""
-                INSERT INTO pagos_venta (id_venta, metodo_pago, monto, referencia, fecha, hora)
-                VALUES (?, ?, ?, '', ?, ?)
-            """, (id_venta, str(metodo_pago), float(total), hoy_str, hora_str))
+            if pagos and str(metodo_pago) == "Mixto":
+                for p_it in pagos:
+                    cur.execute("""
+                        INSERT INTO pagos_venta (id_venta, metodo_pago, monto, referencia, fecha, hora)
+                        VALUES (?, ?, ?, '', ?, ?)
+                    """, (id_venta, str(p_it.get("metodo", "Efectivo")), float(p_it.get("monto", 0.0)), hoy_str, hora_str))
+            else:
+                cur.execute("""
+                    INSERT INTO pagos_venta (id_venta, metodo_pago, monto, referencia, fecha, hora)
+                    VALUES (?, ?, ?, '', ?, ?)
+                """, (id_venta, str(metodo_pago), float(total), hoy_str, hora_str))
         except Exception:
             pass
 
@@ -275,7 +289,59 @@ def guardar_venta_sqlite(
 
         # Impacto contable en libro central según método de pago
         try:
-            if str(metodo_pago) == "Efectivo":
+            if str(metodo_pago) == "Mixto" and pagos:
+                for p_it in pagos:
+                    m_n = p_it.get("metodo")
+                    m_v = float(p_it.get("monto", 0.0) or 0.0)
+                    if m_v <= 0:
+                        continue
+                    if m_n == "Efectivo":
+                        registrar_movimiento_financiero(
+                            tipo="VENTA_EFECTIVO",
+                            concepto=f"Venta mixta en efectivo #{id_venta}",
+                            monto=m_v,
+                            metodo_pago="Efectivo",
+                            cuenta_afectada="CAJA_FISICA",
+                            usuario=operario_nombre,
+                            referencia_origen=f"VENTA-{id_venta}",
+                            sesion_id=sesion_id,
+                            conn=conn,
+                            sincronizar_caja=True
+                        )
+                    elif m_n == "Transferencia":
+                        registrar_movimiento_financiero(
+                            tipo="VENTA_TRANSFERENCIA",
+                            concepto=f"Venta mixta por transferencia #{id_venta}",
+                            monto=m_v,
+                            metodo_pago="Transferencia",
+                            cuenta_afectada="BANCO_TRANSFERENCIA",
+                            usuario=operario_nombre,
+                            referencia_origen=f"VENTA-{id_venta}",
+                            sesion_id=sesion_id,
+                            conn=conn,
+                            sincronizar_caja=False
+                        )
+                    elif m_n == "Fiado":
+                        registrar_movimiento_financiero(
+                            tipo="VENTA_CREDITO",
+                            concepto=f"Venta mixta a crédito/fiado #{id_venta} - {doc}",
+                            monto=m_v,
+                            metodo_pago="Fiado",
+                            cuenta_afectada="CARTERA_CLIENTES",
+                            usuario=operario_nombre,
+                            referencia_origen=f"VENTA-{id_venta}",
+                            sesion_id=sesion_id,
+                            conn=conn,
+                            sincronizar_caja=False
+                        )
+                        try:
+                            if cli_id_int is not None:
+                                cur.execute("UPDATE clientes SET saldo_pendiente = COALESCE(saldo_pendiente, 0.0) + ? WHERE id = ?", (m_v, cli_id_int))
+                            elif doc and doc != "Consumidor Final":
+                                cur.execute("UPDATE clientes SET saldo_pendiente = COALESCE(saldo_pendiente, 0.0) + ? WHERE cedula = ? OR LOWER(nombre) = LOWER(?)", (m_v, doc, doc))
+                        except Exception as e_fiado:
+                            print(f"Aviso actualizando deuda de cliente en venta mixta: {e_fiado}")
+            elif str(metodo_pago) == "Efectivo":
                 registrar_movimiento_financiero(
                     tipo="VENTA_EFECTIVO",
                     concepto=f"Venta en efectivo #{id_venta}",
@@ -1022,6 +1088,14 @@ class App:
         self.tabla.configure(yscrollcommand=sc_cart_y.set, xscrollcommand=sc_cart_x.set)
         self.tabla.bind("<Double-1>", self.editar_item_carrito_click)
         self.tabla.bind("<Return>", self.editar_item_carrito_click)
+
+        def _on_click_tabla_carrito(event):
+            row_id = self.tabla.identify_row(event.y)
+            if row_id:
+                self.tabla.selection_set(row_id)
+                self.tabla.focus(row_id)
+                self.editar_item_carrito_click(event)
+        self.tabla.bind("<ButtonRelease-1>", _on_click_tabla_carrito)
 
         self.tabla.grid(row=0, column=0, sticky="nsew")
         sc_cart_y.grid(row=0, column=1, sticky="ns")
@@ -2711,6 +2785,12 @@ class App:
         f_footer = tk.Frame(dialog, bg=t_d["bg_surface_alt"], padx=15, pady=10, bd=1, relief="ridge")
         f_footer.pack(fill="x", side="bottom")
 
+        def eliminar_item_actual():
+            self.tabla.delete(item_id)
+            self.actualizar_total()
+            dialog.destroy()
+
+        crear_boton(f_footer, "Quitar del Carrito", command=eliminar_item_actual, tipo="danger", icono="🗑️").pack(side="left", padx=5)
         crear_boton(f_footer, "Cancelar", command=dialog.destroy, tipo="secondary").pack(side="right", padx=5)
         crear_boton(f_footer, "Aplicar Cambios", command=confirmar_cambios, tipo="success", icono="✅").pack(side="right", padx=5)
 
@@ -2774,32 +2854,34 @@ class App:
             if getattr(self, "_registrando_venta", False):
                 return
             metodo = metodo_var.get()
-            monto_ef = entry_efectivo.get_value() if metodo == "Efectivo" else (0 if metodo == "Fiado" else total_val)
+            monto_ef = entry_efectivo.get_value() if metodo == "Efectivo" else (entry_mix_efectivo.get_value() if metodo == "Mixto" else (0 if metodo == "Fiado" else total_val))
             cid = None
-            if metodo == "Fiado":
-                sel = combo_clientes.get()
-                if not sel:
-                    messagebox.showerror("Error", "Debe seleccionar un cliente registrado para fiado antes de la vista previa.", parent=ventana)
-                    return
-                cid = sel.split(" - ")[0].strip()
-                cli_info = clientes_fiado_map.get(cid)
-                if cli_info:
-                    lim = float(cli_info.get("limite_credito") or 0.0)
-                    saldo_act = float(cli_info.get("saldo_pendiente") or 0.0)
-                    if lim > 0 and (saldo_act + total_val > lim) and not self._exceso_credito_autorizado:
-                        if not self.autorizar_exceso_credito_admin(
-                            parent=ventana,
-                            cliente_nombre=cli_info.get("nombre", "Cliente"),
-                            lim=lim,
-                            saldo=saldo_act,
-                            total_val=total_val,
-                            exceso=(saldo_act + total_val) - lim,
-                        ):
-                            return
-                    doc_of = str(cli_info.get("documento") or "").strip()
-                    if doc_of:
-                        self.documento.set(doc_of)
-                    self.cliente_id_seleccionado = int(cid) if cid.isdigit() else None
+            if metodo in ("Fiado", "Mixto"):
+                m_fi = total_val if metodo == "Fiado" else float(entry_mix_fiado.get_value())
+                if m_fi > 0:
+                    sel = combo_clientes.get()
+                    if not sel:
+                        messagebox.showerror("Error", "Debe seleccionar un cliente registrado para la porción fiada antes de la vista previa.", parent=ventana)
+                        return
+                    cid = sel.split(" - ")[0].strip()
+                    cli_info = clientes_fiado_map.get(cid)
+                    if cli_info:
+                        lim = float(cli_info.get("limite_credito") or 0.0)
+                        saldo_act = float(cli_info.get("saldo_pendiente") or 0.0)
+                        if lim > 0 and (saldo_act + m_fi > lim) and not self._exceso_credito_autorizado:
+                            if not self.autorizar_exceso_credito_admin(
+                                parent=ventana,
+                                cliente_nombre=cli_info.get("nombre", "Cliente"),
+                                lim=lim,
+                                saldo=saldo_act,
+                                total_val=m_fi,
+                                exceso=(saldo_act + m_fi) - lim,
+                            ):
+                                return
+                        doc_of = str(cli_info.get("documento") or "").strip()
+                        if doc_of:
+                            self.documento.set(doc_of)
+                        self.cliente_id_seleccionado = int(cid) if cid.isdigit() else None
             self._abrir_dialogo_recibo(ventana, monto_ef, total_val, metodo, cid)
 
         def completar():
@@ -2890,6 +2972,85 @@ class App:
                         boton_principal_modal=btn_confirmar,
                         texto_original_modal=texto_btn_prev,
                     )
+                elif metodo == "Mixto":
+                    m_ef = float(entry_mix_efectivo.get_value())
+                    m_tr = float(entry_mix_transf.get_value())
+                    m_fi = float(entry_mix_fiado.get_value())
+
+                    if m_ef < 0 or m_tr < 0 or m_fi < 0:
+                        messagebox.showerror("Error", "Los montos de los métodos no pueden ser negativos.", parent=ventana)
+                        return
+
+                    suma_pagos = round(m_ef + m_tr + m_fi, 2)
+                    if abs(suma_pagos - total_val) > 0.01:
+                        messagebox.showwarning(
+                            "Distribución Incompleta",
+                            f"La suma de los métodos de pago (${suma_pagos:,.0f} COP) debe ser exactamente igual al total a pagar (${total_val:,.0f} COP).\n\n"
+                            f"Diferencia actual: ${abs(total_val - suma_pagos):,.0f} COP.",
+                            parent=ventana
+                        )
+                        return
+
+                    cid_mix = None
+                    cli_mix_nom = None
+                    if m_fi > 0:
+                        seleccion = combo_clientes.get()
+                        if not seleccion:
+                            messagebox.showerror("Cliente Requerido", "Para la porción fiada debe seleccionar un cliente registrado y autorizado.", parent=ventana)
+                            return
+                        cid_str = seleccion.split(" - ")[0].strip()
+                        cli_info = clientes_fiado_map.get(cid_str)
+                        if not cli_info:
+                            messagebox.showerror("Error", f"No se pudo cargar la información central del cliente #{cid_str}.", parent=ventana)
+                            return
+                        if not cli_info.get("permite_fiado", True):
+                            messagebox.showerror("Crédito no habilitado", f"El cliente '{cli_info.get('nombre')}' no tiene habilitado el permiso para comprar fiado.", parent=ventana)
+                            return
+
+                        lim = float(cli_info.get("limite_credito") or 0.0)
+                        saldo_act = float(cli_info.get("saldo_pendiente") or 0.0)
+                        nuevo_saldo = saldo_act + m_fi
+
+                        if lim > 0 and (nuevo_saldo > lim) and not self._exceso_credito_autorizado:
+                            exceso = nuevo_saldo - lim
+                            if not self.autorizar_exceso_credito_admin(
+                                parent=ventana,
+                                cliente_nombre=cli_info.get("nombre", "Cliente"),
+                                lim=lim,
+                                saldo=saldo_act,
+                                total_val=m_fi,
+                                exceso=exceso,
+                            ):
+                                return
+
+                        doc_oficial = str(cli_info.get("documento") or "").strip()
+                        if doc_oficial:
+                            self.documento.set(doc_oficial)
+                        cid_mix = int(cid_str) if cid_str.isdigit() else None
+                        self.cliente_id_seleccionado = cid_mix
+                        cli_mix_nom = cli_info.get("nombre") or doc_oficial
+
+                    pagos_list = []
+                    if m_ef > 0:
+                        pagos_list.append({"metodo": "Efectivo", "monto": m_ef, "recibido": m_ef, "cambio": 0.0})
+                    if m_tr > 0:
+                        pagos_list.append({"metodo": "Transferencia", "monto": m_tr, "recibido": m_tr, "cambio": 0.0})
+                    if m_fi > 0:
+                        pagos_list.append({"metodo": "Fiado", "monto": m_fi, "recibido": 0.0, "cambio": 0.0})
+
+                    self.procesar_venta_completa(
+                        recibido=m_ef,
+                        total=total_val,
+                        metodo_pago="Mixto",
+                        pagos=pagos_list,
+                        id_cliente=cid_mix,
+                        imprimir_recibo=imprimir_ticket,
+                        nombre_cliente_display=cli_mix_nom,
+                        dialogo_pago=ventana,
+                        botones_modal=[btn_confirmar, btn_preview, btn_cancelar],
+                        boton_principal_modal=btn_confirmar,
+                        texto_original_modal=texto_btn_prev,
+                    )
             except (tk.TclError, ValueError) as err:
                 messagebox.showerror("Error", f"Error en los datos ingresados: {err}", parent=ventana)
 
@@ -2925,6 +3086,8 @@ class App:
         tk.Radiobutton(frame_metodos, text="💳 Transferencia", variable=metodo_var, value="Transferencia",
                        bg=t_p["bg_app"], fg=t_p["text_main"], selectcolor=t_p["bg_surface_alt"], activebackground=t_p["bg_app"], activeforeground=t_p["text_main"], font=("Segoe UI", 11)).pack(anchor="w", pady=2)
         tk.Radiobutton(frame_metodos, text="📝 Fiado (Crédito)", variable=metodo_var, value="Fiado",
+                       bg=t_p["bg_app"], fg=t_p["text_main"], selectcolor=t_p["bg_surface_alt"], activebackground=t_p["bg_app"], activeforeground=t_p["text_main"], font=("Segoe UI", 11)).pack(anchor="w", pady=2)
+        tk.Radiobutton(frame_metodos, text="🔀 Pago combinado / Pago mixto", variable=metodo_var, value="Mixto",
                        bg=t_p["bg_app"], fg=t_p["text_main"], selectcolor=t_p["bg_surface_alt"], activebackground=t_p["bg_app"], activeforeground=t_p["text_main"], font=("Segoe UI", 11)).pack(anchor="w", pady=2)
 
         frame_dinamico = tk.Frame(body_p, bg=t_p["bg_surface"], bd=1, relief="solid", padx=10, pady=10)
@@ -2989,13 +3152,22 @@ class App:
 
             lbl_cc_cli.config(text=f"👤 {c_info.get('nombre')} | Doc: {doc or '—'} | Tel: {c_info.get('telefono') or '—'}")
             lbl_cc_limites.config(text=f"Límite Total: ${lim:,.0f} COP | Saldo Pendiente: ${saldo:,.0f} COP")
+            
+            # Monto evaluado para crédito (total venta si es Fiado, o monto_fiado si es Mixto)
+            monto_evaluar = total_val
+            if metodo_var.get() == "Mixto" and 'entry_mix_fiado' in locals():
+                try:
+                    monto_evaluar = float(entry_mix_fiado.get_value())
+                except Exception:
+                    monto_evaluar = total_val
+
             lbl_cc_cupo.config(
                 text=f"Cupo Disponible: {cupo_str}",
-                fg=t_p["btn_success_bg"] if (lim == 0 or cupo >= total_val) else t_p["btn_danger_bg"],
+                fg=t_p["btn_success_bg"] if (lim == 0 or cupo >= monto_evaluar) else t_p["btn_danger_bg"],
             )
 
-            if lim > 0 and (saldo + total_val > lim):
-                exceso = (saldo + total_val) - lim
+            if lim > 0 and (saldo + monto_evaluar > lim):
+                exceso = (saldo + monto_evaluar) - lim
                 lbl_cc_alerta.config(text=f"⚠️ VENTA SUPERA EL LÍMITE POR ${exceso:,.0f} COP", fg="#DC2626")
                 btn_confirmar.config(text="⚠️ Autorizar y Confirmar")
             else:
@@ -3003,6 +3175,149 @@ class App:
                 btn_confirmar.config(text="✅ Confirmar Venta")
 
         combo_clientes.bind("<<ComboboxSelected>>", al_seleccionar_cliente)
+
+        # Widgets de Pago Mixto
+        frame_mixto = tk.Frame(frame_dinamico, bg=t_p["bg_surface"])
+        
+        lbl_mix_info = tk.Label(frame_mixto, text=f"Distribución del Total a Pagar ({self.formato_peso(total_val)}):",
+                                font=("Segoe UI", 10, "bold"), bg=t_p["bg_surface"], fg=t_p["text_main"])
+        lbl_mix_info.pack(anchor="w", pady=(2, 6))
+
+        f_mix_inputs = tk.Frame(frame_mixto, bg=t_p["bg_surface"])
+        f_mix_inputs.pack(fill="x", pady=2)
+
+        def _on_mix_change(val=None):
+            try:
+                ef = float(entry_mix_efectivo.get_value())
+                tr = float(entry_mix_transf.get_value())
+                fi = float(entry_mix_fiado.get_value())
+                suma = round(ef + tr + fi, 2)
+                lbl_mix_sum.config(text=f"Cubierto: ${suma:,.0f} COP de ${total_val:,.0f} COP")
+
+                if abs(suma - total_val) < 0.01:
+                    lbl_mix_status.config(text="✅ Total cubierto al 100%", fg="#059669")
+                    btn_confirmar.config(text="✅ Confirmar Venta")
+                elif suma < total_val:
+                    dif = total_val - suma
+                    lbl_mix_status.config(text=f"⚠️ Faltan ${dif:,.0f} COP por distribuir", fg="#DC2626")
+                else:
+                    dif = suma - total_val
+                    lbl_mix_status.config(text=f"⚠️ Exceso de ${dif:,.0f} COP", fg="#DC2626")
+
+                if fi > 0:
+                    lbl_fiado.pack(in_=frame_mixto, pady=(6, 2))
+                    combo_clientes.pack(in_=frame_mixto, pady=(2, 4))
+                    card_credito.pack(in_=frame_mixto, fill="x", pady=4)
+                    _cargar_clientes_fiado()
+                    al_seleccionar_cliente()
+                else:
+                    lbl_fiado.pack_forget()
+                    combo_clientes.pack_forget()
+                    card_credito.pack_forget()
+            except Exception:
+                pass
+
+        # Fila Efectivo
+        tk.Label(f_mix_inputs, text="💵 Efectivo:", font=("Segoe UI", 9, "bold"), bg=t_p["bg_surface"], fg=t_p["text_main"]).grid(row=0, column=0, sticky="w", pady=3)
+        entry_mix_efectivo = CurrencyEntry(
+            f_mix_inputs, initial_value=0, show_symbol=True, on_change=_on_mix_change,
+            font=("Segoe UI", 10, "bold"), width=16, bg=t_p["input_bg"], fg=t_p["input_fg"],
+            insertbackground=t_p["input_insert"], relief="solid", bd=1
+        )
+        entry_mix_efectivo.grid(row=0, column=1, sticky="w", padx=(10, 0), pady=3)
+
+        # Fila Transferencia
+        tk.Label(f_mix_inputs, text="💳 Transferencia:", font=("Segoe UI", 9, "bold"), bg=t_p["bg_surface"], fg=t_p["text_main"]).grid(row=1, column=0, sticky="w", pady=3)
+        entry_mix_transf = CurrencyEntry(
+            f_mix_inputs, initial_value=0, show_symbol=True, on_change=_on_mix_change,
+            font=("Segoe UI", 10, "bold"), width=16, bg=t_p["input_bg"], fg=t_p["input_fg"],
+            insertbackground=t_p["input_insert"], relief="solid", bd=1
+        )
+        entry_mix_transf.grid(row=1, column=1, sticky="w", padx=(10, 0), pady=3)
+
+        # Fila Fiado
+        tk.Label(f_mix_inputs, text="📝 Fiado (Crédito):", font=("Segoe UI", 9, "bold"), bg=t_p["bg_surface"], fg=t_p["text_main"]).grid(row=2, column=0, sticky="w", pady=3)
+        entry_mix_fiado = CurrencyEntry(
+            f_mix_inputs, initial_value=0, show_symbol=True, on_change=_on_mix_change,
+            font=("Segoe UI", 10, "bold"), width=16, bg=t_p["input_bg"], fg=t_p["input_fg"],
+            insertbackground=t_p["input_insert"], relief="solid", bd=1
+        )
+        entry_mix_fiado.grid(row=2, column=1, sticky="w", padx=(10, 0), pady=3)
+
+        lbl_mix_sum = tk.Label(frame_mixto, text=f"Cubierto: $0 COP de ${total_val:,.0f} COP", font=("Segoe UI", 10, "bold"), bg=t_p["bg_surface"], fg=t_p["text_main"])
+        lbl_mix_sum.pack(anchor="w", pady=(4, 2))
+
+        lbl_mix_status = tk.Label(frame_mixto, text=f"⚠️ Faltan ${total_val:,.0f} COP por distribuir", font=("Segoe UI", 10, "bold"), bg=t_p["bg_surface"], fg="#DC2626")
+        lbl_mix_status.pack(anchor="w", pady=(0, 4))
+
+        def _cargar_clientes_fiado():
+            if clientes_fiado_map:
+                return
+            valores_fiado = []
+            doc_previo = self.documento.get().strip()
+            idx_preseleccion = 0
+
+            # Consultar Servidor Central (/clientes)
+            try:
+                resp = api.get("/clientes") if api else None
+                if resp and resp.status_code == 200:
+                    clientes_api = resp.json()
+                    for c in clientes_api:
+                        est = str(c.get("estado", "Activo") or "Activo").lower()
+                        permite = c.get("permite_fiado") in (True, 1, "1", "true", "True", "t", "T")
+                        if est != "inactivo" and permite:
+                            cid = str(c.get("id"))
+                            doc = str(c.get("documento") or c.get("cedula") or "").strip()
+                            nom = str(c.get("nombre") or "").strip()
+                            lim = float(c.get("limite_credito") or 0.0)
+                            sal = float(c.get("deuda_total") or c.get("saldo_pendiente") or 0.0)
+                            tel = str(c.get("telefono") or "").strip()
+                            clientes_fiado_map[cid] = {
+                                "id": cid,
+                                "nombre": nom,
+                                "documento": doc,
+                                "limite_credito": lim,
+                                "saldo_pendiente": sal,
+                                "telefono": tel,
+                                "permite_fiado": permite,
+                            }
+                            etiqueta = f"{cid} - {nom} ({doc or 'Sin Doc'})"
+                            if (doc_previo and doc == doc_previo) or (
+                                self.cliente_id_seleccionado and str(self.cliente_id_seleccionado) == cid
+                            ):
+                                idx_preseleccion = len(valores_fiado)
+                            valores_fiado.append(etiqueta)
+            except Exception as e_api:
+                print(f"Error consultando clientes Fiado en servidor central: {e_api}")
+
+            if not valores_fiado:
+                try:
+                    from interface.database_manager import conectar_db
+                    c_loc = conectar_db()
+                    cur_loc = c_loc.cursor()
+                    cur_loc.execute("SELECT id, cedula, nombre, limite_credito, saldo_pendiente, telefono FROM clientes WHERE permite_fiado = 1 AND estado != 'Inactivo'")
+                    for r in cur_loc.fetchall():
+                        cid = str(r[0])
+                        doc = str(r[1] or "")
+                        nom = str(r[2] or "")
+                        lim = float(r[3] or 0.0)
+                        sal = float(r[4] or 0.0)
+                        tel = str(r[5] or "")
+                        clientes_fiado_map[cid] = {"id": cid, "nombre": nom, "documento": doc, "limite_credito": lim, "saldo_pendiente": sal, "telefono": tel, "permite_fiado": True}
+                        valores_fiado.append(f"{cid} - {nom} ({doc or 'Sin Doc'})")
+                    c_loc.close()
+                except Exception:
+                    pass
+
+            combo_clientes["values"] = valores_fiado
+            if valores_fiado:
+                combo_clientes.current(idx_preseleccion)
+                al_seleccionar_cliente()
+            else:
+                lbl_cc_cli.config(text="No hay clientes habilitados para fiado.")
+                lbl_cc_limites.config(text="Cree o autorice clientes con crédito en el módulo Clientes y Fiado.")
+                lbl_cc_cupo.config(text="")
+                lbl_cc_alerta.config(text="")
 
         def actualizar_vista(*args):
             if getattr(self, "_registrando_venta", False):
@@ -3018,59 +3333,11 @@ class App:
                 lbl_cambio.pack(pady=(4, 2))
                 entry_efectivo.focus()
             elif metodo == "Fiado":
-                lbl_fiado.pack(pady=(4, 2))
-                combo_clientes.pack(pady=(2, 6))
-                card_credito.pack(fill="x", pady=6)
-
-                clientes_fiado_map.clear()
-                valores_fiado = []
-                doc_previo = self.documento.get().strip()
-                idx_preseleccion = 0
-
-                # Consultar exclusivamente al Servidor Central (/clientes)
-                try:
-                    resp = api.get("/clientes")
-                    if resp.status_code == 200:
-                        clientes_api = resp.json()
-                        for c in clientes_api:
-                            est = str(c.get("estado", "Activo") or "Activo").lower()
-                            permite = c.get("permite_fiado") in (True, 1, "1", "true", "True", "t", "T")
-                            if est != "inactivo" and permite:
-                                cid = str(c.get("id"))
-                                doc = str(c.get("documento") or c.get("cedula") or "").strip()
-                                nom = str(c.get("nombre") or "").strip()
-                                lim = float(c.get("limite_credito") or 0.0)
-                                sal = float(c.get("deuda_total") or c.get("saldo_pendiente") or 0.0)
-                                tel = str(c.get("telefono") or "").strip()
-                                clientes_fiado_map[cid] = {
-                                    "id": cid,
-                                    "nombre": nom,
-                                    "documento": doc,
-                                    "limite_credito": lim,
-                                    "saldo_pendiente": sal,
-                                    "telefono": tel,
-                                    "permite_fiado": permite,
-                                }
-                                etiqueta = f"{cid} - {nom} ({doc or 'Sin Doc'})"
-                                if (doc_previo and doc == doc_previo) or (
-                                    self.cliente_id_seleccionado and str(self.cliente_id_seleccionado) == cid
-                                ):
-                                    idx_preseleccion = len(valores_fiado)
-                                valores_fiado.append(etiqueta)
-                    else:
-                        lbl_cc_cli.config(text="⚠️ Error consultando clientes en el servidor central.")
-                except Exception as e_api:
-                    print(f"Error consultando clientes Fiado en servidor central: {e_api}")
-
-                combo_clientes["values"] = valores_fiado
-                if valores_fiado:
-                    combo_clientes.current(idx_preseleccion)
-                    al_seleccionar_cliente()
-                else:
-                    lbl_cc_cli.config(text="No hay clientes habilitados para fiado en el servidor central.")
-                    lbl_cc_limites.config(text="Cree o autorice clientes con crédito en el módulo Clientes y Fiado.")
-                    lbl_cc_cupo.config(text="")
-                    lbl_cc_alerta.config(text="")
+                lbl_fiado.pack(in_=frame_dinamico, pady=(4, 2))
+                combo_clientes.pack(in_=frame_dinamico, pady=(2, 6))
+                card_credito.pack(in_=frame_dinamico, fill="x", pady=6)
+                _cargar_clientes_fiado()
+                al_seleccionar_cliente()
             elif metodo == "Transferencia":
                 tk.Label(
                     frame_dinamico,
@@ -3079,6 +3346,12 @@ class App:
                     bg="#FFE4E1",
                     fg="#2D3436",
                 ).pack(pady=15)
+            elif metodo == "Mixto":
+                frame_mixto.pack(fill="both", expand=True)
+                entry_mix_efectivo.set_value(total_val)
+                entry_mix_transf.set_value(0)
+                entry_mix_fiado.set_value(0)
+                _on_mix_change()
 
         metodo_var.trace_add("write", actualizar_vista)
         actualizar_vista()
@@ -3229,6 +3502,7 @@ class App:
         texto_original_modal="Confirmar Venta",
         on_error_restore=None,
         ejecutar_sincrono=False,
+        pagos=None,
     ):
         """
         Procesa la venta exclusivamente contra la API Central de forma asíncrona, no bloqueante e idempotente.
@@ -3394,17 +3668,18 @@ class App:
 
             def _ejecutar_peticion_http():
                 term_id = api.sincronizar_terminal_id() or api.terminal_id or 1
+                pagos_a_enviar = pagos if (pagos and len(pagos) > 0) else [
+                    {
+                        "metodo": metodo_pago,
+                        "monto": total,
+                        "recibido": recibido_payload,
+                        "cambio": cambio_payload,
+                    }
+                ]
                 if orden_id_actual:
                     cobro_payload = {
                         "idempotency_key": idem_key,
-                        "pagos": [
-                            {
-                                "metodo": metodo_pago,
-                                "monto": total,
-                                "recibido": recibido_payload,
-                                "cambio": cambio_payload,
-                            }
-                        ],
+                        "pagos": pagos_a_enviar,
                         "cliente_id": cliente_id_val,
                         "cliente_documento": doc_cli if doc_cli else None,
                         "autorizado_exceso_credito": autorizado_exceso,
@@ -3420,14 +3695,7 @@ class App:
                         "subtotal": total,
                         "descuento": 0.0,
                         "total": total,
-                        "pagos": [
-                            {
-                                "metodo": metodo_pago,
-                                "monto": total,
-                                "recibido": recibido_payload,
-                                "cambio": cambio_payload,
-                            }
-                        ],
+                        "pagos": pagos_a_enviar,
                         "detalles": detalles_payload,
                         "autorizado_exceso_credito": autorizado_exceso,
                         "snapshot_negocio": snapshot_actual,
@@ -3498,7 +3766,8 @@ class App:
                             recibido=recibido_payload,
                             cambio=cambio_payload,
                             numero_factura=numero_factura,
-                            snapshot_negocio=snapshot_actual
+                            snapshot_negocio=snapshot_actual,
+                            pagos=pagos
                         )
                     except Exception as e_sq:
                         print(f"Aviso en persistencia local SQLite de venta #{id_central}: {e_sq}")

@@ -356,3 +356,68 @@ async def health_check(db: AsyncSession = Depends(get_db)):
 @app.get("/")
 async def root():
     return {"app": settings.APP_NAME, "version": settings.APP_VERSION, "status": "ok"}
+
+
+from fastapi.responses import FileResponse, HTMLResponse
+
+
+@app.get("/descargar", response_class=HTMLResponse)
+async def pagina_descargas():
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Centro de Descargas VmPOS</title>
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0F172A; color: #F8FAFC; text-align: center; padding: 40px 20px; }
+            .card { background: #1E293B; border-radius: 12px; max-width: 550px; margin: 0 auto; padding: 30px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }
+            h1 { color: #38BDF8; margin-bottom: 8px; font-size: 24px; }
+            p { color: #94A3B8; margin-bottom: 25px; font-size: 14px; }
+            .btn { display: block; background: #0284C7; color: white; text-decoration: none; padding: 14px 20px; border-radius: 8px; margin: 12px 0; font-weight: bold; font-size: 15px; transition: background 0.2s; }
+            .btn:hover { background: #0369A1; }
+            .btn-sec { background: #334155; color: #E2E8F0; }
+            .btn-sec:hover { background: #475569; }
+            .badge { font-size: 12px; background: rgba(255,255,255,0.2); padding: 2px 8px; border-radius: 10px; margin-left: 6px; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>🚀 Descargas VmPOS (v4.1.0)</h1>
+            <p>Selecciona tu sistema operativo para descargar el instalador directo.</p>
+            <a class="btn" href="/descargar/windows">🪟 Descargar Instalador Windows (.exe) <span class="badge">61.7 MB</span></a>
+            <a class="btn btn-sec" href="/descargar/windows-portable">📦 Descargar Windows Portátil (.zip) <span class="badge">68.3 MB</span></a>
+            <a class="btn" style="background:#0F766E;" href="/descargar/mac">🍏 Descargar Instalador macOS (.dmg) <span class="badge">76.1 MB</span></a>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+
+@app.get("/descargar/windows")
+async def descargar_windows():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, "dist", "VmPOS_Setup_v4.1.0.exe")
+    if os.path.exists(path):
+        return FileResponse(path, filename="VmPOS_Setup_v4.1.0.exe", media_type="application/vnd.microsoft.portable-executable")
+    raise HTTPException(status_code=404, detail="Instalador de Windows no encontrado")
+
+
+@app.get("/descargar/windows-portable")
+async def descargar_windows_portable():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, "dist", "VmPOS_Windows_Portable.zip")
+    if os.path.exists(path):
+        return FileResponse(path, filename="VmPOS_Windows_Portable.zip", media_type="application/zip")
+    raise HTTPException(status_code=404, detail="Paquete Windows portátil no encontrado")
+
+
+@app.get("/descargar/mac")
+async def descargar_mac():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, "dist", "VmPOS_macOS_Instalador.dmg")
+    if os.path.exists(path):
+        return FileResponse(path, filename="VmPOS_macOS_Instalador.dmg", media_type="application/x-apple-diskimage")
+    raise HTTPException(status_code=404, detail="Instalador macOS no encontrado")

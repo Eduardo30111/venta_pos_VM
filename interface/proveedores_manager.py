@@ -72,21 +72,47 @@ def recalcular_saldo_proveedor(proveedor_id: int, conn: Optional[sqlite3.Connect
 
     try:
         cur = conn.cursor()
-        # Sumar saldos de cuentas por pagar no anuladas
+        # Obtener nombre y datos actuales del proveedor
+        cur.execute("SELECT id, nombre, COALESCE(saldo_acumulado, 0.0) FROM proveedores WHERE id = ?", (proveedor_id,))
+        p_row = cur.fetchone()
+        p_nom = str(p_row[1]).strip() if p_row and p_row[1] else ""
+
+        # Sumar saldos de cuentas por pagar no anuladas con coincidencia flexible de ID y nombre
         cur.execute("""
             SELECT 
-                COALESCE(SUM(precio_venta), 0.0),
-                COALESCE(SUM(monto_comision), 0.0),
-                COALESCE(SUM(monto_pagado), 0.0),
-                COALESCE(SUM(saldo_pendiente), 0.0)
+                COUNT(id),
+                COALESCE(SUM(CASE WHEN estado != 'Anulada' THEN precio_venta ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN estado != 'Anulada' THEN monto_comision ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN estado != 'Anulada' THEN monto_pagado ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN estado != 'Anulada' THEN saldo_pendiente ELSE 0.0 END), 0.0)
             FROM cuentas_por_pagar_proveedores
-            WHERE proveedor_id = ? AND estado != 'Anulada'
-        """, (proveedor_id,))
+            WHERE (proveedor_id = ? OR CAST(proveedor_id AS TEXT) = ? OR CAST(proveedor_id AS TEXT) LIKE ? OR ((proveedor_id IS NULL OR proveedor_id = 0 OR proveedor_id = '') AND LOWER(proveedor_nombre) = LOWER(?)))
+        """, (proveedor_id, str(proveedor_id), f"{proveedor_id} - %", p_nom))
         row = cur.fetchone()
-        tot_v = float(row[0] or 0.0)
-        tot_c = float(row[1] or 0.0)
-        tot_p = float(row[2] or 0.0)
-        saldo_p = float(row[3] or 0.0)
+        conteo_cxp = row[0] or 0
+        tot_v = float(row[1] or 0.0)
+        tot_c = float(row[2] or 0.0)
+        tot_p = float(row[3] or 0.0)
+        saldo_p = float(row[4] or 0.0)
+
+        # Si no hay cuentas por pagar registradas pero la API del servidor reporta saldo acumulado, tomar el saldo del servidor
+        if conteo_cxp == 0 and api is not None:
+            try:
+                resp = api.get(f"/proveedores/{proveedor_id}", timeout=3.0)
+                if resp.status_code == 200:
+                    d_api = resp.json()
+                    s_api = float(d_api.get("saldo_acumulado") or d_api.get("saldo_pendiente") or 0.0)
+                    if s_api > saldo_p:
+                        saldo_p = s_api
+                        tot_v = max(tot_v, float(d_api.get("total_ventas") or 0.0))
+                        tot_c = max(tot_c, float(d_api.get("total_comisiones") or 0.0))
+                        tot_p = max(tot_p, float(d_api.get("total_pagado") or 0.0))
+            except Exception:
+                pass
+
+        # Si el proveedor no tiene cuentas por pagar registradas pero ya tenía saldo acumulado previo (saldo legacy), conservarlo
+        if conteo_cxp == 0 and p_row and float(p_row[2] or 0.0) > 0:
+            saldo_p = float(p_row[2])
 
         # Actualizar tabla proveedores
         cur.execute("""
@@ -158,7 +184,7 @@ def registrar_cxp_servicio_venta(
             cur.execute("""
                 SELECT p.tipo_producto, p.proveedor_id, COALESCE(p.porcentaje_comision, 0.0), prov.nombre, COALESCE(p.costo, 0.0)
                 FROM productos p
-                LEFT JOIN proveedores prov ON p.proveedor_id = prov.id
+                LEFT JOIN proveedores prov ON (prov.id = p.proveedor_id OR prov.id = CAST(p.proveedor_id AS INTEGER))
                 WHERE p.id = ?
             """, (item_id,))
             p_row = cur.fetchone()
@@ -167,7 +193,7 @@ def registrar_cxp_servicio_venta(
             cur.execute("""
                 SELECT p.tipo_producto, p.proveedor_id, COALESCE(p.porcentaje_comision, 0.0), prov.nombre, COALESCE(p.costo, 0.0)
                 FROM productos p
-                LEFT JOIN proveedores prov ON p.proveedor_id = prov.id
+                LEFT JOIN proveedores prov ON (prov.id = p.proveedor_id OR prov.id = CAST(p.proveedor_id AS INTEGER))
                 WHERE p.codigo = ? OR p.codigo = ? OR p.codigo_barras = ?
             """, (cod, cod.zfill(5), cod))
             p_row = cur.fetchone()
@@ -176,7 +202,7 @@ def registrar_cxp_servicio_venta(
             cur.execute("""
                 SELECT p.tipo_producto, p.proveedor_id, COALESCE(p.porcentaje_comision, 0.0), prov.nombre, COALESCE(p.costo, 0.0)
                 FROM productos p
-                LEFT JOIN proveedores prov ON p.proveedor_id = prov.id
+                LEFT JOIN proveedores prov ON (prov.id = p.proveedor_id OR prov.id = CAST(p.proveedor_id AS INTEGER))
                 WHERE LOWER(p.nombre) = LOWER(?)
             """, (nom,))
             p_row = cur.fetchone()
@@ -186,7 +212,7 @@ def registrar_cxp_servicio_venta(
             raw_prov = detalle_item.get("proveedor_id")
             if raw_prov:
                 try:
-                    prov_id = int(str(raw_prov).strip())
+                    prov_id = int(str(raw_prov).split('-')[0].strip())
                     costo_p = float(detalle_item.get("costo_unitario") or detalle_item.get("costo") or 0.0)
                     pct_p = float(detalle_item.get("porcentaje_comision") or 0.0)
                     cur.execute("SELECT nombre FROM proveedores WHERE id = ?", (prov_id,))
@@ -200,7 +226,13 @@ def registrar_cxp_servicio_venta(
             return None
 
         tipo_prod = str(p_row[0] or "Fisico").strip() if p_row else str(detalle_item.get("tipo_item") or "Fisico")
-        prov_id = p_row[1] if p_row else None
+        prov_id_raw = p_row[1] if p_row else None
+        prov_id = None
+        if prov_id_raw is not None:
+            try:
+                prov_id = int(str(prov_id_raw).split('-')[0].strip())
+            except Exception:
+                prov_id = None
         porcentaje_com = float(p_row[2] or 0.0) if p_row else 0.0
         prov_nom = str(p_row[3] or "").strip() if p_row else ""
         costo_prod = float(p_row[4] or 0.0) if p_row else 0.0
@@ -209,9 +241,8 @@ def registrar_cxp_servicio_venta(
         if (not prov_id or prov_id <= 0) and detalle_item.get("proveedor_id"):
             try:
                 raw_prov = detalle_item.get("proveedor_id")
-                if raw_prov and str(raw_prov).strip().isdigit() and int(str(raw_prov).strip()) > 0:
-                    prov_id = int(str(raw_prov).strip())
-            except (ValueError, TypeError):
+                prov_id = int(str(raw_prov).split('-')[0].strip())
+            except (ValueError, TypeError, Exception):
                 prov_id = None
 
         if porcentaje_com <= 0 and detalle_item.get("porcentaje_comision"):
@@ -580,8 +611,8 @@ def sincronizar_cxp_retroactivas(conn: Optional[sqlite3.Connection] = None) -> D
                 COALESCE(p.porcentaje_comision, 0.0)
             FROM detalle_ventas dv
             JOIN ventas v ON dv.{col_id_v} = v.id_venta
-            LEFT JOIN productos p ON (p.codigo = dv.{col_cod} OR p.nombre = dv.{col_nom})
-            JOIN proveedores pr ON pr.id = p.proveedor_id
+            LEFT JOIN productos p ON (LOWER(p.codigo) = LOWER(dv.{col_cod}) OR LOWER(p.nombre) = LOWER(dv.{col_nom}))
+            LEFT JOIN proveedores pr ON (pr.id = p.proveedor_id OR pr.id = CAST(p.proveedor_id AS INTEGER) OR LOWER(pr.nombre) = LOWER(p.proveedor_id))
             WHERE p.proveedor_id IS NOT NULL
               AND p.proveedor_id != ''
               AND NOT EXISTS (
@@ -612,7 +643,7 @@ def sincronizar_cxp_retroactivas(conn: Optional[sqlite3.Connection] = None) -> D
             pct_com = float(r[12] or 0.0)
 
             try:
-                prov_id = int(str(prov_id_raw).strip())
+                prov_id = int(str(prov_id_raw).split("-")[0].strip())
             except Exception:
                 continue
 
@@ -870,7 +901,47 @@ def obtener_detalle_cuentas_proveedor(
     """
     Retorna el desglose de todas las ventas de servicios vinculadas a un proveedor específico.
     Permite auditar fecha, referencia de venta, servicio, precio real, comisión y saldo restante.
+    Combina registros del servidor central con los de SQLite local para garantizar que nunca
+    aparezca en blanco si existen ventas o deudas registradas en cualquiera de los dos orígenes.
     """
+    items_api = []
+    if conn is None and api is not None:
+        try:
+            params = {}
+            if solo_pendientes:
+                params["estado"] = "Pendiente"
+            resp = api.get(f"/proveedores/{proveedor_id}/cxp", params=params, timeout=5.0)
+            if resp.status_code == 200:
+                raw_cxp = resp.json()
+                for c in raw_cxp:
+                    m_pagar = float(c.get("monto_por_pagar") or c.get("monto_proveedor") or c.get("monto") or 0.0)
+                    m_pagado = float(c.get("monto_pagado") or 0.0)
+                    s_pend = float(c.get("saldo_pendiente") if c.get("saldo_pendiente") is not None else max(0.0, m_pagar - m_pagado))
+                    if solo_pendientes and s_pend <= 0.009:
+                        continue
+                    items_api.append({
+                        "id": c.get("id"),
+                        "proveedor_id": c.get("proveedor_id"),
+                        "proveedor_nombre": c.get("proveedor_nombre", ""),
+                        "id_venta": c.get("id_venta") or c.get("venta_id"),
+                        "numero_venta": c.get("numero_venta") or (f"V-{c.get('id_venta') or c.get('venta_id') or 0:05d}"),
+                        "codigo_servicio": c.get("codigo_servicio", ""),
+                        "nombre_servicio": c.get("nombre_servicio") or c.get("concepto") or "Artículo",
+                        "precio_venta": float(c.get("precio_venta") or 0.0),
+                        "porcentaje_comision": float(c.get("porcentaje_comision") or 0.0),
+                        "monto_comision": float(c.get("monto_comision") or 0.0),
+                        "monto_por_pagar": m_pagar,
+                        "monto_pagado": m_pagado,
+                        "saldo_pendiente": s_pend,
+                        "estado": c.get("estado", "Pendiente"),
+                        "fecha": c.get("fecha") or c.get("fecha_venta", ""),
+                        "fecha_venta": c.get("fecha_venta") or c.get("fecha", ""),
+                        "hora": c.get("hora", ""),
+                        "usuario": c.get("usuario", "Administrador")
+                    })
+        except Exception as e_api:
+            print(f"Aviso consultando CXP vía API: {e_api}")
+
     cerrar_conn = False
     if conn is None:
         conn = conectar_db()
@@ -884,6 +955,12 @@ def obtener_detalle_cuentas_proveedor(
 
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
+
+        # Obtener nombre de proveedor para coincidencia flexible
+        cur.execute("SELECT nombre FROM proveedores WHERE id = ?", (proveedor_id,))
+        p_row = cur.fetchone()
+        p_nom = str(p_row[0]).strip() if p_row and p_row[0] else ""
+
         query = """
             SELECT 
                 id, proveedor_id, proveedor_nombre, id_venta, numero_venta,
@@ -891,16 +968,38 @@ def obtener_detalle_cuentas_proveedor(
                 monto_comision, monto_por_pagar, monto_pagado, saldo_pendiente,
                 estado, fecha, hora, usuario
             FROM cuentas_por_pagar_proveedores
-            WHERE proveedor_id = ?
+            WHERE (proveedor_id = ? OR CAST(proveedor_id AS TEXT) = ? OR CAST(proveedor_id AS TEXT) LIKE ? OR ((proveedor_id IS NULL OR proveedor_id = 0 OR proveedor_id = '') AND LOWER(proveedor_nombre) = LOWER(?)))
         """
-        params = [proveedor_id]
+        params = [proveedor_id, str(proveedor_id), f"{proveedor_id} - %", p_nom]
         if solo_pendientes:
             query += " AND estado = 'Pendiente' AND saldo_pendiente > 0"
         query += " ORDER BY id DESC"
         cur.execute(query, params)
         rows = cur.fetchall()
-        return [dict(r) for r in rows]
+        items_locales = [dict(r) for r in rows]
+
+        if not items_api:
+            return items_locales
+
+        # Fusionar items_api con items_locales evitando duplicados por (id_venta, codigo_servicio)
+        claves_api = set()
+        for it in items_api:
+            v_ref = str(it.get("id_venta") or it.get("numero_venta") or "")
+            c_ref = str(it.get("codigo_servicio") or it.get("nombre_servicio") or "").lower()
+            if v_ref:
+                claves_api.add((v_ref, c_ref))
+
+        resultado = list(items_api)
+        for loc in items_locales:
+            v_ref = str(loc.get("id_venta") or loc.get("numero_venta") or "")
+            c_ref = str(loc.get("codigo_servicio") or loc.get("nombre_servicio") or "").lower()
+            if (v_ref, c_ref) not in claves_api:
+                resultado.append(loc)
+
+        return resultado
     finally:
+        if cerrar_conn and conn:
+            conn.close()
         if cerrar_conn and conn:
             conn.close()
 
@@ -914,6 +1013,39 @@ def obtener_historial_liquidaciones_proveedor(
     Retorna el historial inmutable de pagos y liquidaciones realizadas a proveedores.
     Este historial se conserva de forma permanente aun cuando el saldo del proveedor llegue a $0.
     """
+    if conn is None and api is not None and proveedor_id:
+        try:
+            resp = api.get(f"/proveedores/{proveedor_id}/liquidaciones", timeout=5.0)
+            if resp.status_code == 200:
+                raw_l = resp.json()
+                items = []
+                for l in raw_l:
+                    f_val = l.get("fecha") or ""
+                    m_a = f_val[:7] if len(f_val) >= 7 else ""
+                    if mes_anio and mes_anio != "Todos" and m_a != mes_anio:
+                        continue
+                    items.append({
+                        "id": l.get("id"),
+                        "numero_recibo": l.get("numero_recibo") or f"LQ-{l.get('id', 0):05d}",
+                        "proveedor_id": l.get("proveedor_id"),
+                        "proveedor_nombre": l.get("proveedor_nombre", ""),
+                        "monto_liquidado": float(l.get("monto_pagado") or l.get("monto_liquidado") or 0.0),
+                        "saldo_anterior": float(l.get("saldo_anterior") or 0.0),
+                        "saldo_restante": float(l.get("saldo_restante") or 0.0),
+                        "tipo_pago": l.get("tipo_pago", "Total"),
+                        "metodo_pago": l.get("metodo_pago", "Efectivo"),
+                        "referencia": l.get("comprobante") or l.get("referencia") or "",
+                        "fecha": f_val,
+                        "hora": l.get("hora", ""),
+                        "mes_anio": m_a,
+                        "usuario": l.get("usuario", "Administrador"),
+                        "observaciones": l.get("observaciones", ""),
+                        "estado": l.get("estado", "Completado")
+                    })
+                return items
+        except Exception as e_api:
+            print(f"Aviso consultando liquidaciones vía API: {e_api}")
+
     cerrar_conn = False
     if conn is None:
         conn = conectar_db()
@@ -938,8 +1070,8 @@ def obtener_historial_liquidaciones_proveedor(
         """
         params = []
         if proveedor_id:
-            query += " AND proveedor_id = ?"
-            params.append(proveedor_id)
+            query += " AND (proveedor_id = ? OR CAST(proveedor_id AS TEXT) = ?)"
+            params.extend([proveedor_id, str(proveedor_id)])
         if mes_anio and mes_anio != "Todos":
             query += " AND mes_anio = ?"
             params.append(mes_anio)
@@ -951,6 +1083,49 @@ def obtener_historial_liquidaciones_proveedor(
     finally:
         if cerrar_conn and conn:
             conn.close()
+
+
+def _sincronizar_liquidacion_local_sqlite(cur, proveedor_id: int, monto_flt: float, metodo_pago: str, referencia: str, usuario: str, observaciones: str, numero_recibo: str):
+    """Aplica el impacto de una liquidación procesada en servidor dentro de la base de datos local SQLite."""
+    try:
+        cur.execute("SELECT id, nombre, COALESCE(saldo_acumulado, 0.0) FROM proveedores WHERE id = ?", (proveedor_id,))
+        p_r = cur.fetchone()
+        prov_nom = p_r[1] if p_r else "Proveedor"
+
+        cur.execute("""
+            SELECT id, monto_por_pagar, monto_pagado, saldo_pendiente
+            FROM cuentas_por_pagar_proveedores
+            WHERE (proveedor_id = ? OR CAST(proveedor_id AS TEXT) = ? OR CAST(proveedor_id AS TEXT) LIKE ? OR ((proveedor_id IS NULL OR proveedor_id = 0 OR proveedor_id = '') AND LOWER(proveedor_nombre) = LOWER(?)))
+              AND estado != 'Pagada' AND estado != 'Anulada'
+            ORDER BY id ASC
+        """, (proveedor_id, str(proveedor_id), f"{proveedor_id} - %", prov_nom))
+        cuentas = cur.fetchall()
+
+        remanente = monto_flt
+        for c_id, c_tot, c_pag, c_saldo in cuentas:
+            if remanente <= 0.001:
+                break
+            ab = min(remanente, float(c_saldo))
+            n_pag = round(float(c_pag) + ab, 2)
+            n_sal = round(float(c_saldo) - ab, 2)
+            n_est = "Pagada" if n_sal <= 0.009 else "Abonada"
+            cur.execute("UPDATE cuentas_por_pagar_proveedores SET monto_pagado = ?, saldo_pendiente = ?, estado = ? WHERE id = ?", (n_pag, n_sal, n_est, c_id))
+            remanente = round(remanente - ab, 2)
+
+        ahora = datetime.now()
+        f_s = ahora.strftime("%Y-%m-%d")
+        h_s = ahora.strftime("%H:%M:%S")
+        m_a = ahora.strftime("%m-%Y")
+
+        cur.execute("""
+            INSERT OR IGNORE INTO liquidaciones_proveedores (
+                numero_recibo, proveedor_id, proveedor_nombre, monto_liquidado,
+                saldo_anterior, saldo_restante, tipo_pago, metodo_pago, referencia,
+                fecha, hora, mes_anio, usuario, observaciones, estado
+            ) VALUES (?, ?, ?, ?, 0.0, 0.0, 'Total', ?, ?, ?, ?, ?, ?, ?, 'Aplicada')
+        """, (numero_recibo, proveedor_id, prov_nom, monto_flt, metodo_pago, referencia, f_s, h_s, m_a, usuario, observaciones))
+    except Exception as e_sl:
+        print(f"Aviso en _sincronizar_liquidacion_local_sqlite: {e_sl}")
 
 
 def liquidar_proveedor_db(
@@ -977,11 +1152,13 @@ def liquidar_proveedor_db(
 
     # Soportar alias de parámetros para máxima compatibilidad
     if monto is None:
-        monto = kwargs.get("monto_abono", 0.0)
+        monto = kwargs.get("monto_abono") or kwargs.get("monto_liquidado") or kwargs.get("valor") or 0.0
     if not referencia:
         referencia = kwargs.get("referencia_comprobante", "")
     if usuario == "Administrador" and "usuario_nombre" in kwargs:
         usuario = kwargs["usuario_nombre"]
+    elif usuario == "Administrador" and "cajero" in kwargs:
+        usuario = kwargs["cajero"]
     if not observaciones:
         observaciones = kwargs.get("notas", "")
 
@@ -999,15 +1176,23 @@ def liquidar_proveedor_db(
                 timeout=6.0,
             )
             if resp.status_code == 200:
-                return resp.json()
-            elif resp.status_code in (400, 404):
-                return {
-                    "exito": False,
-                    "ok": False,
-                    "mensaje": resp.json().get("detail", "Error liquidando proveedor en servidor"),
-                }
-        except Exception:
-            pass
+                res_api = resp.json()
+                res_api["exito"] = res_api.get("exito", True)
+                res_api["ok"] = True
+                try:
+                    conn_loc = conectar_db()
+                    cur_loc = conn_loc.cursor()
+                    recibo_sv = res_api.get("numero_recibo") or f"LIQ-PROV-{res_api.get('liquidacion_id', 1):05d}"
+                    _sincronizar_liquidacion_local_sqlite(cur_loc, proveedor_id, float(monto or 0.0), metodo_pago, referencia, usuario, observaciones, recibo_sv)
+                    conn_loc.commit()
+                    conn_loc.close()
+                except Exception as e_sl:
+                    print(f"Aviso sync local post liquidar: {e_sl}")
+                return res_api
+            else:
+                print(f"Aviso API post liquidar retornó {resp.status_code}: {resp.text}. Aplicando liquidación local...")
+        except Exception as e_api_post:
+            print(f"Aviso conectando con servidor para liquidar: {e_api_post}. Aplicando liquidación local...")
 
     if proveedor_id in _PAGOS_EN_PROCESO:
         return {
@@ -1029,6 +1214,10 @@ def liquidar_proveedor_db(
         cur.execute("SELECT id, nombre, COALESCE(saldo_acumulado, 0.0) FROM proveedores WHERE id = ?", (proveedor_id,))
         prov_row = cur.fetchone()
         if not prov_row:
+            cur.execute("SELECT id, nombre, COALESCE(saldo_acumulado, 0.0) FROM proveedores WHERE CAST(id AS TEXT) = ? OR nombre LIKE ?", (str(proveedor_id), f"%{proveedor_id}%"))
+            prov_row = cur.fetchone()
+
+        if not prov_row:
             return {
                 "exito": False,
                 "ok": False,
@@ -1040,7 +1229,8 @@ def liquidar_proveedor_db(
 
         # Recálculo fresco para máxima consistencia
         rec = recalcular_saldo_proveedor(proveedor_id, conn=conn)
-        saldo_actual = rec["saldo_pendiente"]
+        saldo_calc = float(rec["saldo_pendiente"] or 0.0)
+        saldo_actual = max(saldo_actual, saldo_calc)
 
         try:
             monto_flt = round(float(monto or 0.0), 2)
@@ -1078,9 +1268,10 @@ def liquidar_proveedor_db(
         cur.execute("""
             SELECT id, monto_por_pagar, monto_pagado, saldo_pendiente
             FROM cuentas_por_pagar_proveedores
-            WHERE proveedor_id = ? AND estado != 'Pagada' AND estado != 'Anulada'
+            WHERE (proveedor_id = ? OR CAST(proveedor_id AS TEXT) = ? OR CAST(proveedor_id AS TEXT) LIKE ? OR ((proveedor_id IS NULL OR proveedor_id = 0 OR proveedor_id = '') AND LOWER(proveedor_nombre) = LOWER(?)))
+              AND estado != 'Pagada' AND estado != 'Anulada'
             ORDER BY id ASC
-        """, (proveedor_id,))
+        """, (proveedor_id, str(proveedor_id), f"{proveedor_id} - %", prov_nom))
         cuentas_pendientes = cur.fetchall()
 
         monto_por_distribuir = monto_flt

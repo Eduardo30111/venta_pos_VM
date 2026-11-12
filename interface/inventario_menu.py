@@ -1112,9 +1112,9 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
             u_base = var_u.get().strip() or "Unidad"
 
             prov_id_val = None
-            if var_prov.get() != "Ninguno":
+            if var_prov.get() and var_prov.get() != "Ninguno":
                 try:
-                    prov_id_val = int(var_prov.get().split(" - ")[0])
+                    prov_id_val = int(str(var_prov.get()).split("-")[0].strip())
                 except Exception:
                     prov_id_val = None
 

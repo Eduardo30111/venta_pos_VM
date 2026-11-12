@@ -104,12 +104,44 @@ class EditarVentaItemRequest(BaseModel):
     precio_unitario: float
     cantidad: float
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalizar_item(cls, data: Any):
+        if isinstance(data, dict):
+            d = dict(data)
+            if "codigo_producto" not in d:
+                d["codigo_producto"] = str(d.get("item_codigo") or d.get("codigo") or "")
+            if "nombre_producto" not in d:
+                d["nombre_producto"] = str(d.get("item_nombre") or d.get("nombre") or "")
+            if "precio_unitario" not in d:
+                d["precio_unitario"] = float(d.get("precio_vendido") or d.get("precio") or d.get("precio_unitario") or 0.0)
+            if "cantidad" not in d:
+                d["cantidad"] = float(d.get("cant") or d.get("cantidad") or 1.0)
+            return d
+        return data
+
 
 class EditarVentaRequest(BaseModel):
     nuevo_metodo: str = "Efectivo"
     nuevos_items: List[EditarVentaItemRequest]
     motivo: str = "Edición administrativa"
     terminal_id: Optional[int] = 1
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalizar_edicion(cls, data: Any):
+        if isinstance(data, dict):
+            d = dict(data)
+            if "nuevos_items" not in d and "items" in d:
+                d["nuevos_items"] = d["items"]
+            if "nuevo_metodo" not in d and "metodo_pago_principal" in d:
+                d["nuevo_metodo"] = d["metodo_pago_principal"]
+            elif "nuevo_metodo" not in d and "metodo_pago" in d:
+                d["nuevo_metodo"] = d["metodo_pago"]
+            if "motivo" not in d:
+                d["motivo"] = d.get("razon") or "Edición administrativa"
+            return d
+        return data
 
 
 class DetalleVentaResponse(BaseModel):

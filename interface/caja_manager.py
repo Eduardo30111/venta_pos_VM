@@ -732,8 +732,14 @@ def registrar_movimiento_caja(
             conn.close()
 
 
-def calcular_arqueo_sesion(sesion_id: int) -> Dict[str, Any]:
+def calcular_arqueo_sesion(sesion_id: Optional[int] = None) -> Dict[str, Any]:
     """Calcula el balance y efectivo esperado de una sesión de caja específica."""
+    if sesion_id is None:
+        try:
+            activa = obtener_sesion_activa()
+            sesion_id = activa["id"] if activa else 1
+        except Exception:
+            sesion_id = 1
     if api is not None:
         try:
             resp = api.get(f"/caja/sesiones/{sesion_id}/arqueo", timeout=4.0)
@@ -794,6 +800,24 @@ def calcular_arqueo_sesion(sesion_id: int) -> Dict[str, Any]:
         transf_info = ventas_metodos.get("Transferencia", {"total": 0.0, "cant": 0})
         fiado_info = ventas_metodos.get("Fiado", {"total": 0.0, "cant": 0})
         efectivo_ventas_info = ventas_metodos.get("Efectivo", {"total": ventas_efectivo, "cant": 0})
+
+        # Desglose de pagos reales (soporta ventas mixtas y ventas simples)
+        try:
+            cur.execute("""
+                SELECT pv.metodo_pago, SUM(pv.monto) as total, COUNT(DISTINCT pv.id_venta) as cant
+                FROM pagos_venta pv
+                JOIN ventas v ON pv.id_venta = v.id_venta
+                WHERE (v.sesion_caja_id = ? OR (v.fecha_venta = ? AND v.estado != 'Anulada'))
+                  AND v.estado != 'Anulada'
+                GROUP BY pv.metodo_pago
+            """, (sesion_id, sesion_dict["fecha_apertura"]))
+            pv_map = {r["metodo_pago"]: {"total": float(r["total"] or 0.0), "cant": int(r["cant"])} for r in cur.fetchall()}
+            if pv_map.get("Transferencia", {}).get("total", 0.0) > 0:
+                transf_info = pv_map["Transferencia"]
+            if pv_map.get("Fiado", {}).get("total", 0.0) > 0:
+                fiado_info = pv_map["Fiado"]
+        except Exception:
+            pass
 
         # Abonos y gastos bancarios por transferencia en esta sesión
         abonos_transferencia = 0.0
@@ -1162,6 +1186,85 @@ def anular_venta_completa(
             except Exception:
                 pass
 
+        elif metodo_pago == "Mixto":
+            try:
+                cur.execute("SELECT metodo_pago, monto FROM pagos_venta WHERE id_venta = ?", (id_venta,))
+                pagos_v = cur.fetchall()
+                cur.execute("PRAGMA table_info(clientes)")
+                cols_c = [c[1] for c in cur.fetchall()]
+                col_doc = "documento" if "documento" in cols_c else "cedula"
+
+                for pv in pagos_v:
+                    m_p = pv["metodo_pago"]
+                    m_val = float(pv["monto"] or 0.0)
+                    if m_val <= 0:
+                        continue
+                    if m_p == "Efectivo":
+                        cur.execute("""
+                            INSERT INTO movimientos_financieros (
+                                fecha, hora, tipo, concepto, monto, metodo_pago,
+                                cuenta_afectada, usuario, referencia_origen, sesion_caja_id,
+                                estado, observaciones
+                            ) VALUES (?, ?, 'DEVOLUCION_VENTA', ?, ?, 'Efectivo', 'CAJA_FISICA', ?, ?, ?, 'Activo', ?)
+                        """, (
+                            fecha_str, hora_str, f"Devolución efectivo Venta #{id_venta} (Mixto): {motivo}",
+                            m_val, usuario_admin, f"VENTA-{id_venta}", sesion_id, motivo
+                        ))
+                        if sesion_id:
+                            cur.execute("PRAGMA table_info(movimientos_caja)")
+                            cols_m = [c[1] for c in cur.fetchall()]
+                            col_sesion = "sesion_id" if "sesion_id" in cols_m else "sesion_caja_id"
+                            col_concepto = "concepto" if "concepto" in cols_m else "descripcion"
+                            col_ref = "id_referencia" if "id_referencia" in cols_m else "referencia_id"
+                            if "terminal" in cols_m:
+                                cur.execute(f"""
+                                    INSERT INTO movimientos_caja (
+                                        {col_sesion}, fecha, hora, tipo, monto, usuario, terminal, {col_ref}, {col_concepto}
+                                    ) VALUES (?, ?, ?, 'DEVOLUCION_VENTA', ?, ?, ?, ?, ?)
+                                """, (
+                                    sesion_id, fecha_str, hora_str, m_val, usuario_admin, terminal,
+                                    str(id_venta), f"Salida efectivo por venta mixta anulada #{id_venta}: {motivo}"
+                                ))
+                            else:
+                                cur.execute(f"""
+                                    INSERT INTO movimientos_caja (
+                                        {col_sesion}, fecha, hora, tipo, monto, usuario, {col_ref}, {col_concepto}
+                                    ) VALUES (?, ?, ?, 'DEVOLUCION_VENTA', ?, ?, ?, ?)
+                                """, (
+                                    sesion_id, fecha_str, hora_str, m_val, usuario_admin,
+                                    str(id_venta), f"Salida efectivo por venta mixta anulada #{id_venta}: {motivo}"
+                                ))
+                    elif m_p == "Transferencia":
+                        cur.execute("""
+                            INSERT INTO movimientos_financieros (
+                                fecha, hora, tipo, concepto, monto, metodo_pago,
+                                cuenta_afectada, usuario, referencia_origen, sesion_caja_id,
+                                estado, observaciones
+                            ) VALUES (?, ?, 'DEVOLUCION_VENTA', ?, ?, 'Transferencia', 'BANCO_TRANSFERENCIA', ?, ?, ?, 'Activo', ?)
+                        """, (
+                            fecha_str, hora_str, f"Reversión recaudo transferencia Venta #{id_venta} (Mixto): {motivo}",
+                            m_val, usuario_admin, f"VENTA-{id_venta}", sesion_id, motivo
+                        ))
+                    elif m_p == "Fiado":
+                        if doc_cliente:
+                            cur.execute(f"""
+                                UPDATE clientes 
+                                SET saldo_pendiente = MAX(0.0, saldo_pendiente - ?) 
+                                WHERE {col_doc} = ?
+                            """, (m_val, doc_cliente))
+                        cur.execute("""
+                            INSERT INTO movimientos_financieros (
+                                fecha, hora, tipo, concepto, monto, metodo_pago,
+                                cuenta_afectada, usuario, referencia_origen, sesion_caja_id,
+                                estado, observaciones
+                            ) VALUES (?, ?, 'AJUSTE_AUTORIZADO', ?, ?, 'Fiado', 'CARTERA_CLIENTES', ?, ?, ?, 'Activo', ?)
+                        """, (
+                            fecha_str, hora_str, f"Anulación crédito Venta #{id_venta} (Mixto): {motivo}",
+                            m_val, usuario_admin, f"VENTA-{id_venta}", sesion_id, motivo
+                        ))
+            except Exception as e_mix:
+                print(f"Aviso revirtiendo venta mixta: {e_mix}")
+
         # Marcar movimientos originales de la venta como Anulados
         try:
             cur.execute("""
@@ -1285,18 +1388,33 @@ def editar_venta_completa(
         try:
             import urllib.parse
             q_motivo = urllib.parse.quote(motivo.strip())
+            norm_items = [
+                {
+                    "codigo_producto": str(it.get("codigo_producto") or it.get("codigo") or it.get("item_codigo") or ""),
+                    "nombre_producto": str(it.get("nombre_producto") or it.get("nombre") or it.get("item_nombre") or ""),
+                    "precio_unitario": float(it.get("precio_unitario") or it.get("precio") or it.get("precio_vendido") or 0.0),
+                    "cantidad": float(it.get("cantidad") or it.get("cant") or 1.0)
+                }
+                for it in (nuevos_items or [])
+            ]
             resp = api.put(
                 f"/ventas/{id_venta}?motivo={q_motivo}",
                 json={
+                    "nuevo_metodo": nuevo_metodo,
                     "metodo_pago_principal": nuevo_metodo,
-                    "items": nuevos_items or [],
+                    "nuevos_items": norm_items,
+                    "items": norm_items,
+                    "motivo": motivo.strip(),
                 },
-                timeout=6.0,
+                timeout=8.0,
             )
             if resp.status_code == 200:
                 return resp.json()
-            elif resp.status_code in (400, 404):
-                raise ValueError(resp.json().get("detail", "Error al editar venta en servidor"))
+            elif resp.status_code in (400, 404, 422):
+                det = resp.json().get("detail", "Error al editar venta en servidor")
+                if isinstance(det, list):
+                    det = "; ".join(d.get("msg", str(d)) for d in det)
+                raise ValueError(det)
         except ValueError:
             raise
         except Exception:
@@ -1324,7 +1442,7 @@ def editar_venta_completa(
         doc_cliente = venta_dict.get("documento_cliente", "")
 
         # 2. Calcular nuevo total
-        nuevo_total = sum(float(item.get("precio_unitario", item.get("precio", 0.0))) * int(item.get("cantidad", 1)) for item in nuevos_items)
+        nuevo_total = sum(float(item.get("precio_unitario", item.get("precio", 0.0))) * float(item.get("cantidad", 1.0)) for item in nuevos_items)
         delta_monto = nuevo_total - total_anterior
 
         # 3. Obtener items anteriores para calcular delta de stock
@@ -1348,7 +1466,8 @@ def editar_venta_completa(
         cur.execute("DELETE FROM detalle_ventas WHERE id_venta = ?", (id_venta,))
         for it in nuevos_items:
             cod = it.get("codigo_producto", it.get("codigo"))
-            cant = int(it.get("cantidad", 1))
+            c_raw = float(it.get("cantidad", 1.0))
+            cant = int(c_raw) if c_raw.is_integer() else round(c_raw, 3)
             pu = float(it.get("precio_unitario", it.get("precio", 0.0)))
             sub = float(it.get("subtotal", pu * cant))
             nombre = it.get("nombre_producto", it.get("nombre", cod))
@@ -1469,6 +1588,7 @@ def editar_venta_completa(
 
         conn.commit()
         return {
+            "exito": True,
             "ok": True,
             "success": True,
             "id_venta": id_venta,

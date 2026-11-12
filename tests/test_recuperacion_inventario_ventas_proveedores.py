@@ -54,6 +54,8 @@ class TestRecuperacionInventarioVentasProveedores(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         try:
+            if "VMPOS_DB_VENTAS" in os.environ:
+                del os.environ["VMPOS_DB_VENTAS"]
             if os.path.exists(cls.db_ventas):
                 os.remove(cls.db_ventas)
             for f in os.listdir(cls.temp_dir):
