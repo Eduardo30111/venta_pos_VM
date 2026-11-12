@@ -266,12 +266,15 @@ class VentaService:
                     else (raw_doc if not es_consumidor_final else "Consumidor Final")
                 )
 
-                # 4. Resolver sesión activa de caja si aplica
+                # 4. Resolver sesión activa de caja si aplica (sin bloquear la venta ante inconsistencias)
                 sesion_id = getattr(venta_data, "sesion_caja_id", None)
                 if not sesion_id and estado_venta != "Pendiente_Caja":
-                    activa = await CajaService.obtener_sesion_activa(db)
-                    if activa:
-                        sesion_id = activa.id
+                    try:
+                        activa = await CajaService.obtener_sesion_activa(db)
+                        if activa:
+                            sesion_id = activa.id
+                    except Exception as e_act_caja:
+                        print(f"Aviso resolviendo sesion de caja en venta: {e_act_caja}")
 
                 # 5. Generar consecutivo único V-XXXXXX
                 result = await db.execute(select(Venta.numero))
@@ -830,9 +833,12 @@ class VentaService:
 
                 sesion_id = cobro_data.sesion_caja_id or venta.sesion_caja_id
                 if not sesion_id:
-                    activa = await CajaService.obtener_sesion_activa(db)
-                    if activa:
-                        sesion_id = activa.id
+                    try:
+                        activa = await CajaService.obtener_sesion_activa(db)
+                        if activa:
+                            sesion_id = activa.id
+                    except Exception as e_c_act:
+                        print(f"Aviso resolviendo sesion de caja en autorizar_pago: {e_c_act}")
                 venta.sesion_caja_id = sesion_id
 
                 for p_dict in pagos_limpios:
@@ -1125,7 +1131,10 @@ class VentaService:
                 # 5. Revertir impacto en Caja / Banco / Movimientos Financieros
                 pag_res = await db.execute(select(Pago).where(Pago.venta_id == venta.id))
                 pagos_orig = pag_res.scalars().all()
-                activa = await CajaService.obtener_sesion_activa(db)
+                try:
+                    activa = await CajaService.obtener_sesion_activa(db)
+                except Exception:
+                    activa = None
                 sesion_id = activa.id if activa else venta.sesion_caja_id
 
                 for p in pagos_orig:
@@ -1337,7 +1346,10 @@ class VentaService:
                 ef_nuevo = nuevo_total if nuevo_metodo == "Efectivo" else 0.0
                 delta_ef = round(ef_nuevo - ef_ant, 2)
                 if abs(delta_ef) > 0.01:
-                    activa = await CajaService.obtener_sesion_activa(db)
+                    try:
+                        activa = await CajaService.obtener_sesion_activa(db)
+                    except Exception:
+                        activa = None
                     sesion_id = activa.id if activa else venta.sesion_caja_id
                     await CajaService.registrar_movimiento_caja(
                         db=db,

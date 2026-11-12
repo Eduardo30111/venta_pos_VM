@@ -13,13 +13,53 @@ from ..models.finanzas import CuentaPorCobrar
 class CajaService:
     @staticmethod
     async def obtener_sesion_activa(db: AsyncSession) -> Optional[SesionCaja]:
-        res = await db.execute(
-            select(SesionCaja)
-            .where(SesionCaja.estado == "Abierta")
-            .order_by(SesionCaja.id.desc())
-            .limit(1)
-        )
-        return res.scalars().first()
+        try:
+            res = await db.execute(
+                select(SesionCaja)
+                .where(SesionCaja.estado == "Abierta")
+                .order_by(SesionCaja.id.desc())
+                .limit(1)
+            )
+            return res.scalars().first()
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "no such column" in err_msg or "operationalerror" in err_msg:
+                try:
+                    from sqlalchemy import text
+                    cols_caja = [
+                        ("arqueo_apertura_json", "TEXT"),
+                        ("monto_transferencias_esperado", "FLOAT DEFAULT 0.0"),
+                        ("monto_transferencias_verificado", "FLOAT DEFAULT 0.0"),
+                        ("diferencia_banco", "FLOAT DEFAULT 0.0"),
+                        ("estado_banco", "VARCHAR DEFAULT 'Pendiente'"),
+                        ("terminal_id", "INTEGER"),
+                        ("terminal_nombre", "VARCHAR"),
+                        ("observaciones", "VARCHAR"),
+                        ("fecha_cierre", "VARCHAR"),
+                        ("hora_cierre", "VARCHAR"),
+                        ("usuario_cierre", "VARCHAR"),
+                        ("monto_esperado_efectivo", "FLOAT DEFAULT 0.0"),
+                        ("monto_real_contado", "FLOAT DEFAULT 0.0"),
+                        ("diferencia", "FLOAT DEFAULT 0.0"),
+                        ("created_at", "TIMESTAMP"),
+                    ]
+                    for c_nom, c_def in cols_caja:
+                        try:
+                            await db.execute(text(f"ALTER TABLE sesiones_caja ADD COLUMN {c_nom} {c_def}"))
+                        except Exception:
+                            pass
+                    await db.commit()
+                    res = await db.execute(
+                        select(SesionCaja)
+                        .where(SesionCaja.estado == "Abierta")
+                        .order_by(SesionCaja.id.desc())
+                        .limit(1)
+                    )
+                    return res.scalars().first()
+                except Exception as e_repair:
+                    print(f"Aviso auto-reparando esquema sesiones_caja: {e_repair}")
+                    return None
+            return None
 
     @staticmethod
     async def abrir_sesion(
