@@ -17,7 +17,7 @@ import traceback
 import urllib.request
 import urllib.error
 import subprocess
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 
 try:
     from interface.config import (

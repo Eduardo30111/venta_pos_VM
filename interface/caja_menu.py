@@ -566,10 +566,17 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         )
         lbl_total_contado.pack(side="left")
 
+        cant_vars = {}
+        subtotal_lbls = {}
+
         def poner_en_cero():
             for v_entry in list(cant_vars.values()):
                 v_entry.set("0")
-            recalcular_totales()
+            if "recalcular_totales" in locals() or "recalcular_totales" in globals():
+                try:
+                    recalcular_totales()
+                except Exception:
+                    pass
 
         btn_cero = crear_boton(
             row_total_box,
@@ -579,9 +586,6 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
             tam_fuente=9
         )
         btn_cero.pack(side="right")
-
-        cant_vars = {}
-        subtotal_lbls = {}
 
         # Notebook de Pestañas: Billetes / Monedas
         nb = ttk.Notebook(dlg)

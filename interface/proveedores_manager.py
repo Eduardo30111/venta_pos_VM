@@ -1387,11 +1387,17 @@ def liquidar_proveedor_db(
                     "cuentas_afectadas": 0,
                     "mensaje": "El proveedor ya se encuentra a paz y salvo."
                 }
-            return {
-                "exito": False,
-                "ok": False,
-                "mensaje": f"El servidor central reportó: {ultimo_error_api or 'No se pudo conectar con el servidor.'}"
-            }
+            # Si el servidor devolvió un error explícito de validación o rechazo, respetarlo.
+            # Pero si fue error de conexión/offline/timeout, permitir funcionamiento offline local continuo:
+            err_str = str(ultimo_error_api or "").lower()
+            es_error_conexion = any(k in err_str for k in ["no disponible", "timeout", "refused", "connection", "falló al conectar", "offline", "unreachable", "timed out", "connect"])
+            if not es_error_conexion and ultimo_error_api:
+                return {
+                    "exito": False,
+                    "ok": False,
+                    "mensaje": f"El servidor central reportó: {ultimo_error_api}"
+                }
+            # Servidor no disponible o modo offline: continúa la ejecución en SQLite local y encolamiento a sync_mgr
 
     if proveedor_id in _PAGOS_EN_PROCESO:
         return {
