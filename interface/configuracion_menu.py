@@ -422,6 +422,7 @@ def iniciar_configuracion(parent=None, on_save_callback=None):
     var_copias = tk.IntVar(master=ventana, value=int(cfg_imp_ini.get("copias", 1)))
     var_corte_auto = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("corte_automatico", True)))
     var_abrir_cajon = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("abrir_cajon", True)))
+    var_comando_cajon = tk.StringVar(master=ventana, value=str(cfg_imp_ini.get("comando_cajon_modo", "estandar_dual")))
     var_ip_impresora_red = tk.StringVar(master=ventana, value=str(cfg_imp_ini.get("ip_impresora_red", "")))
 
     var_mostrar_logo = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_logo", True)))
@@ -813,6 +814,23 @@ def iniciar_configuracion(parent=None, on_save_callback=None):
         activebackground=t["bg_surface"], selectcolor=t["bg_surface"]
     ).pack(side="left")
 
+    MODOS_CAJON_MAP = {
+        "DigitalPOS / Dual Pin 2 y 5 (Recomendado)": "estandar_dual",
+        "Estándar Pin 2 (120ms ESC/POS)": "pin2",
+        "Alternativo Pin 5 (120ms ESC/POS)": "pin5",
+        "Tiempo Real (DLE DC4)": "realtime",
+        "Pulso BEL (POS-58)": "bel",
+    }
+    MAP_MODOS_CAJON_INV = {v: k for k, v in MODOS_CAJON_MAP.items()}
+    var_cajon_combo = tk.StringVar(master=ventana, value=MAP_MODOS_CAJON_INV.get(var_comando_cajon.get(), "DigitalPOS / Dual Pin 2 y 5 (Recomendado)"))
+
+    def _sync_cajon_modo(*_):
+        sel = var_cajon_combo.get()
+        if sel in MODOS_CAJON_MAP:
+            var_comando_cajon.set(MODOS_CAJON_MAP[sel])
+
+    var_cajon_combo.trace_add("write", _sync_cajon_modo)
+
     def _probar_cajon_config():
         try:
             try:
@@ -822,13 +840,27 @@ def iniciar_configuracion(parent=None, on_save_callback=None):
             cfg_temp = {
                 "ip_impresora_red": var_ip_impresora_red.get().strip(),
                 "impresora_nombre": var_impresora_nombre.get().strip(),
+                "comando_cajon_modo": var_comando_cajon.get().strip(),
                 "abrir_cajon": True
             }
             ok_c, msg_c = pulsar_apertura_cajon(config_override=cfg_temp)
             if ok_c:
-                messagebox.showinfo("Cajón Monedero", f"✅ {msg_c}", parent=ventana)
+                messagebox.showinfo(
+                    "Cajón Monedero",
+                    f"✅ {msg_c}\n\n"
+                    "ℹ️ La orden eléctrica fue transmitida a la impresora.\n"
+                    "Si el cajón no abrió físicamente, compruebe:\n"
+                    "1. Que el cable RJ11 esté conectado al puerto de la DigitalPOS ISH58.\n"
+                    "2. Que la cerradura de la gaveta no esté bloqueada con llave (posición horizontal).",
+                    parent=ventana
+                )
             else:
-                messagebox.showwarning("Cajón Monedero", f"⚠️ {msg_c}", parent=ventana)
+                messagebox.showwarning(
+                    "Cajón Monedero",
+                    f"⚠️ {msg_c}\n\n"
+                    "Sugerencia: Verifique que la impresora esté encendida y seleccionada correctamente.",
+                    parent=ventana
+                )
         except Exception as _e_c:
             messagebox.showerror("Error", f"Error probando cajón: {_e_c}", parent=ventana)
 
@@ -836,12 +868,20 @@ def iniciar_configuracion(parent=None, on_save_callback=None):
     tk.Label(grid_imp, text="IP Impresora Red (LAN / WiFi):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=3, column=0, sticky="w", pady=5, padx=(0, 10))
     _crear_entry(grid_imp, var_ip_impresora_red, 3, 1, 20)
 
-    btn_test_cajon = tk.Button(
-        grid_imp, text="🔓 Probar Apertura Cajón", command=_probar_cajon_config,
-        font=("Segoe UI", 9, "bold"), bg=t.get("accent", "#0284C7"), fg="#FFFFFF",
-        relief="flat", cursor="hand2", padx=8, pady=2
+    # Fila 4: Pulso RJ11 y Botón de Prueba
+    tk.Label(grid_imp, text="Pulso Gaveta (RJ11):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=4, column=0, sticky="w", pady=5, padx=(0, 10))
+    cb_pulso_cajon = ttk.Combobox(
+        grid_imp, textvariable=var_cajon_combo,
+        values=list(MODOS_CAJON_MAP.keys()), state="readonly"
     )
-    btn_test_cajon.grid(row=3, column=2, columnspan=2, sticky="w", padx=5, pady=5)
+    cb_pulso_cajon.grid(row=4, column=1, sticky="ew", pady=5, padx=(0, 20))
+
+    btn_test_cajon = tk.Button(
+        grid_imp, text="🔓 PROBAR APERTURA DE GAVETA", command=_probar_cajon_config,
+        font=("Segoe UI", 9, "bold"), bg=t.get("accent", "#0284C7"), fg="#FFFFFF",
+        relief="flat", cursor="hand2", padx=10, pady=4
+    )
+    btn_test_cajon.grid(row=4, column=2, columnspan=2, sticky="w", padx=5, pady=5)
 
     # Casillas de campos visibles en la factura
     tk.Label(body_imp, text="👁️ Campos Visibles en la Factura / Recibo:", font=("Segoe UI", 9, "bold"),
@@ -915,6 +955,7 @@ def iniciar_configuracion(parent=None, on_save_callback=None):
             "copias": max(1, min(10, copias_val)),
             "corte_automatico": bool(var_corte_auto.get()),
             "abrir_cajon": bool(var_abrir_cajon.get()),
+            "comando_cajon_modo": var_comando_cajon.get().strip() or "estandar_dual",
             "ip_impresora_red": var_ip_impresora_red.get().strip(),
             "mostrar_logo": bool(var_mostrar_logo.get()),
             "mostrar_razon_social": bool(var_mostrar_razon.get()),

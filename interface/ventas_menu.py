@@ -583,46 +583,29 @@ class PrinterManager:
         self.imprimir_factura(self.ultima_factura)
     
     def abrir_caja_registradora(self):
-        """Abre la caja registradora enviando comando ESC/POS - OPTIMIZADO PARA DIG ISH58"""
+        """Abre la caja registradora enviando comando ESC/POS multi-compatible."""
         try:
-            if self.printer:
-                print("DEBUG: Enviando comando de apertura de caja para DIG ISH58...")
-                
-                # MÉTODO ESPECÍFICO PARA DIG ISH58/XP-58: Múltiples comandos
-                comandos_caja = [
-                    b'\x1B\x70\x00\x32\x32',  # ESC p 0 50 50 - Comando principal
-                    b'\x1B\x70\x01\x32\x32',  # ESC p 1 50 50 - Puerto alternativo
-                    b'\x1C\x70\x00\x7F\xFF', # Comando alternativo DIG
-                    b'\x10\x14\x01\x00\x05', # Comando específico XP-58
-                ]
-                
-                for i, comando in enumerate(comandos_caja):
-                    try:
-                        print(f"DEBUG: Enviando comando caja #{i+1}...")
-                        self.printer._raw(comando)
-                        
-                        # Pequeña pausa entre comandos
-                        import time
-                        time.sleep(0.1)
-                        
-                    except Exception as e:
-                        print(f"DEBUG: Comando #{i+1} falló: {e}")
-                        continue
-                
-                # FLUSH FORZADO igual que en impresión
-                try:
-                    if hasattr(self.printer, '_device'):
-                        self.printer._device.write(self.printer._out_ep, b'\x00', timeout=1000)
-                except:
-                    pass
-                
-                print("💰 Comandos de caja enviados - DIG ISH58")
+            try:
+                from interface.receipt_manager import pulsar_apertura_cajon
+            except ImportError:
+                from receipt_manager import pulsar_apertura_cajon
+            ok, _ = pulsar_apertura_cajon()
+            if ok:
                 return True
-            else:
-                raise Exception("Impresora no conectada")
-        except Exception as e:
-            print(f"⚠️ Error al abrir caja: {e}")
-            raise e
+        except Exception:
+            pass
+
+        if self.printer:
+            try:
+                try:
+                    from interface.receipt_manager import construir_comando_cajon
+                except ImportError:
+                    from receipt_manager import construir_comando_cajon
+                self.printer._raw(construir_comando_cajon())
+                return True
+            except Exception:
+                pass
+        return False
 
 class App:
     def __init__(self, ventana, user_id="", rol="", parent_pid="", usuario_nombre=""):
@@ -1221,15 +1204,26 @@ class App:
         self.ventana.bind('<F7>', lambda e: self.abrir_cajon_manual())
 
     def abrir_cajon_manual(self, event=None):
-        """Abre el cajón monedero conectado a la impresora térmica (F7)."""
+        """Abre el cajón monedero conectado a la impresora térmica (F7 / Botón)."""
         try:
             try:
                 from interface.receipt_manager import pulsar_apertura_cajon
             except ImportError:
                 from receipt_manager import pulsar_apertura_cajon
             ok, msg = pulsar_apertura_cajon()
-            if not ok:
-                messagebox.showwarning("Cajón Monedero", f"No se pudo abrir el cajón automáticamente:\n{msg}", parent=self.ventana)
+            if ok:
+                messagebox.showinfo(
+                    "✅ Cajón Monedero",
+                    f"Orden de apertura enviada:\n\n{msg}\n\n"
+                    "ℹ️ Si el cajón no abrió mecánicamente, verifique que la cerradura esté en posición vertical (abierta).",
+                    parent=self.ventana
+                )
+            else:
+                messagebox.showwarning(
+                    "⚠️ Cajón Monedero",
+                    f"{msg}",
+                    parent=self.ventana
+                )
         except Exception as e:
             messagebox.showerror("Error Cajón Monedero", f"Error al abrir cajón: {e}", parent=self.ventana)
 
@@ -2170,86 +2164,8 @@ class App:
     # ====================================================================================
     
     def emergencia_abrir_caja(self):
-        """Función de emergencia para abrir caja registradora - CORREGIDA"""
-        try:
-            print("DEBUG: Botón ABRIR CAJA presionado")
-            
-            if not self.printer_manager:
-                messagebox.showerror("Error", "Sistema de impresión no disponible")
-                return
-            
-            # FORZAR RECONEXIÓN SI ES NECESARIO
-            if not self.impresora_conectada:
-                print("DEBUG: Reconectando impresora...")
-                messagebox.showwarning("Impresora", "Intentando conectar impresora...")
-                if not self.printer_manager.conectar_impresora():
-                    messagebox.showerror("Error", "No se pudo conectar con la impresora")
-                    return
-                self.impresora_conectada = True
-            
-            # INTENTAR ABRIR CAJA CON MANEJO DE ERRORES DETALLADO
-            print("DEBUG: Ejecutando comando abrir caja...")
-            resultado = self.printer_manager.abrir_caja_registradora()
-            
-            if resultado:
-                print("DEBUG: ✅ Comando enviado exitosamente")
-                messagebox.showinfo("✅ Caja Abierta", "💰 Caja registradora abierta exitosamente")
-            else:
-                print("DEBUG: ❌ Comando falló sin excepción")
-                messagebox.showwarning("Advertencia", "Comando enviado pero la caja no respondió.\nVerifica la conexión de la caja.")
-            
-        except Exception as e:
-            error_detallado = str(e)
-            print(f"DEBUG: ❌ Error detallado: {error_detallado}")
-            
-            # MOSTRAR ERROR ESPECÍFICO Y OPCIONES
-            error_window = tk.Toplevel(self.ventana)
-            error_window.title("❌ Error Apertura Caja")
-            error_window.geometry("500x300")
-            error_window.configure(bg="#FFB6C1")
-            error_window.grab_set()
-            
-            # Centrar ventana
-            x = (self.ventana.winfo_screenwidth() // 2) - 250
-            y = (self.ventana.winfo_screenheight() // 2) - 150
-            error_window.geometry(f"500x300+{x}+{y}")
-            
-            tk.Label(error_window, text="❌ ERROR AL ABRIR CAJA", font=("Arial", 14, "bold"),
-                    bg="#FFB6C1", fg="#8B0054").pack(pady=10)
-            
-            tk.Label(error_window, text=f"Error: {error_detallado}", font=("Arial", 10),
-                    bg="#FFB6C1", fg="#8B0054", wraplength=450).pack(pady=5)
-            
-            tk.Label(error_window, text="🔧 Posibles soluciones:", font=("Arial", 10, "bold"),
-                    bg="#FFB6C1", fg="#8B0054").pack(pady=(15,5))
-            
-            soluciones = """• Verifica que la caja esté conectada al puerto de la impresora
-• Revisa que el cable de la caja esté bien conectado
-• La caja debe estar conectada al puerto RJ11/RJ12 de la impresora
-• Algunos modelos requieren configuración específica
-• Prueba reiniciar la impresora"""
-            
-            tk.Label(error_window, text=soluciones, font=("Arial", 9),
-                    bg="#FFB6C1", fg="#8B0054", justify="left").pack(pady=5)
-            
-            def reintentar_caja():
-                error_window.destroy()
-                print("DEBUG: Reintentando apertura de caja...")
-                try:
-                    # FORZAR NUEVA CONEXIÓN
-                    self.impresora_conectada = False
-                    self.emergencia_abrir_caja()
-                except Exception as retry_error:
-                    messagebox.showerror("Error", f"Reintento falló: {retry_error}")
-            
-            btn_frame = tk.Frame(error_window, bg="#FFB6C1")
-            btn_frame.pack(pady=15)
-            
-            tk.Button(btn_frame, text="🔄 Reintentar", command=reintentar_caja,
-                     bg="#D97706", fg="white", font=("Arial", 10, "bold"), padx=15).pack(side="left", padx=5)
-            
-            tk.Button(btn_frame, text="✅ Cerrar", command=error_window.destroy,
-                     bg="#DB2777", fg="white", font=("Arial", 10, "bold"), padx=15).pack(side="left", padx=5)
+        """Abre la gaveta física conectada al puerto RJ11 de la impresora térmica."""
+        self.abrir_cajon_manual()
     
     def emergencia_reimprimir(self):
         """Función de emergencia para reimprimir última factura"""
@@ -4181,6 +4097,7 @@ class App:
                         "items": detalles_payload,
                         "total": total,
                         "metodo_pago": metodo_pago,
+                        "pagos": pagos,
                         "recibido": recibido_payload,
                         "cambio": cambio_payload,
                         "saldo_pendiente": float(total) if str(metodo_pago) == "Fiado" else 0.0,
@@ -4192,35 +4109,35 @@ class App:
                         self.printer_manager.ultima_factura = datos_venta
 
                     aviso_impresion = ""
+                    cajon_abierto_en_impresion = False
                     if imprimir_recibo:
                         cfg_over = {"formato_papel": formato_impresion} if formato_impresion else None
                         try:
-                            if self.printer_manager:
-                                imp_ok = self.printer_manager.imprimir_factura(datos_venta, config_override=cfg_over)
-                                if imp_ok and self.impresora_conectada:
-                                    self.printer_manager.abrir_caja_registradora()
-                                elif not imp_ok:
-                                    aviso_impresion = "\n\n⚠️ Nota: No se detectó impresora física activa; puedes reimprimir o exportar PDF en Historial."
+                            try:
+                                from receipt_manager import imprimir_factura_unificada
+                            except ImportError:
+                                from interface.receipt_manager import imprimir_factura_unificada
+                            imp_ok, _ = imprimir_factura_unificada(datos_venta, config_override=cfg_over)
+                            if imp_ok:
+                                cajon_abierto_en_impresion = True
                             else:
-                                try:
-                                    from receipt_manager import imprimir_factura_unificada
-                                except ImportError:
-                                    from interface.receipt_manager import imprimir_factura_unificada
-                                imp_ok, _ = imprimir_factura_unificada(datos_venta, config_override=cfg_over)
-                                if not imp_ok:
-                                    aviso_impresion = "\n\n⚠️ Nota: No se detectó impresora física activa; puedes reimprimir o exportar PDF en Historial."
+                                aviso_impresion = "\n\n⚠️ Nota: No se detectó impresora física activa; puedes reimprimir o exportar PDF en Historial."
                         except Exception as e_imp:
                             print(f"Aviso en impresión de comprobante: {e_imp}")
 
-                    if not imprimir_recibo and metodo_pago == "Efectivo":
+                    # Regla comercial: Apertura automática de gaveta si la venta incluye efectivo
+                    try:
                         try:
-                            try:
-                                from interface.receipt_manager import pulsar_apertura_cajon
-                            except ImportError:
-                                from receipt_manager import pulsar_apertura_cajon
-                            pulsar_apertura_cajon()
-                        except Exception:
-                            pass
+                            from interface.receipt_manager import evaluar_apertura_cajon_por_venta, pulsar_apertura_cajon
+                        except ImportError:
+                            from receipt_manager import evaluar_apertura_cajon_por_venta, pulsar_apertura_cajon
+
+                        if evaluar_apertura_cajon_por_venta(metodo_pago, pagos=pagos):
+                            # Solo pulsar si no se imprimió recibo físico o si la impresión física falló
+                            if not imprimir_recibo or not cajon_abierto_en_impresion:
+                                pulsar_apertura_cajon()
+                    except Exception as e_caj:
+                        print(f"Aviso control de gaveta en venta: {e_caj}")
 
                     extra_info = f"\n\n{msg_asistencia}" if msg_asistencia else ""
                     extra_info += aviso_impresion

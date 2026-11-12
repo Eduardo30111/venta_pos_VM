@@ -213,6 +213,34 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
     btn_historial = crear_boton(acciones_panel, "📜 Consultar Cierres Anteriores", lambda: modal_historial_cierres(), tipo="secondary", icono="📑", tam_fuente=9)
     btn_historial.pack(fill="x", padx=12, pady=4)
 
+    def _abrir_gaveta_manual():
+        try:
+            try:
+                from interface.receipt_manager import pulsar_apertura_cajon
+            except ImportError:
+                from receipt_manager import pulsar_apertura_cajon
+            ok, msg = pulsar_apertura_cajon()
+            if ok:
+                messagebox.showinfo(
+                    "✅ Gaveta Física",
+                    f"Orden de apertura enviada a la impresora:\n\n{msg}\n\n"
+                    "ℹ️ Si la gaveta no abrió mecánicamente, asegúrese de que no esté con llave cerrada.",
+                    parent=ventana
+                )
+            else:
+                messagebox.showwarning(
+                    "⚠️ Gaveta Física",
+                    f"{msg}\n\n"
+                    "Verifique que la impresora esté encendida y conectada a este equipo.",
+                    parent=ventana
+                )
+        except Exception as e_gav:
+            messagebox.showerror("Error Gaveta", f"Error abriendo gaveta: {e_gav}", parent=ventana)
+
+    btn_abrir_gaveta = crear_boton(acciones_panel, "⚡ Abrir Gaveta (F7)", lambda: _abrir_gaveta_manual(), tipo="secondary", icono="🔓", tam_fuente=9)
+    btn_abrir_gaveta.pack(fill="x", padx=12, pady=4)
+    ventana.bind('<F7>', lambda e: _abrir_gaveta_manual())
+
     lbl_sesion_info = tk.Label(
         acciones_panel, text="Sin turno activo",
         font=("Segoe UI", 8), bg=t["bg_card"], fg=t["text_muted"], justify="center"

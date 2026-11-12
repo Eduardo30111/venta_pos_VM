@@ -1449,7 +1449,7 @@ def _imprimir_por_usb_escpos(norm, cfg):
         cuerpo_bytes = _codificar_texto_escpos(texto + "\n\n\n\n")
 
         corte_bytes = b"\x1d\x56\x42\x00" if cfg.get("corte_automatico", True) else b""
-        cajon_bytes = b"\x1b\x70\x00\x19\xfa" if cfg.get("abrir_cajon", False) else b""
+        cajon_bytes = construir_comando_cajon(cfg) if evaluar_apertura_cajon_por_venta(norm, cfg=cfg) else b""
 
         payload = b"\x1b\x40" + logo_bytes + cuerpo_bytes + corte_bytes
         copias = max(1, min(10, int(cfg.get("copias", 1) or 1)))
@@ -1514,6 +1514,8 @@ def _imprimir_por_sistema_os(norm, cfg):
             except Exception:
                 pass
             if proc.returncode == 0:
+                if evaluar_apertura_cajon_por_venta(norm, cfg=cfg):
+                    pulsar_apertura_cajon(config_override=cfg)
                 return True, f"Enviado a la impresora del sistema ({fmt}, {copias} copia(s))."
             return False, f"La cola de impresión rechazó el trabajo: {proc.stderr.strip() or proc.stdout.strip()}"
         except Exception as e:
@@ -1535,7 +1537,7 @@ def _imprimir_por_sistema_os(norm, cfg):
                     logo_b = _imagen_a_escpos_raster(neg["logo_path"], max_width_dots=240 if fmt == "58mm" else 360)
                 txt_b = _codificar_texto_escpos(generar_texto_factura(norm, formato=fmt, config_impresora=cfg) + "\n\n\n\n")
                 corte_b = b"\x1d\x56\x42\x00" if cfg.get("corte_automatico", True) else b""
-                cajon_b = b"\x1b\x70\x00\x19\xfa\x1b\x70\x01\x19\xfa" if cfg.get("abrir_cajon", True) else b""
+                cajon_b = construir_comando_cajon(cfg) if evaluar_apertura_cajon_por_venta(norm, cfg=cfg) else b""
                 raw_payload = cajon_b + b"\x1b\x40" + logo_b + txt_b + corte_b
 
                 hPrinter = win32print.OpenPrinter(nombre_dest)
@@ -1579,7 +1581,7 @@ def _imprimir_por_red_tcp(norm, cfg):
     cuerpo_bytes = _codificar_texto_escpos(texto + "\n\n\n\n")
 
     corte_bytes = b"\x1d\x56\x42\x00" if cfg.get("corte_automatico", True) else b""
-    cajon_bytes = b"\x1b\x70\x00\x19\xfa\x1b\x70\x01\x19\xfa" if cfg.get("abrir_cajon", True) else b""
+    cajon_bytes = construir_comando_cajon(cfg) if evaluar_apertura_cajon_por_venta(norm, cfg=cfg) else b""
 
     payload = cajon_bytes + b"\x1b\x40" + logo_bytes + cuerpo_bytes + corte_bytes
     copias = max(1, min(10, int(cfg.get("copias", 1) or 1)))
@@ -1624,16 +1626,92 @@ def _buscar_impresora_usb_compatible(cfg: dict):
     return None
 
 
+def construir_comando_cajon(cfg=None) -> bytes:
+    """
+    Genera el comando binario ESC/POS óptimo para abrir la gaveta de dinero.
+    Compatible con DigitalPOS ISH58, POS-58, XP-58, Epson, Star, Citizen y clones ESC/POS.
+
+    Configuración de pines y pulso:
+    - m = 0 (Pin 2 RJ11), m = 1 (Pin 5 RJ11)
+    - t1 = 0x3C (60 en decimal = 120ms de pulso ON)
+    - t2 = 0xFA (250 en decimal = 500ms OFF)
+    """
+    if cfg is None:
+        cfg = business_mgr.obtener_config_impresora()
+
+    modo = str(cfg.get("comando_cajon_modo", "estandar_dual")).lower().strip()
+
+    if modo == "pin2":
+        return b"\x1b\x70\x00\x3c\xfa"
+    elif modo == "pin5":
+        return b"\x1b\x70\x01\x3c\xfa"
+    elif modo == "realtime":
+        return b"\x10\x14\x01\x00\x05"
+    elif modo == "bel":
+        return b"\x1b\x07"
+    else:
+        # Modo por omisión: Secuencia multimodelo robusta garantizada para DigitalPOS ISH58
+        return (
+            b"\x1b\x70\x00\x3c\xfa"  # ESC p Pin 2 (120ms)
+            b"\x1b\x70\x01\x3c\xfa"  # ESC p Pin 5 (120ms)
+            b"\x10\x14\x01\x00\x05"  # DLE DC4 1 0 5 (Tiempo Real)
+            b"\x1b\x07"              # ESC BEL
+        )
+
+
+def evaluar_apertura_cajon_por_venta(datos_o_metodo, pagos=None, cfg=None) -> bool:
+    """
+    Evalúa estrictamente las reglas comerciales de apertura de gaveta de dinero:
+    1. Venta Efectivo -> Abre gaveta.
+    2. Venta Mixto con componente en Efectivo -> Abre gaveta.
+    3. Venta Transferencia pura -> NO abre gaveta.
+    4. Venta Fiado pura -> NO abre gaveta.
+    5. Solo opera si 'abrir_cajon' está habilitado en la configuración.
+    """
+    if cfg is None:
+        cfg = business_mgr.obtener_config_impresora()
+    if not cfg.get("abrir_cajon", True):
+        return False
+
+    metodo = ""
+    lista_pagos = pagos
+    if isinstance(datos_o_metodo, dict):
+        metodo = str(datos_o_metodo.get("metodo_pago", "")).strip()
+        if lista_pagos is None:
+            lista_pagos = datos_o_metodo.get("pagos")
+    else:
+        metodo = str(datos_o_metodo or "").strip()
+
+    metodo_norm = metodo.lower()
+    if metodo_norm in ("efectivo", "cash"):
+        return True
+    elif metodo_norm in ("mixto", "combinado"):
+        if lista_pagos and isinstance(lista_pagos, (list, tuple)):
+            for p in lista_pagos:
+                if isinstance(p, dict):
+                    m = str(p.get("metodo", p.get("metodo_pago", ""))).lower().strip()
+                    monto = float(p.get("monto", 0.0) or 0.0)
+                    if m in ("efectivo", "cash") and monto > 0:
+                        return True
+            return False
+        return False
+    elif metodo_norm in ("transferencia", "tarjeta", "qr", "bancolombia", "nequi", "daviplata", "fiado", "crédito", "credito"):
+        return False
+
+    return False
+
+
 def pulsar_apertura_cajon(config_override=None) -> Tuple[bool, str]:
     """
     Envía la señal ESC/POS para abrir el cajón monedero conectado a la impresora
-    (ya sea por Red LAN/WiFi TCP 9100, USB directo o cola de Windows RAW).
+    (compatible con macOS CUPS RAW, Windows win32print RAW, Red LAN/WiFi TCP 9100 y USB directo).
     """
     cfg = dict(business_mgr.obtener_config_impresora())
     if isinstance(config_override, dict):
         cfg.update(config_override)
 
-    cmd_cajon = b"\x1b\x70\x00\x19\xfa\x1b\x70\x01\x19\xfa"
+    cmd_cajon = construir_comando_cajon(cfg)
+    errores = []
 
     # 1. Probar por Red LAN TCP (si tiene IP configurada)
     ip_red = str(cfg.get("ip_impresora_red", "")).strip()
@@ -1645,15 +1723,68 @@ def pulsar_apertura_cajon(config_override=None) -> Tuple[bool, str]:
                 s.connect((ip_red, puerto_red))
                 s.sendall(cmd_cajon)
             return True, f"Cajón abierto vía impresora de red ({ip_red}:{puerto_red})."
-        except Exception as e:
-            pass
+        except Exception as e_red:
+            errores.append(f"Red ({ip_red}:{puerto_red}): {e_red}")
 
-    # 2. Probar en Windows vía win32print RAW
+    # 2. En macOS / Linux: Enviar bytes RAW a la cola de CUPS mediante lp -o raw
+    if not sys.platform.startswith("win"):
+        try:
+            nombre_dest = str(cfg.get("impresora_nombre", "")).strip()
+            impresora_cups = None
+            if nombre_dest and nombre_dest not in ("Predeterminada del sistema", "USB Térmica Directa (ESC/POS)") and not nombre_dest.startswith("USB Directa:"):
+                impresora_cups = nombre_dest
+            else:
+                # Buscar predeterminada con lpstat -d
+                try:
+                    out_d = subprocess.check_output(["lpstat", "-d"], stderr=subprocess.DEVNULL, timeout=2, text=True)
+                    for part in out_d.split(":"):
+                        p = part.strip()
+                        if p and not p.lower().startswith("system default") and not p.lower().startswith("no system"):
+                            impresora_cups = p.split()[0].strip()
+                            break
+                except Exception:
+                    pass
+                if not impresora_cups:
+                    try:
+                        out_a = subprocess.check_output(["lpstat", "-a"], stderr=subprocess.DEVNULL, timeout=2, text=True)
+                        lineas = [ln.split()[0].strip() for ln in out_a.splitlines() if ln.strip()]
+                        if lineas:
+                            impresora_cups = lineas[0]
+                    except Exception:
+                        pass
+
+            # Crear archivo temporal con los bytes RAW
+            fd, temp_bin = tempfile.mkstemp(prefix="vmpos_drawer_", suffix=".bin")
+            try:
+                with os.fdopen(fd, "wb") as f_bin:
+                    f_bin.write(cmd_cajon)
+
+                cmd_lp = ["lp", "-o", "raw"]
+                if impresora_cups:
+                    cmd_lp.extend(["-d", impresora_cups])
+                cmd_lp.append(temp_bin)
+
+                proc = subprocess.run(cmd_lp, capture_output=True, text=True, timeout=5)
+                if proc.returncode == 0:
+                    dest_str = impresora_cups or "Predeterminada de CUPS"
+                    return True, f"Pulso de apertura enviado exitosamente a '{dest_str}' (macOS CUPS RAW)."
+                else:
+                    err_msg = (proc.stderr or proc.stdout or "").strip()
+                    errores.append(f"CUPS RAW: {err_msg or f'Código {proc.returncode}'}")
+            finally:
+                try:
+                    os.remove(temp_bin)
+                except Exception:
+                    pass
+        except Exception as e_cups:
+            errores.append(f"macOS/CUPS: {e_cups}")
+
+    # 3. En Windows vía win32print RAW
     if sys.platform.startswith("win"):
         try:
             import win32print
             nombre_dest = str(cfg.get("impresora_nombre", "")).strip()
-            if not nombre_dest or nombre_dest in ("Predeterminada del sistema", "USB Térmica Directa (ESC/POS)"):
+            if not nombre_dest or nombre_dest in ("Predeterminada del sistema", "USB Térmica Directa (ESC/POS)") or nombre_dest.startswith("USB Directa:"):
                 nombre_dest = win32print.GetDefaultPrinter()
             if nombre_dest:
                 hPrinter = win32print.OpenPrinter(nombre_dest)
@@ -1665,15 +1796,26 @@ def pulsar_apertura_cajon(config_override=None) -> Tuple[bool, str]:
                     win32print.EndDocPrinter(hPrinter)
                 finally:
                     win32print.ClosePrinter(hPrinter)
-                return True, f"Cajón abierto vía impresora '{nombre_dest}'."
-        except Exception as e:
-            pass
+                return True, f"Cajón abierto exitosamente vía impresora '{nombre_dest}' (Windows RAW)."
+            else:
+                errores.append("Windows: No se encontró una impresora instalada.")
+        except Exception as e_win:
+            errores.append(f"Windows RAW: {e_win}")
 
-    # 3. Probar por USB directo ESC/POS
+    # 4. Probar por USB directo ESC/POS (pyusb)
     try:
         import usb.core
         dev = _buscar_impresora_usb_compatible(cfg)
         if dev:
+            try:
+                if dev.is_kernel_driver_active(0):
+                    dev.detach_kernel_driver(0)
+            except Exception:
+                pass
+            try:
+                dev.set_configuration()
+            except Exception:
+                pass
             cfg_desc = dev.get_active_configuration()
             intf = cfg_desc[(0, 0)]
             ep = None
@@ -1683,11 +1825,17 @@ def pulsar_apertura_cajon(config_override=None) -> Tuple[bool, str]:
                     break
             if ep:
                 dev.write(ep, cmd_cajon, timeout=2000)
-                return True, "Cajón abierto exitosamente vía USB ESC/POS."
-    except Exception:
-        pass
+                return True, "Cajón abierto exitosamente vía USB directo ESC/POS."
+    except Exception as e_usb:
+        errores.append(f"USB Directo: {e_usb}")
 
-    return False, "No se pudo comunicar con la impresora para abrir el cajón. Verifique la conexión USB o IP de la impresora."
+    detalle_err = ("\n• " + "\n• ".join(errores)) if errores else ""
+    return False, (
+        "No se pudo comunicar con la impresora para abrir el cajón.\n"
+        "Verifique que la impresora esté encendida, con cable USB o Red conectado, "
+        "y que el cajón esté conectado a la salida RJ11 de la impresora."
+        f"{detalle_err}"
+    )
 
 
 def imprimir_factura_unificada(datos_venta, config_override=None):

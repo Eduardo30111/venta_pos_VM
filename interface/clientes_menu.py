@@ -1035,6 +1035,17 @@ def iniciar_clientes(parent_pid="", parent=None):
                         e_monto.clear()
                         obs_var.set("")
                         refrescar_detalle()
+
+                        if str(metodo).strip().lower() == "efectivo":
+                            try:
+                                try:
+                                    from interface.receipt_manager import pulsar_apertura_cajon
+                                except ImportError:
+                                    from receipt_manager import pulsar_apertura_cajon
+                                pulsar_apertura_cajon()
+                            except Exception as e_caj:
+                                print(f"Aviso abriendo gaveta en abono: {e_caj}")
+
                         if on_abono_hecho:
                             on_abono_hecho()
                     else:

@@ -96,6 +96,7 @@ PRINTER_CONFIG_POR_DEFECTO = {
     "copias": 1,
     "corte_automatico": True,
     "abrir_cajon": True,
+    "comando_cajon_modo": "estandar_dual",  # "estandar_dual", "pin2", "pin5", "realtime", "bel"
     "ip_impresora_red": "",
     "puerto_impresora_red": 9100,
     "usb_vendor_id": "",
