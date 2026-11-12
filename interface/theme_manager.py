@@ -614,9 +614,11 @@ def aplicar_tema(root_or_window):
                     background=t["bg_surface_alt"],
                     foreground=t["text_main"],
                     borderwidth=0)
+    tab_fg_selected = t["text_main"] if sys.platform == "darwin" else t["text_header"]
+    tab_bg_selected = t["bg_surface"] if sys.platform == "darwin" else t["bg_header"]
     style.map("TNotebook.Tab",
-              background=[('selected', t["bg_header"])],
-              foreground=[('selected', t["text_header"])])
+              background=[('selected', tab_bg_selected)],
+              foreground=[('selected', tab_fg_selected)])
 
     # Scrollbars TTK
     style.configure("TScrollbar",
@@ -778,6 +780,7 @@ class ScrollableContainer(tk.Frame):
         self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.content_frame = tk.Frame(self.canvas, bg=fondo)
         self.scrollable_frame = self.content_frame
+        self.interior = self.content_frame
 
         self.canvas_window = self.canvas.create_window((0, 0), window=self.content_frame, anchor="nw")
 
@@ -819,6 +822,14 @@ class ScrollableContainer(tk.Frame):
             if abs(event.delta) >= 120:
                 incremento = -int(event.delta / 120)
             self.canvas.yview_scroll(incremento, "units")
+
+    @property
+    def interior(self):
+        return self.content_frame
+
+    @interior.setter
+    def interior(self, val):
+        self.content_frame = val
 
 
 # =============================================================================

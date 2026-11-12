@@ -493,8 +493,22 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         except Exception:
             pil_activa = False
 
-        _base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        assets_denom_dir = os.path.join(_base_dir, "assets", "denominaciones")
+        assets_denom_dir = None
+        try:
+            from interface.config import BUNDLE_DIR, BASE_DIR
+            for c in [
+                os.path.join(BUNDLE_DIR, "assets", "denominaciones"),
+                os.path.join(BASE_DIR, "assets", "denominaciones"),
+                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "denominaciones"),
+            ]:
+                if c and os.path.isdir(c):
+                    assets_denom_dir = c
+                    break
+        except Exception:
+            pass
+        if not assets_denom_dir:
+            _base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            assets_denom_dir = os.path.join(_base_dir, "assets", "denominaciones")
 
         DENOM_BILLETES = [
             {"valor": 100000, "nombre": "Billete de $100.000", "archivo": "billete_100000.png"},
@@ -582,7 +596,7 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         def construir_filas_denominacion(parent, lista_denoms, es_moneda=False):
             scroll_c = ScrollableContainer(parent, bg=t_dlg["bg_surface"])
             scroll_c.pack(fill="both", expand=True, padx=4, pady=4)
-            interior = scroll_c.interior
+            interior = getattr(scroll_c, "interior", getattr(scroll_c, "scrollable_frame", getattr(scroll_c, "content_frame", scroll_c)))
 
             for item in lista_denoms:
                 val = item["valor"]
