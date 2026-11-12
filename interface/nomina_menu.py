@@ -1791,6 +1791,10 @@ def iniciar_nomina(parent_pid="", parent=None):
             try:
                 res = liquidar_proveedor_db(
                     proveedor_id=id_prov,
+                    proveedor_nombre=nombre,
+                    documento_nit=doc,
+                    saldo_pendiente=saldo_actual,
+                    saldo_actual=saldo_actual,
                     monto_abono=monto_val,
                     metodo_pago=metodo,
                     referencia_comprobante=ref,

@@ -110,9 +110,20 @@ def recalcular_saldo_proveedor(proveedor_id: int, conn: Optional[sqlite3.Connect
             except Exception:
                 pass
 
-        # Si el proveedor no tiene cuentas por pagar registradas pero ya tenía saldo acumulado previo (saldo legacy), conservarlo
+        # Si el proveedor no tiene cuentas por pagar registradas pero ya tenía saldo acumulado previo (saldo legacy), conservarlo descontando liquidaciones
         if conteo_cxp == 0 and p_row and float(p_row[2] or 0.0) > 0:
-            saldo_p = float(p_row[2])
+            try:
+                cur.execute("""
+                    SELECT COALESCE(SUM(monto_liquidado), 0.0)
+                    FROM liquidaciones_proveedores
+                    WHERE (proveedor_id = ? OR CAST(proveedor_id AS TEXT) = ? OR ((proveedor_id IS NULL OR proveedor_id = 0) AND LOWER(proveedor_nombre) = LOWER(?)))
+                      AND estado != 'Anulada'
+                """, (proveedor_id, str(proveedor_id), p_nom))
+                tot_liq = float(cur.fetchone()[0] or 0.0)
+                tot_p = max(tot_p, tot_liq)
+                saldo_p = max(0.0, round(float(p_row[2]) - tot_liq, 2))
+            except Exception:
+                saldo_p = float(p_row[2])
 
         # Actualizar tabla proveedores
         cur.execute("PRAGMA table_info(proveedores)")
@@ -1274,6 +1285,29 @@ def liquidar_proveedor_db(
     if not observaciones:
         observaciones = kwargs.get("notas", "")
 
+    prov_nom_arg = (
+        kwargs.get("proveedor_nombre") or
+        kwargs.get("nombre_proveedor") or
+        kwargs.get("nombre") or
+        kwargs.get("proveedor") or
+        ""
+    ).strip()
+    doc_nit_arg = (
+        kwargs.get("documento_nit") or
+        kwargs.get("nit") or
+        kwargs.get("documento") or
+        ""
+    ).strip()
+    try:
+        saldo_esperado_arg = float(
+            kwargs.get("saldo_pendiente") or
+            kwargs.get("saldo_actual") or
+            kwargs.get("saldo_acumulado") or
+            0.0
+        )
+    except Exception:
+        saldo_esperado_arg = 0.0
+
     if conn is None and api is not None:
         endpoints_to_try = [
             f"/proveedores/{proveedor_id}/liquidar",
@@ -1291,10 +1325,12 @@ def liquidar_proveedor_db(
                         "referencia": referencia or "",
                         "observaciones": observaciones or "",
                         "sesion_caja_id": sesion_caja_id,
+                        "proveedor_nombre": prov_nom_arg,
+                        "documento_nit": doc_nit_arg,
                     },
                     timeout=7.0,
                 )
-                if resp.status_code == 200:
+                if resp.status_code in (200, 201):
                     res_api = resp.json()
                     res_api["exito"] = True
                     res_api["ok"] = True
@@ -1373,9 +1409,12 @@ def liquidar_proveedor_db(
     try:
         cur = conn.cursor()
 
-        # 1. Validar proveedor y saldo pendiente
+        # 1. Validar proveedor y saldo pendiente (con búsqueda flexible por ID y por Nombre)
         cur.execute("SELECT id, nombre, COALESCE(saldo_acumulado, 0.0) FROM proveedores WHERE id = ?", (proveedor_id,))
         prov_row = cur.fetchone()
+        if not prov_row and prov_nom_arg:
+            cur.execute("SELECT id, nombre, COALESCE(saldo_acumulado, 0.0) FROM proveedores WHERE LOWER(nombre) = LOWER(?)", (prov_nom_arg,))
+            prov_row = cur.fetchone()
         if not prov_row:
             cur.execute("SELECT id, nombre, COALESCE(saldo_acumulado, 0.0) FROM proveedores WHERE CAST(id AS TEXT) = ? OR nombre LIKE ?", (str(proveedor_id), f"%{proveedor_id}%"))
             prov_row = cur.fetchone()
@@ -1383,29 +1422,38 @@ def liquidar_proveedor_db(
         if not prov_row:
             cur.execute("SELECT DISTINCT proveedor_nombre FROM cuentas_por_pagar_proveedores WHERE proveedor_id = ? OR CAST(proveedor_id AS TEXT) = ?", (proveedor_id, str(proveedor_id)))
             nom_row = cur.fetchone()
-            prov_nom_fb = nom_row[0] if nom_row else f"Proveedor #{proveedor_id}"
+            prov_nom_fb = prov_nom_arg or (nom_row[0] if nom_row else f"Proveedor #{proveedor_id}")
             try:
-                cur.execute("INSERT OR IGNORE INTO proveedores (id, nombre, saldo_acumulado, estado) VALUES (?, ?, 0.0, 'Activo')", (proveedor_id, prov_nom_fb))
+                cur.execute("PRAGMA table_info(proveedores)")
+                cols_prov_db = [c[1] for c in cur.fetchall()]
+                cols_ins = ["id", "nombre", "saldo_acumulado"]
+                vals_ins = [proveedor_id, prov_nom_fb, max(saldo_esperado_arg, float(monto or 0.0))]
+                if "documento_nit" in cols_prov_db:
+                    cols_ins.append("documento_nit")
+                    vals_ins.append(doc_nit_arg)
+                if "estado" in cols_prov_db:
+                    cols_ins.append("estado")
+                    vals_ins.append("Activo")
+                placeholders = ", ".join(["?"] * len(cols_ins))
+                cur.execute(f"INSERT OR REPLACE INTO proveedores ({', '.join(cols_ins)}) VALUES ({placeholders})", vals_ins)
                 conn.commit()
                 cur.execute("SELECT id, nombre, COALESCE(saldo_acumulado, 0.0) FROM proveedores WHERE id = ?", (proveedor_id,))
                 prov_row = cur.fetchone()
-            except Exception:
-                pass
+            except Exception as e_p_prov:
+                print(f"Aviso auto-aprovisionando proveedor en liquidación: {e_p_prov}")
 
+        # Garantizar que prov_row nunca sea nulo si se conoce el nombre o ID del proveedor
         if not prov_row:
-            return {
-                "exito": False,
-                "ok": False,
-                "mensaje": f"Proveedor con ID {proveedor_id} no encontrado."
-            }
+            prov_nom_fb = prov_nom_arg or f"Proveedor #{proveedor_id}"
+            prov_row = (proveedor_id, prov_nom_fb, max(saldo_esperado_arg, float(monto or 0.0)))
 
         prov_nom = str(prov_row[1])
         saldo_actual = float(prov_row[2] or 0.0)
 
         # Recálculo fresco para máxima consistencia
         rec = recalcular_saldo_proveedor(proveedor_id, conn=conn)
-        saldo_calc = float(rec["saldo_pendiente"] or 0.0)
-        saldo_actual = max(saldo_actual, saldo_calc)
+        saldo_calc = float(rec.get("saldo_pendiente") or 0.0)
+        saldo_actual = max(saldo_actual, saldo_calc, saldo_esperado_arg)
 
         try:
             monto_flt = round(float(monto or 0.0), 2)
@@ -1566,6 +1614,28 @@ def liquidar_proveedor_db(
 
         # 7. Actualizar saldo acumulado del proveedor
         recalcular_saldo_proveedor(proveedor_id, conn=conn)
+
+        # 8. Encolar en la cola transaccional persistente si se guardó en local SQLite
+        try:
+            from interface.sync_manager import sync_mgr
+            sync_mgr.encolar_operacion(
+                tipo_operacion="LIQUIDACION_PROVEEDOR",
+                payload={
+                    "proveedor_id": proveedor_id,
+                    "proveedor_nombre": prov_nom,
+                    "documento_nit": doc_nit_arg,
+                    "monto": monto_flt,
+                    "metodo_pago": metodo_pago,
+                    "referencia": referencia,
+                    "observaciones": observaciones,
+                    "numero_recibo": numero_recibo,
+                },
+                empresa="PRINCIPAL",
+                usuario=usuario,
+                id_local=str(id_liq)
+            )
+        except Exception as e_q:
+            pass
 
         if cerrar_conn:
             conn.commit()

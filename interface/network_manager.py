@@ -331,7 +331,121 @@ def obtener_config_red() -> Dict[str, Any]:
     if isinstance(datos, dict):
         resultado.update(datos)
     resultado.pop("tipo_nodo", None)
+
+    # Si este equipo es el servidor principal, mantener su IP LAN siempre sincronizada con la IP física real activa
+    if resultado.get("modo", "servidor") == "servidor":
+        ips_actuales = obtener_ips_locales()
+        if ips_actuales and ips_actuales[0] != "127.0.0.1":
+            resultado["servidor_ip"] = ips_actuales[0]
+
     return resultado
+
+
+def descubrir_servidor_en_lan(puerto: int = OFFICIAL_SERVER_PORT, timeout_por_host: float = 0.18) -> Optional[Dict[str, Any]]:
+    """
+    Sondea la red local concurrentemente para descubrir un servidor VmPOS activo:
+    1. Comprueba 127.0.0.1 primero (por si el servidor está en este mismo equipo).
+    2. Determina el prefijo de subred local /24 (ej: '192.168.1.').
+    3. Sondea concurrentemente en hilos los 254 hosts en el puerto indicado.
+    4. Verifica /api/health en los que tengan el puerto abierto.
+    5. Retorna {'ip': ip, 'puerto': puerto, 'nombre_negocio': ...} o None.
+    """
+    # 1. Comprobar localhost primero en 10ms
+    ok_local, datos_local, _, _ = verificar_salud_servidor("127.0.0.1", puerto=puerto, timeout=0.8)
+    if ok_local:
+        return {
+            "ip": "127.0.0.1",
+            "puerto": puerto,
+            "nombre_negocio": datos_local.get("nombre_negocio", "VmPOS"),
+            "es_local": True
+        }
+
+    # 2. Obtener prefijos de subredes locales
+    ips_locales = obtener_ips_locales()
+    subredes = set()
+    for ip in ips_locales:
+        if ip and ip != "127.0.0.1":
+            partes = ip.split(".")
+            if len(partes) == 4:
+                subredes.add(f"{partes[0]}.{partes[1]}.{partes[2]}.")
+
+    if not subredes:
+        subredes.add("192.168.1.")
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _probar_puerto(target_ip: str) -> Optional[str]:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout_por_host)
+            res = s.connect_ex((target_ip, int(puerto)))
+            s.close()
+            return target_ip if res == 0 else None
+        except Exception:
+            return None
+
+    for sub in subredes:
+        candidatos_ip = [f"{sub}{i}" for i in range(1, 255)]
+        try:
+            with ThreadPoolExecutor(max_workers=35) as pool:
+                abiertos = [ip for ip in pool.map(_probar_puerto, candidatos_ip) if ip]
+        except Exception:
+            abiertos = []
+
+        for host_abierto in abiertos:
+            ok_h, datos_h, _, _ = verificar_salud_servidor(host_abierto, puerto=puerto, timeout=1.5)
+            if ok_h:
+                return {
+                    "ip": host_abierto,
+                    "puerto": puerto,
+                    "nombre_negocio": datos_h.get("nombre_negocio", "VmPOS"),
+                    "es_local": False
+                }
+
+    return None
+
+
+def auto_recuperar_conexion_servidor() -> Tuple[bool, str]:
+    """
+    Intenta recuperar automáticamente la conexión con el servidor si la IP configurada falló:
+    - Si el equipo es servidor o 127.0.0.1 responde, fija 127.0.0.1.
+    - Si es cliente, descubre el servidor en la LAN y actualiza network_config.json.
+    Retorna: (recuperado: bool, url_base: str)
+    """
+    cfg = obtener_config_red()
+    puerto = int(cfg.get("servidor_puerto", OFFICIAL_SERVER_PORT))
+    modo = cfg.get("modo", "servidor")
+
+    # 1. Si está en modo servidor o si 127.0.0.1 responde, conectar a 127.0.0.1
+    ok_loc, _, _, _ = verificar_salud_servidor("127.0.0.1", puerto=puerto, timeout=0.8)
+    if ok_loc or modo == "servidor":
+        url = f"http://127.0.0.1:{puerto}"
+        os.environ["API_BASE_URL"] = url
+        try:
+            from client.api_client import api
+            api.base_url = url
+        except Exception:
+            pass
+        return True, url
+
+    # 2. Si es cliente, buscar en la LAN
+    desc = descubrir_servidor_en_lan(puerto=puerto)
+    if desc:
+        nueva_ip = desc["ip"]
+        nueva_url = f"http://{nueva_ip}:{puerto}"
+        cfg["servidor_ip"] = nueva_ip
+        guardar_config_red(cfg)
+        os.environ["API_BASE_URL"] = nueva_url
+        try:
+            from client.api_client import api
+            api.base_url = nueva_url
+            api.esta_disponible(forzar=True)
+        except Exception:
+            pass
+        _registrar_log_servidor(f"Auto-descubrimiento exitoso: Servidor encontrado en {nueva_ip}:{puerto}")
+        return True, nueva_url
+
+    return False, f"http://{cfg.get('servidor_ip', '127.0.0.1')}:{puerto}"
 
 
 def guardar_config_red(datos: Dict[str, Any]) -> bool:

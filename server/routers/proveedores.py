@@ -24,6 +24,8 @@ class LiquidarProveedorRequest(BaseModel):
     comprobante: Optional[str] = ""
     referencia: Optional[str] = ""
     observaciones: Optional[str] = ""
+    proveedor_nombre: Optional[str] = None
+    documento_nit: Optional[str] = None
 
 
 @router.get("", response_model=List[ProveedorResponse])
@@ -389,8 +391,22 @@ async def liquidar_proveedor(
 ) -> Dict[str, Any]:
     res_p = await db.execute(select(Proveedor).with_for_update().where(Proveedor.id == id))
     prov = res_p.scalars().first()
+    if not prov and req.proveedor_nombre:
+        res_p_nom = await db.execute(
+            select(Proveedor).with_for_update().where(func.lower(Proveedor.nombre) == func.lower(req.proveedor_nombre.strip()))
+        )
+        prov = res_p_nom.scalars().first()
+
     if not prov:
-        raise HTTPException(status_code=404, detail="Proveedor no encontrado")
+        prov = Proveedor(
+            id=id,
+            nombre=req.proveedor_nombre.strip() if req.proveedor_nombre else f"Proveedor #{id}",
+            documento_nit=req.documento_nit or "",
+            saldo_acumulado=float(req.monto or 0.0),
+            estado="Activo"
+        )
+        db.add(prov)
+        await db.flush()
 
     await _sincronizar_cxp_retroactivas_server(db, id)
 

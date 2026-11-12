@@ -4,5 +4,5 @@
     "servidor_puerto": 8000,
     "terminal_id": 1,
     "terminal_nombre": "CAJA-01",
-    "timeout_segundos": 10
+    "timeout_segundos": 6
 }

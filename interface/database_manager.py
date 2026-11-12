@@ -561,12 +561,16 @@ def inicializar_base_datos(db_path=None):
             except sqlite3.OperationalError:
                 pass
 
-        # 20. Migraciones de Proveedores (NIT, acumulados y métricas)
+        # 20. Migraciones de Proveedores (NIT, acumulados, estado y métricas)
         for col_def in [
             "total_ventas REAL DEFAULT 0.0",
             "total_comisiones REAL DEFAULT 0.0",
             "total_pagado REAL DEFAULT 0.0",
-            "documento_nit TEXT DEFAULT ''"
+            "documento_nit TEXT DEFAULT ''",
+            "estado TEXT DEFAULT 'Activo'",
+            "email TEXT DEFAULT ''",
+            "direccion TEXT DEFAULT ''",
+            "contacto TEXT DEFAULT ''"
         ]:
             try:
                 cursor.execute(f"ALTER TABLE proveedores ADD COLUMN {col_def}")
@@ -626,6 +630,28 @@ def inicializar_base_datos(db_path=None):
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_liq_prov_id ON liquidaciones_proveedores(proveedor_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_liq_prov_fecha ON liquidaciones_proveedores(fecha)")
+
+        # 23. Tabla de Cola de Sincronización Offline Persistente
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cola_sincronizacion (
+                id TEXT PRIMARY KEY,
+                empresa TEXT NOT NULL DEFAULT 'VmPOS',
+                usuario TEXT NOT NULL DEFAULT 'Administrador',
+                dispositivo TEXT NOT NULL DEFAULT 'CAJA-01',
+                tipo_operacion TEXT NOT NULL,
+                fecha_hora TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                estado_sync TEXT NOT NULL DEFAULT 'PENDIENTE',
+                intentos INTEGER NOT NULL DEFAULT 0,
+                ultimo_error TEXT DEFAULT '',
+                id_local INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cola_sync_estado ON cola_sincronizacion(estado_sync)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cola_sync_fecha ON cola_sincronizacion(fecha_hora)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cola_sync_tipo ON cola_sincronizacion(tipo_operacion)")
 
         # Índices de aceleración de consultas frecuentes (Ventas, Detalles, Productos y Clientes)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_fecha_estado ON ventas(fecha_venta, estado)")

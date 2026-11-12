@@ -17,9 +17,10 @@ except Exception:
     except Exception:
         _net_cfg = {}
 
-_ip = _net_cfg.get("servidor_ip", "127.0.0.1")
+_modo = str(_net_cfg.get("modo", "servidor")).lower()
+_ip = "127.0.0.1" if _modo == "servidor" else _net_cfg.get("servidor_ip", "127.0.0.1")
 _puerto = _net_cfg.get("servidor_puerto", OFFICIAL_SERVER_PORT)
-_default_url = f"http://{_ip}:{_puerto}" if _ip else f"http://localhost:{OFFICIAL_SERVER_PORT}"
+_default_url = f"http://{_ip}:{_puerto}" if _ip else f"http://127.0.0.1:{OFFICIAL_SERVER_PORT}"
 
 # Configuracion del cliente
 API_BASE_URL = os.getenv("API_BASE_URL", _default_url)

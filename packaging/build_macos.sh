@@ -25,19 +25,19 @@ elif [ -x "/opt/homebrew/bin/python3" ]; then
     PYTHON_BIN="/opt/homebrew/bin/python3"
 elif [ -x "/usr/local/bin/python3" ]; then
     PYTHON_BIN="/usr/local/bin/python3"
-elif [ -x "$PROJECT_ROOT/venv/bin/python" ] && [ -x "$PROJECT_ROOT/venv/bin/pyinstaller" ]; then
-    PYTHON_BIN="$PROJECT_ROOT/venv/bin/python"
-    export PYTHONPATH="$PROJECT_ROOT/.venv/lib/python3.9/site-packages:$PROJECT_ROOT/venv/lib/python3.9/site-packages:$PYTHONPATH"
-elif [ -x "$PROJECT_ROOT/.venv/bin/python3" ]; then
-    PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python3"
-elif [ -f "./venv/bin/python" ]; then
-    PYTHON_BIN="./venv/bin/python"
 else
     PYTHON_BIN="python3"
 fi
 
 echo "Usando intérprete Python: $PYTHON_BIN"
 $PYTHON_BIN -c "import tkinter, sys; print(f'Intérprete: Python {sys.version.split()[0]} | TkVersion: {tkinter.TkVersion} (Tcl: {tkinter.TclVersion})')"
+
+TK_MAJOR=$($PYTHON_BIN -c "import tkinter; print(int(str(tkinter.TkVersion).split('.')[0]))" 2>/dev/null || echo "0")
+TK_MINOR=$($PYTHON_BIN -c "import tkinter; print(int(str(tkinter.TkVersion).split('.')[1]))" 2>/dev/null || echo "0")
+if [ "$TK_MAJOR" -lt 8 ] || ([ "$TK_MAJOR" -eq 8 ] && [ "$TK_MINOR" -lt 6 ]); then
+    echo "❌ ERROR: Intérprete Python tiene Tk $TK_MAJOR.$TK_MINOR. Se requiere Tk >= 9.0 (Miniconda) para evitar el fallo gráfico Retina de Cocoa en macOS."
+    exit 1
+fi
 
 export PYINSTALLER_CONFIG_DIR="$PROJECT_ROOT/build/pyinstaller_cache"
 export MPLCONFIGDIR="$PROJECT_ROOT/build/matplotlib_cache"
