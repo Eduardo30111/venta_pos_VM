@@ -614,8 +614,8 @@ def aplicar_tema(root_or_window):
                     background=t["bg_surface_alt"],
                     foreground=t["text_main"],
                     borderwidth=0)
-    tab_fg_selected = t["text_main"] if sys.platform == "darwin" else t["text_header"]
-    tab_bg_selected = t["bg_surface"] if sys.platform == "darwin" else t["bg_header"]
+    tab_fg_selected = t["text_main"]
+    tab_bg_selected = t["bg_surface"]
     style.map("TNotebook.Tab",
               background=[('selected', tab_bg_selected)],
               foreground=[('selected', tab_fg_selected)])

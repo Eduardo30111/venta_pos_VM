@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import datetime
+from datetime import datetime, date
 import sys
 import os
 
@@ -109,8 +109,8 @@ def iniciar_nomina(parent_pid="", parent=None):
     ).pack(side="left", padx=20, pady=10)
 
     # Barra superior de métricas contables de nómina (Mes actual)
-    hoy_iso = datetime.date.today().strftime("%Y-%m-%d")
-    inicio_mes_iso = datetime.date.today().replace(day=1).strftime("%Y-%m-%d")
+    hoy_iso = date.today().strftime("%Y-%m-%d")
+    inicio_mes_iso = date.today().replace(day=1).strftime("%Y-%m-%d")
 
     kpi_bar = tk.Frame(ventana, bg=t["bg_app"])
     kpi_bar.pack(fill="x", padx=15, pady=(8, 2))
@@ -978,7 +978,7 @@ def iniciar_nomina(parent_pid="", parent=None):
         ventana_ast.transient(ventana)
         ventana_ast.grab_set()
 
-        hoy = datetime.date.today().strftime('%Y-%m-%d')
+        hoy = date.today().strftime('%Y-%m-%d')
 
         header_ast = tk.Frame(ventana_ast, bg=t_ast["bg_app"])
         header_ast.pack(fill="x", pady=(12, 4))

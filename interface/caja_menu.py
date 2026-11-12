@@ -572,11 +572,7 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         def poner_en_cero():
             for v_entry in list(cant_vars.values()):
                 v_entry.set("0")
-            if "recalcular_totales" in locals() or "recalcular_totales" in globals():
-                try:
-                    recalcular_totales()
-                except Exception:
-                    pass
+            recalcular_totales()
 
         btn_cero = crear_boton(
             row_total_box,
@@ -587,29 +583,129 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         )
         btn_cero.pack(side="right")
 
-        # Notebook de Pestañas: Billetes / Monedas
+        # Barra inferior de acciones (se empaqueta PRIMERO al fondo para garantizar visibilidad siempre)
+        btn_f = tk.Frame(dlg, bg=t_dlg["bg_surface"], padx=15, pady=12)
+        btn_f.pack(side="bottom", fill="x")
+
+        def confirmar():
+            total_val = recalcular_totales()
+            if total_val <= 0:
+                proceder = messagebox.askyesno(
+                    "Apertura en $0",
+                    "El total contado es de $0 COP.\n¿Desea abrir la caja registradora con base en cero?",
+                    parent=dlg
+                )
+                if not proceder:
+                    return
+
+            # Construir desglose estructurado del arqueo
+            desglose = {
+                "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "usuario": usuario_actual,
+                "total": float(total_val),
+                "billetes": [],
+                "monedas": []
+            }
+            for it in DENOM_BILLETES:
+                v = it["valor"]
+                try:
+                    q = int(cant_vars.get((False, v), tk.StringVar(value="0")).get().strip() or 0)
+                except ValueError:
+                    q = 0
+                if q > 0:
+                    desglose["billetes"].append({
+                        "denominacion": v,
+                        "nombre": it["nombre"],
+                        "cantidad": q,
+                        "subtotal": q * v
+                    })
+
+            for it in DENOM_MONEDAS:
+                v = it["valor"]
+                try:
+                    q = int(cant_vars.get((True, v), tk.StringVar(value="0")).get().strip() or 0)
+                except ValueError:
+                    q = 0
+                if q > 0:
+                    desglose["monedas"].append({
+                        "denominacion": v,
+                        "nombre": it["nombre"],
+                        "cantidad": q,
+                        "subtotal": q * v
+                    })
+
+            try:
+                abrir_sesion_caja(
+                    usuario=usuario_actual,
+                    monto_inicial=float(total_val),
+                    arqueo_detalle=desglose
+                )
+                dlg.destroy()
+                refrescar_vista()
+                messagebox.showinfo(
+                    "Caja Abierta con Éxito",
+                    f"Turno de caja abierto correctamente con efectivo contado de ${total_val:,.0f} COP.\n\n"
+                    f"El detalle por billetes y monedas quedó registrado en la sesión.",
+                    parent=ventana
+                )
+            except Exception as e:
+                messagebox.showerror("Error al abrir caja", f"No se pudo abrir la caja: {e}", parent=dlg)
+
+        crear_boton(btn_f, "Cancelar", dlg.destroy, tipo="secondary", tam_fuente=9).pack(side="right", padx=5)
+        btn_confirmar = crear_boton(btn_f, "Confirmar Apertura ($0)", confirmar, tipo="success", tam_fuente=10, negrita=True)
+        btn_confirmar.pack(side="right", padx=5)
+
+        # Notebook de Pestañas: Billetes / Monedas en el área central
         nb = ttk.Notebook(dlg)
-        nb.pack(fill="both", expand=True, padx=15, pady=(4, 8))
+        nb.pack(fill="both", expand=True, padx=15, pady=(4, 6))
 
         tab_billetes = tk.Frame(nb, bg=t_dlg["bg_surface"])
         tab_monedas = tk.Frame(nb, bg=t_dlg["bg_surface"])
 
-        nb.add(tab_billetes, text="💵 Billetes (COP)")
-        nb.add(tab_monedas, text="🪙 Monedas (COP)")
+        nb.add(tab_billetes, text="  💵  Billetes (COP)  ")
+        nb.add(tab_monedas, text="  🪙  Monedas (COP)  ")
 
         def construir_filas_denominacion(parent, lista_denoms, es_moneda=False):
-            scroll_c = ScrollableContainer(parent, bg=t_dlg["bg_surface"])
-            scroll_c.pack(fill="both", expand=True, padx=4, pady=4)
-            interior = getattr(scroll_c, "interior", getattr(scroll_c, "scrollable_frame", getattr(scroll_c, "content_frame", scroll_c)))
+            # Contenedor con Canvas scrollable seguro
+            canvas = tk.Canvas(parent, bg=t_dlg["bg_surface"], highlightthickness=0, bd=0)
+            scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+            interior = tk.Frame(canvas, bg=t_dlg["bg_surface"])
+
+            interior_id = canvas.create_window((0, 0), window=interior, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+
+            canvas.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
+            scrollbar.pack(side="right", fill="y", pady=4)
+
+            def _on_frame_cfg(event=None):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            def _on_canvas_cfg(event):
+                if event.width > 30:
+                    canvas.itemconfig(interior_id, width=event.width)
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            interior.bind("<Configure>", _on_frame_cfg)
+            canvas.bind("<Configure>", _on_canvas_cfg)
+
+            def _on_wheel(e):
+                if sys.platform == "darwin":
+                    canvas.yview_scroll(int(-1 * (e.delta)), "units")
+                else:
+                    canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+            canvas.bind("<MouseWheel>", _on_wheel)
+            interior.bind("<MouseWheel>", _on_wheel)
 
             for item in lista_denoms:
                 val = item["valor"]
                 nom = item["nombre"]
                 fname = item["archivo"]
                 fpath = os.path.join(assets_denom_dir, fname)
+                k = (es_moneda, val)
 
                 row_f = tk.Frame(interior, bg=t_dlg["bg_surface"], bd=1, relief="ridge", padx=8, pady=5)
-                row_f.pack(fill="x", pady=2)
+                row_f.pack(fill="x", pady=2, padx=4)
 
                 # Icono o imagen
                 lbl_img = None
@@ -646,29 +742,29 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
                 ).pack(side="left")
 
                 # Stepper: [-]
-                def _dec(v=val):
-                    cur_str = cant_vars[v].get().strip()
+                def _dec(k_dec=k):
+                    cur_str = cant_vars[k_dec].get().strip()
                     try:
                         cur_i = int(cur_str or 0)
                     except ValueError:
                         cur_i = 0
                     if cur_i > 0:
-                        cant_vars[v].set(str(cur_i - 1))
+                        cant_vars[k_dec].set(str(cur_i - 1))
                     recalcular_totales()
 
-                def _inc(v=val):
-                    cur_str = cant_vars[v].get().strip()
+                def _inc(k_inc=k):
+                    cur_str = cant_vars[k_inc].get().strip()
                     try:
                         cur_i = int(cur_str or 0)
                     except ValueError:
                         cur_i = 0
-                    cant_vars[v].set(str(cur_i + 1))
+                    cant_vars[k_inc].set(str(cur_i + 1))
                     recalcular_totales()
 
                 btn_sub = tk.Button(
                     row_f,
                     text="−",
-                    command=lambda v=val: _dec(v),
+                    command=lambda k_sub=k: _dec(k_sub),
                     width=2,
                     font=("Segoe UI", 10, "bold"),
                     bg=t_dlg["bg_surface_alt"],
@@ -681,7 +777,7 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
 
                 # Entry cantidad
                 var_q = tk.StringVar(value="0")
-                cant_vars[val] = var_q
+                cant_vars[k] = var_q
 
                 ent = tk.Entry(
                     row_f,
@@ -706,7 +802,7 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
                 btn_add = tk.Button(
                     row_f,
                     text="+",
-                    command=lambda v=val: _inc(v),
+                    command=lambda k_add=k: _inc(k_add),
                     width=2,
                     font=("Segoe UI", 10, "bold"),
                     bg=t_dlg["bg_surface_alt"],
@@ -728,14 +824,22 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
                     anchor="e"
                 )
                 lbl_sub.pack(side="right", padx=6)
-                subtotal_lbls[val] = lbl_sub
+                subtotal_lbls[k] = lbl_sub
 
         construir_filas_denominacion(tab_billetes, DENOM_BILLETES, es_moneda=False)
         construir_filas_denominacion(tab_monedas, DENOM_MONEDAS, es_moneda=True)
 
+        def _on_tab_change(event=None):
+            dlg.update_idletasks()
+            for c in [tab_billetes, tab_monedas]:
+                for w in c.winfo_children():
+                    if isinstance(w, tk.Canvas):
+                        w.configure(scrollregion=w.bbox("all"))
+        nb.bind("<<NotebookTabChanged>>", _on_tab_change)
+
         def recalcular_totales():
             total = 0
-            for v, v_var in cant_vars.items():
+            for (es_mon, v), v_var in cant_vars.items():
                 s = v_var.get().strip()
                 try:
                     c = int(s or 0)
@@ -746,84 +850,12 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
                     c = 0
                 sub = c * v
                 total += sub
-                if v in subtotal_lbls:
-                    subtotal_lbls[v].config(text=f"${sub:,.0f}")
+                if (es_mon, v) in subtotal_lbls:
+                    subtotal_lbls[(es_mon, v)].config(text=f"${sub:,.0f}")
 
             lbl_total_contado.config(text=f"${total:,.0f} COP")
             btn_confirmar.config(text=f"Confirmar Apertura (${total:,.0f})")
             return total
-
-        # Barra inferior de acciones
-        btn_f = tk.Frame(dlg, bg=t_dlg["bg_surface"], padx=15, pady=10)
-        btn_f.pack(side="bottom", fill="x")
-
-        def confirmar():
-            total_val = recalcular_totales()
-            if total_val <= 0:
-                proceder = messagebox.askyesno(
-                    "Apertura en $0",
-                    "El total contado es de $0 COP.\n¿Desea abrir la caja registradora con base en cero?",
-                    parent=dlg
-                )
-                if not proceder:
-                    return
-
-            # Construir desglose estructurado del arqueo
-            desglose = {
-                "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "usuario": usuario_actual,
-                "total": float(total_val),
-                "billetes": [],
-                "monedas": []
-            }
-            for it in DENOM_BILLETES:
-                v = it["valor"]
-                try:
-                    q = int(cant_vars[v].get().strip() or 0)
-                except ValueError:
-                    q = 0
-                if q > 0:
-                    desglose["billetes"].append({
-                        "denominacion": v,
-                        "nombre": it["nombre"],
-                        "cantidad": q,
-                        "subtotal": q * v
-                    })
-
-            for it in DENOM_MONEDAS:
-                v = it["valor"]
-                try:
-                    q = int(cant_vars[v].get().strip() or 0)
-                except ValueError:
-                    q = 0
-                if q > 0:
-                    desglose["monedas"].append({
-                        "denominacion": v,
-                        "nombre": it["nombre"],
-                        "cantidad": q,
-                        "subtotal": q * v
-                    })
-
-            try:
-                abrir_sesion_caja(
-                    usuario=usuario_actual,
-                    monto_inicial=float(total_val),
-                    arqueo_detalle=desglose
-                )
-                dlg.destroy()
-                refrescar_vista()
-                messagebox.showinfo(
-                    "Caja Abierta con Éxito",
-                    f"Turno de caja abierto correctamente con efectivo contado de ${total_val:,.0f} COP.\n\n"
-                    f"El detalle por billetes y monedas quedó registrado en la sesión.",
-                    parent=ventana
-                )
-            except Exception as e:
-                messagebox.showerror("Error al abrir caja", f"No se pudo abrir la caja: {e}", parent=dlg)
-
-        crear_boton(btn_f, "Cancelar", dlg.destroy, tipo="secondary", tam_fuente=9).pack(side="right", padx=5)
-        btn_confirmar = crear_boton(btn_f, "Confirmar Apertura ($0)", confirmar, tipo="success", tam_fuente=10, negrita=True)
-        btn_confirmar.pack(side="right", padx=5)
 
         recalcular_totales()
 
