@@ -20,6 +20,7 @@ build/
 # Archivos pesados de distribución (se descargan o generan con build_windows / build_macos)
 dist/*.zip
 dist/*.dmg
+dist/*.exe
 dist/VmPOS/
 dist/VmPOS.app/
 
