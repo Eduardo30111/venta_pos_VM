@@ -417,18 +417,22 @@ async def liquidar_proveedor(
         hora_str=h_str,
     )
 
+    num_liq = f"LIQ-PROV-{ahora.strftime('%Y%m%d%H%M%S')}-{prov.id}"
+    saldo_restante_final = max(0.0, round(saldo_total - monto_pagar, 2))
     liq = LiquidacionProveedor(
+        numero_liquidacion=num_liq,
         proveedor_id=prov.id,
+        proveedor_nombre=prov.nombre,
         fecha=f_str,
         hora=h_str,
         monto_pagado=monto_pagar,
         metodo_pago=metodo,
-        comprobante=req.comprobante or "",
+        referencia=req.comprobante or "",
+        saldo_anterior=saldo_total,
+        saldo_restante=saldo_restante_final,
         usuario=u_nom,
         observaciones=req.observaciones or "",
-        gasto_id=gasto.id,
-        movimiento_financiero_id=mf.id,
-        estado="Completado",
+        estado="Completada",
     )
     db.add(liq)
     await db.flush()

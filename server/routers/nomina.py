@@ -445,6 +445,11 @@ async def liquidar_proveedor(id: int, db: AsyncSession = Depends(get_db), curren
     
     for c in cuentas_pendientes:
         c.estado = 'Pagada'
+        c.saldo_pendiente = 0.0
+        c.monto_pagado = float(getattr(c, 'monto', 0.0) or getattr(c, 'monto_por_pagar', 0.0) or 0.0)
+
+    prov.saldo_acumulado = max(0.0, round(float(prov.saldo_acumulado or 0.0) - total_pagar, 2))
+    prov.total_pagado = round(float(prov.total_pagado or 0.0) + total_pagar, 2)
         
     gasto = Gasto(
         concepto=f"Pago a Proveedor - {prov.nombre}",

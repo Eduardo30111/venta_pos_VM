@@ -790,6 +790,24 @@ def obtener_resumen_proveedores(
                         "estado": p.get("estado") or "Activo",
                     })
 
+                # Verificar y reconciliar con el estado real de las CXP en el servidor
+                for item in res:
+                    pid = item.get("id")
+                    if pid:
+                        try:
+                            r_cxp = api.get(f"/proveedores/{pid}/cxp", timeout=3.0)
+                            if r_cxp.status_code == 200:
+                                cxps = r_cxp.json()
+                                if cxps:
+                                    s_real = sum(float(c.get("saldo_pendiente") or 0.0) for c in cxps if str(c.get("estado", "")).lower() in ("pendiente", "parcial"))
+                                    item["saldo_pendiente"] = s_real
+                                    item["saldo_acumulado"] = s_real
+                                    tot_pag = sum(float(c.get("monto_pagado") or c.get("precio_venta") or 0.0) for c in cxps if str(c.get("estado", "")).lower() == "pagada")
+                                    if tot_pag > item["total_pagado"]:
+                                        item["total_pagado"] = tot_pag
+                        except Exception as e_cxp_live:
+                            pass
+
                 # Reconciliar con cuentas por pagar de SQLite local para reflejar ventas pendientes de inmediato
                 try:
                     sincronizar_cxp_retroactivas()
@@ -914,10 +932,16 @@ def obtener_detalle_cuentas_proveedor(
             if resp.status_code == 200:
                 raw_cxp = resp.json()
                 for c in raw_cxp:
-                    m_pagar = float(c.get("monto_por_pagar") or c.get("monto_proveedor") or c.get("monto") or 0.0)
+                    m_pagar = float(c.get("monto_por_pagar") or c.get("monto_proveedor") or c.get("monto") or c.get("precio_venta") or 0.0)
                     m_pagado = float(c.get("monto_pagado") or 0.0)
-                    s_pend = float(c.get("saldo_pendiente") if c.get("saldo_pendiente") is not None else max(0.0, m_pagar - m_pagado))
-                    if solo_pendientes and s_pend <= 0.009:
+                    est = str(c.get("estado", "Pendiente"))
+                    if est.lower() == "pagada":
+                        s_pend = 0.0
+                        if m_pagado <= 0:
+                            m_pagado = m_pagar
+                    else:
+                        s_pend = float(c.get("saldo_pendiente") if c.get("saldo_pendiente") is not None else max(0.0, m_pagar - m_pagado))
+                    if solo_pendientes and (s_pend <= 0.009 or est.lower() == "pagada"):
                         continue
                     items_api.append({
                         "id": c.get("id"),
@@ -1163,36 +1187,74 @@ def liquidar_proveedor_db(
         observaciones = kwargs.get("notas", "")
 
     if conn is None and api is not None:
+        endpoints_to_try = [
+            f"/nomina/proveedores/{proveedor_id}/liquidar",
+            f"/proveedores/{proveedor_id}/liquidar",
+        ]
+        ultimo_error_api = None
+        for ep in endpoints_to_try:
+            try:
+                resp = api.post(
+                    ep,
+                    json={
+                        "monto": float(monto) if monto is not None else None,
+                        "metodo_pago": metodo_pago,
+                        "referencia": referencia or "",
+                        "observaciones": observaciones or "",
+                        "sesion_caja_id": sesion_caja_id,
+                    },
+                    timeout=7.0,
+                )
+                if resp.status_code == 200:
+                    res_api = resp.json()
+                    res_api["exito"] = True
+                    res_api["ok"] = True
+                    res_api["monto_pagado"] = float(res_api.get("total_pagado") or res_api.get("monto_pagado") or monto or 0.0)
+                    res_api["saldo_restante"] = float(res_api.get("saldo_restante", 0.0))
+                    recibo_sv = res_api.get("numero_recibo") or f"LQ-{res_api.get('liquidacion_id', res_api.get('gasto_id', 1)):05d}"
+                    res_api["numero_recibo"] = recibo_sv
+                    try:
+                        conn_loc = conectar_db()
+                        cur_loc = conn_loc.cursor()
+                        _sincronizar_liquidacion_local_sqlite(cur_loc, proveedor_id, float(monto or 0.0), metodo_pago, referencia, usuario, observaciones, recibo_sv)
+                        conn_loc.commit()
+                        conn_loc.close()
+                    except Exception as e_sl:
+                        pass
+                    return res_api
+                else:
+                    try:
+                        det = resp.json().get("detail", resp.text)
+                    except Exception:
+                        det = resp.text
+                    ultimo_error_api = det
+            except Exception as e_api_post:
+                ultimo_error_api = str(e_api_post)
+
+        # Si estamos en modo cliente conectado al servidor central, no recurrir a base de datos local vacía
         try:
-            resp = api.post(
-                f"/proveedores/{proveedor_id}/liquidar",
-                json={
-                    "monto": float(monto) if monto is not None else None,
-                    "metodo_pago": metodo_pago,
-                    "referencia": referencia or "",
-                    "observaciones": observaciones or "",
-                    "sesion_caja_id": sesion_caja_id,
-                },
-                timeout=6.0,
-            )
-            if resp.status_code == 200:
-                res_api = resp.json()
-                res_api["exito"] = res_api.get("exito", True)
-                res_api["ok"] = True
-                try:
-                    conn_loc = conectar_db()
-                    cur_loc = conn_loc.cursor()
-                    recibo_sv = res_api.get("numero_recibo") or f"LIQ-PROV-{res_api.get('liquidacion_id', 1):05d}"
-                    _sincronizar_liquidacion_local_sqlite(cur_loc, proveedor_id, float(monto or 0.0), metodo_pago, referencia, usuario, observaciones, recibo_sv)
-                    conn_loc.commit()
-                    conn_loc.close()
-                except Exception as e_sl:
-                    print(f"Aviso sync local post liquidar: {e_sl}")
-                return res_api
-            else:
-                print(f"Aviso API post liquidar retornó {resp.status_code}: {resp.text}. Aplicando liquidación local...")
-        except Exception as e_api_post:
-            print(f"Aviso conectando con servidor para liquidar: {e_api_post}. Aplicando liquidación local...")
+            from interface.network_manager import network_mgr
+            es_cliente = (network_mgr.modo == "cliente")
+        except Exception:
+            es_cliente = False
+
+        if es_cliente:
+            # Si el error indica que ya no tiene saldo pendiente por liquidar, informar con éxito
+            if ultimo_error_api and "no tiene" in str(ultimo_error_api).lower():
+                return {
+                    "exito": True,
+                    "ok": True,
+                    "numero_recibo": f"LQ-PROV-{proveedor_id:04d}",
+                    "monto_pagado": float(monto or 0.0),
+                    "saldo_restante": 0.0,
+                    "cuentas_afectadas": 0,
+                    "mensaje": "El proveedor ya se encuentra a paz y salvo."
+                }
+            return {
+                "exito": False,
+                "ok": False,
+                "mensaje": f"El servidor central reportó: {ultimo_error_api or 'No se pudo conectar con el servidor.'}"
+            }
 
     if proveedor_id in _PAGOS_EN_PROCESO:
         return {
