@@ -765,6 +765,17 @@ class App:
         self._venta_fingerprint = None
         self._ultimo_refresh_catalogo = 0.0
 
+        # Variables de control para Lector de Código de Barras (Hardware USB Keyboard Wedge)
+        self._scanner_burst_chars = []
+        self._scanner_modal_burst = []
+        self._scanner_last_time = 0.0
+        self._scanner_focused_widget = None
+        self._scanner_widget_initial_val = ""
+        self._scanner_no_enter_timer = None
+        self._ultimo_escaneo_codigo = ""
+        self._ultimo_escaneo_tiempo = 0.0
+        self._dialogo_pago_activo = False
+
     def setup_datos(self):
         """Carga de datos desde la base de datos"""
         self.productos_inventario = self.obtener_productos()
@@ -1178,11 +1189,25 @@ class App:
             self.actualizar_estado_caja()
             self.actualizar_indicadores_empleado_pos()
 
+        # Si no hay ningún campo de texto enfocado activamente, mantener el cursor en entry_codigo
+        try:
+            foco_act = self.ventana.focus_get()
+            if foco_act is None or foco_act == self.ventana or foco_act == getattr(self, "tabla", None):
+                self.entry_codigo.focus_set()
+        except Exception:
+            pass
+
     def configurar_eventos(self):
-        """Configurar eventos de teclado y focus"""
+        """Configurar eventos de teclado y focus continuo para lector de código de barras"""
         self.entry_codigo.bind('<Return>', lambda e: self.escanear_codigo())
         self.entry_codigo.bind('<KeyRelease>', self.on_codigo_change)
-        self.entry_doc.focus()
+        self.entry_doc.bind('<Return>', lambda e: self.entry_codigo.focus_set())
+
+        # Receptor global de teclado (Keyboard Wedge) para escáneres USB
+        self.ventana.bind_all('<Key>', self._on_global_key_event, add="+")
+
+        # La pantalla abre lista inmediatamente para escanear en entry_codigo
+        self.entry_codigo.focus_set()
         self.actualizar_hora()
         self.ventana.bind('<FocusIn>', self._on_focus_in_pos)
         self._ultimo_refresh_catalogo = time.time()
@@ -1258,24 +1283,196 @@ class App:
         except Exception as e_ind:
             print("DEBUG: Error actualizando indicadores POS:", e_ind)
 
+    def _on_global_key_event(self, event):
+        """
+        Receptor global de pulsaciones de teclado para soporte continuo de escáneres USB de código de barras.
+        - Detecta ráfagas de alta velocidad (< 65ms entre teclas) enviadas por lectores USB.
+        - Protege las ventanas modales de cobro para evitar alterar montos o confirmar accidentalmente.
+        - Si un escaneo ocurre mientras el usuario está en otro campo (como documento de cliente),
+          restaura el texto original del campo, procesa el código escaneado y reenfoca self.entry_codigo.
+        - Si el foco está en self.entry_codigo, procesa normalmente al recibir Enter o al finalizar la ráfaga.
+        """
+        now = time.time()
+        delta = now - getattr(self, "_scanner_last_time", 0.0)
+        self._scanner_last_time = now
+
+        # 1. Ignorar teclas modificadoras
+        if event.keysym in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", 
+                            "Caps_Lock", "Meta_L", "Meta_R", "Super_L", "Super_R"):
+            return
+
+        # 2. Protección de modales activos (ej: cobro/pago, autorización de crédito)
+        grab_widget = None
+        try:
+            grab_widget = self.ventana.grab_current()
+        except Exception:
+            pass
+
+        modal_activo = (grab_widget is not None and grab_widget != self.ventana) or getattr(self, "_dialogo_pago_activo", False)
+        if modal_activo:
+            if delta < 0.065:
+                # Carácter rápido dentro de ventana modal -> ráfaga de escáner accidental
+                self._scanner_modal_burst.append(event.char or "")
+                return "break"
+            if event.keysym in ("Return", "KP_Enter"):
+                if len(getattr(self, "_scanner_modal_burst", [])) >= 3:
+                    burst_code = "".join(self._scanner_modal_burst)
+                    self._scanner_modal_burst = []
+                    f_w = None
+                    try:
+                        f_w = self.ventana.focus_get()
+                    except Exception:
+                        pass
+                    if f_w and hasattr(f_w, "get") and hasattr(f_w, "delete") and hasattr(f_w, "insert"):
+                        try:
+                            curr_val = f_w.get()
+                            if curr_val.endswith(burst_code):
+                                f_w.delete(0, tk.END)
+                                f_w.insert(0, curr_val[:-len(burst_code)])
+                        except Exception:
+                            pass
+                    return "break"
+                self._scanner_modal_burst = []
+            return
+
+        focused_widget = None
+        try:
+            focused_widget = self.ventana.focus_get()
+        except Exception:
+            pass
+
+        # 3. Tecla Return / Enter (final de escaneo o envío manual)
+        if event.keysym in ("Return", "KP_Enter"):
+            if getattr(self, "_scanner_no_enter_timer", None):
+                try:
+                    self.ventana.after_cancel(self._scanner_no_enter_timer)
+                except Exception:
+                    pass
+                self._scanner_no_enter_timer = None
+
+            burst = getattr(self, "_scanner_burst_chars", [])
+            burst_str = "".join(burst).strip()
+            self._scanner_burst_chars = []
+
+            # Caso A: El foco está en el campo de código de barras
+            if focused_widget == self.entry_codigo:
+                codigo = self.codigo_entrada.get().strip() or burst_str
+                self.escanear_codigo(codigo)
+                return "break"
+
+            # Caso B: Ráfaga de escaneo recibida mientras el usuario estaba en otro campo o control
+            if burst_str and len(burst_str) >= 3:
+                self._limpiar_sufijo_escaneo_en_entradas(burst_str)
+                self.escanear_codigo(burst_str)
+                try:
+                    self.entry_codigo.focus_set()
+                except Exception:
+                    pass
+                return "break"
+
+            return
+
+        # 4. Caracteres individuales
+        ch = event.char
+        if not ch or ch in ("\r", "\n"):
+            return
+
+        if delta <= 0.065:
+            # Parte de ráfaga rápida
+            self._scanner_burst_chars.append(ch)
+            # Temporizador de respaldo para lectores sin tecla Enter
+            if getattr(self, "_scanner_no_enter_timer", None):
+                try:
+                    self.ventana.after_cancel(self._scanner_no_enter_timer)
+                except Exception:
+                    pass
+            self._scanner_no_enter_timer = self.ventana.after(85, self._on_scanner_burst_sin_enter)
+        else:
+            # Nueva secuencia de teclas
+            self._scanner_burst_chars = [ch]
+            if focused_widget is not None and focused_widget != self.entry_codigo:
+                self._scanner_focused_widget = focused_widget
+                if hasattr(focused_widget, "get"):
+                    try:
+                        self._scanner_widget_initial_val = focused_widget.get()
+                    except Exception:
+                        self._scanner_widget_initial_val = ""
+                else:
+                    self._scanner_widget_initial_val = ""
+            else:
+                self._scanner_focused_widget = None
+                self._scanner_widget_initial_val = ""
+
+    def _limpiar_sufijo_escaneo_en_entradas(self, codigo_escaneado):
+        """
+        Garantiza que el código de barras escaneado no quede incrustado accidentalmente
+        en ningún campo de texto de la pantalla (documento del cliente, búsqueda de catálogo, etc.).
+        """
+        if not codigo_escaneado:
+            return
+        cod_s = str(codigo_escaneado).strip()
+        if not cod_s:
+            return
+
+        # 1. Documento del cliente (self.documento y self.entry_doc)
+        if hasattr(self, "documento"):
+            doc_val = str(self.documento.get() or "")
+            if doc_val.endswith(cod_s):
+                limpio = doc_val[:-len(cod_s)]
+                self.documento.set(limpio)
+                if hasattr(self, "entry_doc"):
+                    try:
+                        self.entry_doc.delete(0, tk.END)
+                        self.entry_doc.insert(0, limpio)
+                    except Exception:
+                        pass
+        elif hasattr(self, "entry_doc"):
+            try:
+                curr = self.entry_doc.get()
+                if curr.endswith(cod_s):
+                    self.entry_doc.delete(0, tk.END)
+                    self.entry_doc.insert(0, curr[:-len(cod_s)])
+            except Exception:
+                pass
+
+        # 2. Búsqueda de catálogo
+        if hasattr(self, "busqueda_catalogo"):
+            b_val = str(self.busqueda_catalogo.get() or "")
+            if b_val.endswith(cod_s):
+                self.busqueda_catalogo.set(b_val[:-len(cod_s)])
+
+        # 3. Widget que tenía foco si es distinto a entry_codigo
+        try:
+            f_w = self.ventana.focus_get()
+            if f_w and f_w != getattr(self, "entry_codigo", None):
+                if hasattr(f_w, "get") and hasattr(f_w, "delete") and hasattr(f_w, "insert"):
+                    txt = f_w.get()
+                    if txt.endswith(cod_s):
+                        f_w.delete(0, tk.END)
+                        f_w.insert(0, txt[:-len(cod_s)])
+        except Exception:
+            pass
+
+    def _on_scanner_burst_sin_enter(self):
+        """Maneja escáneres ópticos configurados sin envío de tecla Return al final."""
+        self._scanner_no_enter_timer = None
+        burst = getattr(self, "_scanner_burst_chars", [])
+        if len(burst) >= 4:
+            burst_str = "".join(burst).strip()
+            self._scanner_burst_chars = []
+            self._limpiar_sufijo_escaneo_en_entradas(burst_str)
+            self.escanear_codigo(burst_str)
+            try:
+                self.entry_codigo.focus_set()
+            except Exception:
+                pass
+        else:
+            self._scanner_burst_chars = []
 
     def on_codigo_change(self, event):
-        """Detecta cuando se escanea un código de barras completo - MEJORADO"""
-        codigo = self.codigo_entrada.get().strip()
-        
-        # Si se presiona Enter, procesar inmediatamente
-        if event.keysym == 'Return' and len(codigo) >= 1:
+        """Controlador de eventos de teclado en el campo de código de barras."""
+        if event.keysym in ('Return', 'KP_Enter'):
             self.escanear_codigo()
-            return
-        
-        # Auto-escanear si se detecta un código largo (típico de scanners)
-        if len(codigo) >= 8:
-            # Cancelar cualquier timer anterior
-            if hasattr(self, '_scan_timer'):
-                self.ventana.after_cancel(self._scan_timer)
-            
-            # Programar escaneo automático con delay mínimo
-            self._scan_timer = self.ventana.after(50, self.escanear_codigo)
 
     # ====================================================================================
     #   CATÁLOGO RÁPIDO Y FILTRADO EN TIEMPO REAL
@@ -2220,10 +2417,19 @@ class App:
         return f"${int(valor):,.0f} COP"
 
     def limpiar_precio(self, texto):
-        """Convertir texto de precio a número"""
+        """Convertir texto de precio a número, soportando separadores de miles con coma o punto"""
         if isinstance(texto, (int, float)):
             return float(texto)
-        return float(texto.replace("$", "").replace("COP", "").replace(",", "").strip() or 0)
+        s = str(texto or "").replace("$", "").replace("COP", "").strip()
+        if "." in s and "," not in s:
+            partes = s.split(".")
+            if len(partes) > 1 and all(len(p) == 3 for p in partes[1:]):
+                s = "".join(partes)
+        s = s.replace(",", "").strip()
+        try:
+            return float(s or 0.0)
+        except Exception:
+            return 0.0
 
     def actualizar_total(self):
         """Actualizar el total general y su etiqueta en pantalla sumando las filas del carrito."""
@@ -2307,6 +2513,10 @@ class App:
         dialog.bind("<Return>", confirmar)
         dialog.bind("<Escape>", lambda e: dialog.destroy())
         parent_win.wait_window(dialog)
+        try:
+            self.entry_codigo.focus_set()
+        except Exception:
+            pass
         return resultado[0]
 
     def buscar_producto(self):
@@ -2318,6 +2528,7 @@ class App:
         t_b = aplicar_tema(ventana)
         calcular_geometria_segura(ventana, 780, 520, 550, 380)
         ventana.configure(bg=t_b["bg_app"])
+        self._dialogo_pago_activo = True
         ventana.grab_set()
 
         # 1. Header de búsqueda
@@ -2435,7 +2646,7 @@ class App:
         ventana.bind('<Escape>', lambda e: ventana.destroy())
 
     def agregar_producto(self, codigo, nombre, precio):
-        """Agregar producto al carrito - CORREGIDO PARA SUMAR CANTIDADES"""
+        """Agregar producto al carrito - Suma cantidades si ya existe, valida stock y mantiene foco en entry_codigo"""
         if not self.verificar_caja_abierta("agregar productos al carrito"):
             return
         # Verificar stock disponible - buscar por código exacto o con formato
@@ -2458,10 +2669,13 @@ class App:
         
         for item in self.tabla.get_children():
             valores = self.tabla.item(item)["values"]
+            item_cod = str(self.tabla.item(item, "text") or "").strip()
             if len(valores) >= 4:
-                # Coincidir por nombre del producto y mismo precio unitario
                 p_unit = self.limpiar_precio(valores[1])
-                if str(valores[0]).strip().lower() == str(nombre).strip().lower() and abs(p_unit - precio) < 0.01:
+                cod_str = str(codigo).strip()
+                coincide_cod = (item_cod and cod_str and (item_cod.lower() == cod_str.lower() or item_cod.zfill(5) == cod_str.zfill(5)))
+                coincide_nom = (str(valores[0]).strip().lower() == str(nombre).strip().lower())
+                if (coincide_cod or coincide_nom) and abs(p_unit - precio) < 0.01:
                     cantidad_actual = int(float(valores[2]))
                     item_existente = item
                     print(f"DEBUG: Producto encontrado en carrito - Cantidad actual: {cantidad_actual}")
@@ -2490,10 +2704,15 @@ class App:
                     f"El producto está completamente agotado.",
                     parent=self.ventana
                 )
+            self.codigo_entrada.set("")
+            try:
+                self.entry_codigo.focus_set()
+            except Exception:
+                pass
             return
 
         if item_existente:
-            # ACTUALIZAR CANTIDAD EXISTENTE - ESTE ES EL FIX PRINCIPAL
+            # ACTUALIZAR CANTIDAD EXISTENTE
             nueva_cantidad = cantidad_actual + 1
             nuevo_total = precio * nueva_cantidad
             
@@ -2505,7 +2724,6 @@ class App:
                 self.formato_peso(nuevo_total)
             ))
             self.tabla.selection_set(item_existente)
-            self.tabla.focus(item_existente)
             self.tabla.see(item_existente)
             
             # Sumar solo el precio unitario al total general
@@ -2525,61 +2743,206 @@ class App:
                     )
                 else:
                     messagebox.showwarning("Sin stock", f"El producto '{nombre}' no tiene stock disponible", parent=self.ventana)
+                self.codigo_entrada.set("")
+                try:
+                    self.entry_codigo.focus_set()
+                except Exception:
+                    pass
                 return
             
             # Agregar nuevo producto
             nuevo_item = self.tabla.insert("", tk.END, text=codigo, values=(nombre, self.formato_peso(precio), 1, 
                                                  self.formato_peso(precio)))
             self.tabla.selection_set(nuevo_item)
-            self.tabla.focus(nuevo_item)
             self.tabla.see(nuevo_item)
             self.total_general.set(self.total_general.get() + precio)
             
             print(f"DEBUG: Nuevo producto agregado: {nombre}")
         
         self.actualizar_total()
+        self.codigo_entrada.set("")
+        try:
+            self.entry_codigo.focus_set()
+        except Exception:
+            pass
 
-    def escanear_codigo(self):
-        """Escanea un código interno o código de barras EAN/Code128 y agrega el producto."""
+    def buscar_producto_por_codigo(self, codigo):
+        """
+        Localiza un producto por código de barras exacto, SKU interno o formato numérico.
+        1. Búsqueda directa en memoria (self.productos_inventario).
+        2. Si no se encuentra, consulta central a inventario_manager / SQLite local.
+        Retorna la tupla de datos del producto, ('INACTIVO', nombre) si está deshabilitado, o None si no existe.
+        """
+        cod_clean = str(codigo or "").strip()
+        if not cod_clean:
+            return None
+
+        cod_lower = cod_clean.lower()
+        cod_zfill = cod_clean.zfill(5)
+
+        # 1. Búsqueda en caché local de memoria
+        for p in self.productos_inventario:
+            # p[10] = codigo_barras
+            if len(p) > 10 and p[10]:
+                cb = str(p[10]).strip()
+                if cb and cb.lower() == cod_lower:
+                    return p
+            # p[0] = SKU interno
+            sku = str(p[0]).strip()
+            if sku.lower() == cod_lower or sku.zfill(5) == cod_zfill:
+                return p
+
+        # 2. Respaldo directo en inventario_manager (API / SQLite)
+        try:
+            try:
+                from interface.inventario_manager import obtener_articulo_por_codigo
+            except ImportError:
+                from inventario_manager import obtener_articulo_por_codigo
+
+            art = obtener_articulo_por_codigo(cod_clean)
+            if art:
+                estado = str(art.get("estado", "Activo") or "Activo").strip().lower()
+                nom = str(art.get("nombre", cod_clean)).strip()
+                if estado in ("inactivo", "desactivado", "bloqueado", "eliminado"):
+                    return ("INACTIVO", nom)
+
+                cod = str(art.get("codigo", "")).strip()
+                tipo_p = str(art.get("tipo_producto", "Fisico")).strip()
+                precio_v = float(art.get("precio", art.get("precio_venta", 0.0)) or 0.0)
+                costo_u = float(art.get("costo", art.get("precio_costo", 0.0)) or 0.0)
+                prov_id = art.get("proveedor_id")
+                p_id = art.get("id")
+                cb = str(art.get("codigo_barras") or "").strip()
+                es_var = bool(art.get("precio_variable", 0))
+                sv = float(art.get("stock_vitrina", art.get("stock", 0.0)) or 0.0)
+                sb = float(art.get("stock_bodega", 0.0) or 0.0)
+                sv_fmt = int(sv) if sv.is_integer() else sv
+
+                if tipo_p == "Servicio":
+                    nuevo_prod = (cod, nom, 9999, precio_v, "Servicio", prov_id, p_id, costo_u, es_var, 0.0, cb)
+                else:
+                    nuevo_prod = (cod, nom, sv_fmt, precio_v, "Fisico", prov_id, p_id, costo_u, es_var, sb, cb)
+
+                self.productos_inventario.append(nuevo_prod)
+                return nuevo_prod
+        except Exception as e_lookup:
+            print(f"DEBUG: Error consultando artículo '{cod_clean}': {e_lookup}")
+
+        return None
+
+    def escanear_codigo(self, codigo_directo=None):
+        """
+        Escanea un código interno o código de barras EAN/Code128 y agrega el producto.
+        Soporta escaneo continuo desatendido, debounce de hardware y validación de stock.
+        """
         if not self.verificar_caja_abierta("escanear o agregar productos"):
-            return
-        codigo = self.codigo_entrada.get().strip()
-        if not codigo:
-            return
-        producto = next(
-            (
-                p
-                for p in self.productos_inventario
-                if str(p[0]).lower() == codigo.lower()
-                or str(p[0]).zfill(5) == codigo.zfill(5)
-                or (len(p) > 10 and str(p[10] or "").strip() and str(p[10]).strip().lower() == codigo.lower())
-            ),
-            None,
-        )
-        
-        if producto:
-            # producto[2] es stock, producto[4] es tipo_producto, producto[8] es precio_variable
-            tipo_prod = producto[4]
-            es_var = producto[8] if len(producto) > 8 else False
-            
-            if producto[2] > 0 or tipo_prod == "Servicio":
-                precio = producto[3]
-                if es_var:
-                    precio_ingresado = self.solicitar_precio_variable(producto[1], precio, parent=self.ventana)
-                    if precio_ingresado is None:
-                        self.codigo_entrada.set("")
-                        return
-                    precio = precio_ingresado
-                    
-                self.agregar_producto(producto[0], producto[1], precio)
-                self.codigo_entrada.set("")
-                self.entry_codigo.focus()
-            else:
-                messagebox.showerror("Sin stock", "El producto no tiene stock disponible", parent=self.ventana)
-                self.codigo_entrada.set("")
-        else:
-            messagebox.showerror("No encontrado", "El código del producto no existe", parent=self.ventana)
             self.codigo_entrada.set("")
+            try:
+                self.entry_codigo.focus_set()
+            except Exception:
+                pass
+            return
+
+        codigo = str(codigo_directo if codigo_directo is not None else self.codigo_entrada.get()).strip()
+        if not codigo:
+            try:
+                self.entry_codigo.focus_set()
+            except Exception:
+                pass
+            return
+
+        # Debounce de rebote de hardware (< 220ms para el mismo código exacto)
+        ahora = time.time()
+        if codigo == getattr(self, "_ultimo_escaneo_codigo", "") and (ahora - getattr(self, "_ultimo_escaneo_tiempo", 0.0)) < 0.22:
+            print(f"DEBUG: Doble lectura de hardware ignorada (< 220ms): {codigo}")
+            self.codigo_entrada.set("")
+            try:
+                self.entry_codigo.focus_set()
+            except Exception:
+                pass
+            return
+
+        self._ultimo_escaneo_codigo = codigo
+        self._ultimo_escaneo_tiempo = ahora
+
+        producto = self.buscar_producto_por_codigo(codigo)
+
+        if isinstance(producto, tuple) and len(producto) == 2 and producto[0] == "INACTIVO":
+            messagebox.showwarning(
+                "Producto Inactivo",
+                f"El artículo '{producto[1]}' se encuentra inactivo y no puede ser vendido.",
+                parent=self.ventana
+            )
+            self.codigo_entrada.set("")
+            try:
+                self.entry_codigo.focus_set()
+            except Exception:
+                pass
+            return
+
+        if not producto:
+            messagebox.showwarning(
+                "Código no registrado",
+                f"El código '{codigo}' no corresponde a ningún producto o servicio registrado en el inventario.",
+                parent=self.ventana
+            )
+            self.codigo_entrada.set("")
+            try:
+                self.entry_codigo.focus_set()
+            except Exception:
+                pass
+            return
+
+        # producto: (cod, nom, stock_vitrina, precio, tipo, prov_id, p_id, costo, es_var, stock_bodega, cod_barras)
+        cod_prod = producto[0]
+        nom_prod = producto[1]
+        stock_disp = producto[2]
+        precio_base = producto[3]
+        tipo_prod = producto[4]
+        es_var = bool(producto[8]) if len(producto) > 8 else False
+        stock_bod = producto[9] if len(producto) > 9 else 0.0
+
+        if tipo_prod != "Servicio" and stock_disp <= 0:
+            if stock_bod > 0:
+                messagebox.showwarning(
+                    "Sin stock en Vitrina",
+                    f"El producto '{nom_prod}' no tiene existencias en Vitrina (mostrador).\n\n"
+                    f"Existen {stock_bod} unidades almacenadas en Bodega.\n"
+                    f"Realice un traslado a vitrina para poder despacharlo.",
+                    parent=self.ventana
+                )
+            else:
+                messagebox.showwarning(
+                    "Sin stock",
+                    f"El producto '{nom_prod}' no tiene stock disponible.",
+                    parent=self.ventana
+                )
+            self.codigo_entrada.set("")
+            try:
+                self.entry_codigo.focus_set()
+            except Exception:
+                pass
+            return
+
+        precio = precio_base
+        if es_var:
+            precio_ingresado = self.solicitar_precio_variable(nom_prod, precio_base, parent=self.ventana)
+            if precio_ingresado is None:
+                self.codigo_entrada.set("")
+                try:
+                    self.entry_codigo.focus_set()
+                except Exception:
+                    pass
+                return
+            precio = precio_ingresado
+
+        # Agregar o incrementar cantidad en el carrito
+        self.agregar_producto(cod_prod, nom_prod, precio)
+        self.codigo_entrada.set("")
+        try:
+            self.entry_codigo.focus_set()
+        except Exception:
+            pass
 
     def eliminar_seleccionado(self):
         """Elimina el producto seleccionado del carrito"""
@@ -2736,6 +3099,13 @@ class App:
         var_cant.trace_add("write", _recalcular_preview)
         e_precio.bind("<KeyRelease>", _recalcular_preview)
 
+        def cerrar_dialogo():
+            dialog.destroy()
+            try:
+                self.entry_codigo.focus_set()
+            except Exception:
+                pass
+
         def confirmar_cambios(event=None):
             try:
                 c_val = float(var_cant.get().strip())
@@ -2780,7 +3150,7 @@ class App:
             sub_nuevo = round(p_val * c_val, 2)
             self.tabla.item(item_id, values=(nombre, self.formato_peso(p_val), cant_fmt, self.formato_peso(sub_nuevo)))
             self.actualizar_total()
-            dialog.destroy()
+            cerrar_dialogo()
 
         f_footer = tk.Frame(dialog, bg=t_d["bg_surface_alt"], padx=15, pady=10, bd=1, relief="ridge")
         f_footer.pack(fill="x", side="bottom")
@@ -2788,14 +3158,15 @@ class App:
         def eliminar_item_actual():
             self.tabla.delete(item_id)
             self.actualizar_total()
-            dialog.destroy()
+            cerrar_dialogo()
 
         crear_boton(f_footer, "Quitar del Carrito", command=eliminar_item_actual, tipo="danger", icono="🗑️").pack(side="left", padx=5)
-        crear_boton(f_footer, "Cancelar", command=dialog.destroy, tipo="secondary").pack(side="right", padx=5)
+        crear_boton(f_footer, "Cancelar", command=cerrar_dialogo, tipo="secondary").pack(side="right", padx=5)
         crear_boton(f_footer, "Aplicar Cambios", command=confirmar_cambios, tipo="success", icono="✅").pack(side="right", padx=5)
 
         dialog.bind("<Return>", confirmar_cambios)
-        dialog.bind("<Escape>", lambda e: dialog.destroy())
+        dialog.bind("<Escape>", lambda e: cerrar_dialogo())
+        dialog.protocol("WM_DELETE_WINDOW", cerrar_dialogo)
 
         try:
             dialog.lift()
@@ -2823,6 +3194,7 @@ class App:
         t_p = aplicar_tema(ventana)
         calcular_geometria_segura(ventana, 540, 620, 440, 420)
         ventana.configure(bg=t_p["bg_app"])
+        self._dialogo_pago_activo = True
         ventana.grab_set()
 
         # 1. HEADER (Fijo arriba)
@@ -3060,10 +3432,19 @@ class App:
         btn_preview = crear_boton(footer_p, "Vista Previa", command=abrir_preview_recibo, tipo="info", icono="🧾", tam_fuente=10)
         btn_preview.pack(side="right", padx=5)
 
+        def _cerrar_pago():
+            if not getattr(self, "_registrando_venta", False):
+                self._dialogo_pago_activo = False
+                ventana.destroy()
+                try:
+                    self.entry_codigo.focus_set()
+                except Exception:
+                    pass
+
         btn_cancelar = crear_boton(
             footer_p,
             "Cancelar",
-            command=lambda: None if getattr(self, "_registrando_venta", False) else ventana.destroy(),
+            command=_cerrar_pago,
             tipo="secondary",
             icono="❌",
             tam_fuente=10,
@@ -3355,8 +3736,8 @@ class App:
 
         metodo_var.trace_add("write", actualizar_vista)
         actualizar_vista()
-        ventana.bind("<Escape>", lambda e: None if getattr(self, "_registrando_venta", False) else ventana.destroy())
-        ventana.protocol("WM_DELETE_WINDOW", lambda: None if getattr(self, "_registrando_venta", False) else ventana.destroy())
+        ventana.bind("<Escape>", lambda e: _cerrar_pago())
+        ventana.protocol("WM_DELETE_WINDOW", _cerrar_pago)
 
     def autorizar_exceso_credito_admin(self, parent, cliente_nombre, lim, saldo, total_val, exceso) -> bool:
         """
@@ -3742,6 +4123,7 @@ class App:
                             except Exception:
                                 pass
 
+                    self._dialogo_pago_activo = False
                     self._registrando_venta = False
                     self._venta_idempotency_key = None
                     self._venta_fingerprint = None
@@ -3994,7 +4376,10 @@ class App:
             self.var_turno_especial.set(False)
         self.actualizar_estado_caja()
         self.actualizar_indicadores_empleado_pos()
-        self.entry_doc.focus()
+        try:
+            self.entry_codigo.focus_set()
+        except Exception:
+            pass
 
 def iniciar_ventas(parent=None, user_id="", rol="", parent_pid="", usuario_nombre=""):
     """
