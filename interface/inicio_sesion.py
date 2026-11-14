@@ -220,7 +220,26 @@ def _iniciar_flujo_principal(datos_usuario, usuario_actual):
         _iniciar_flujo_principal_ejecutar(datos_usuario, usuario_actual)
 
 def _iniciar_flujo_principal_ejecutar(datos_usuario, usuario_actual):
-    ventana.destroy()
+    try:
+        ventana.destroy()
+    except Exception:
+        pass
+
+    # Mostrar la pantalla de carga original con animación y bienvenida por voz
+    try:
+        from interface.pantalla_carga import mostrar_carga
+    except ImportError:
+        try:
+            from pantalla_carga import mostrar_carga
+        except ImportError:
+            mostrar_carga = None
+
+    if mostrar_carga:
+        try:
+            datos_usuario['ventana_carga'] = mostrar_carga(nombre=usuario_actual, usuario_info=datos_usuario)
+        except Exception as e_carga:
+            print(f"Aviso al mostrar pantalla de carga: {e_carga}")
+
     try:
         from interface.menu_inicio import iniciar_dashboard
         iniciar_dashboard(usuario_actual, datos_usuario)

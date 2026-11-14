@@ -80,6 +80,7 @@ MODULOS_VERIFICAR = [
     "interface.contabilidad_menu",
     "interface.turnos_menu",
     "interface.usuarios_menu",
+    "interface.pantalla_carga",
     "client.api_client",
     "server.main",
 ]
@@ -198,6 +199,7 @@ hidden_imports = [
     "interface.contabilidad_menu",
     "interface.turnos_menu",
     "interface.usuarios_menu",
+    "interface.pantalla_carga",
     "uvicorn",
     "uvicorn.logging",
     "uvicorn.loops",

@@ -75,10 +75,22 @@ if [ ! -f "$ICNS_PATH" ] && [ -f "$PNG_ICON" ]; then
     rm -rf "$ICONSET_DIR"
 fi
 
-# 3. Limpiar compilaciones previas
+# 3. Limpiar compilaciones previas y consolidar bases de datos SQLite
 echo "Limpiando compilaciones previas de macOS..."
 rm -rf build
 rm -rf dist/VmPOS.app dist/VmPOS dist/VmPOS_macOS.zip dist/VmPOS_macOS_Instalador.dmg
+
+$PYTHON_BIN -c "
+import sqlite3, glob
+for db in glob.glob('database/*.db'):
+    try:
+        c = sqlite3.connect(db)
+        c.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        c.close()
+    except Exception:
+        pass
+" 2>/dev/null || true
+rm -f database/*-shm database/*-wal 2>/dev/null || true
 
 # 4. Compilar con PyInstaller
 echo "Compilando VmPOS.app con PyInstaller..."
@@ -150,6 +162,8 @@ $PYTHON_BIN -m PyInstaller \
     --hidden-import="barcode.codex" \
     --hidden-import="barcode.ean" \
     --hidden-import="barcode.writer" \
+    --hidden-import="interface.pantalla_carga" \
+    --hidden-import="pantalla_carga" \
     interface/inicio_sesion.py
 
 # Ajustar Info.plist para alta resolución Retina y forzar apariencia Aqua (evita texto blanco invisible en Dark Mode)
