@@ -290,6 +290,63 @@ async def startup():
         # Índices únicos de idempotencia
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_ventas_idempotency_key ON ventas(idempotency_key);",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_abonos_idempotency_key ON abonos(idempotency_key);",
+        # Materiales y Presentaciones en Productos
+        "ALTER TABLE productos ADD COLUMN es_material BOOLEAN DEFAULT 0;",
+        "ALTER TABLE productos ADD COLUMN presentacion_defecto VARCHAR DEFAULT 'Paquete';",
+        "ALTER TABLE productos ADD COLUMN factor_conversion_defecto FLOAT DEFAULT 1.0;",
+        "ALTER TABLE productos ADD COLUMN unidad_consumo_defecto VARCHAR DEFAULT 'Unidad';",
+        # Tablas de Materiales, Operarios y Consumos
+        """CREATE TABLE IF NOT EXISTS inventario_operarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            usuario_id INTEGER,
+            usuario_nombre VARCHAR NOT NULL,
+            rol VARCHAR DEFAULT 'Operario',
+            producto_id INTEGER NOT NULL,
+            codigo_producto VARCHAR NOT NULL,
+            nombre_producto VARCHAR NOT NULL,
+            unidad_medida VARCHAR DEFAULT 'Unidad',
+            stock_disponible FLOAT DEFAULT 0.0,
+            total_recibido FLOAT DEFAULT 0.0,
+            total_consumido FLOAT DEFAULT 0.0,
+            total_desperdiciado FLOAT DEFAULT 0.0,
+            total_devuelto FLOAT DEFAULT 0.0,
+            ultimo_movimiento VARCHAR,
+            fecha_actualizacion VARCHAR,
+            UNIQUE(usuario_nombre, producto_id)
+        );""",
+        """CREATE TABLE IF NOT EXISTS presentaciones_producto (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            producto_id INTEGER NOT NULL,
+            codigo_producto VARCHAR NOT NULL,
+            nombre_presentacion VARCHAR NOT NULL,
+            unidad_compra VARCHAR DEFAULT 'Paquete',
+            cantidad_unidades_base FLOAT DEFAULT 1.0,
+            unidad_consumo VARCHAR DEFAULT 'Unidad',
+            costo_defecto FLOAT DEFAULT 0.0,
+            codigo_barras VARCHAR DEFAULT '',
+            activo INTEGER DEFAULT 1,
+            fecha_creacion VARCHAR
+        );""",
+        """CREATE TABLE IF NOT EXISTS consumos_materiales_venta (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            venta_id INTEGER NOT NULL,
+            numero_factura VARCHAR DEFAULT '',
+            usuario_responsable VARCHAR NOT NULL,
+            producto_id INTEGER NOT NULL,
+            codigo_producto VARCHAR NOT NULL,
+            nombre_producto VARCHAR NOT NULL,
+            cantidad_consumida FLOAT NOT NULL,
+            unidad_medida VARCHAR DEFAULT 'Unidad',
+            saldo_anterior FLOAT DEFAULT 0.0,
+            saldo_restante FLOAT DEFAULT 0.0,
+            costo_unitario FLOAT DEFAULT 0.0,
+            costo_total FLOAT DEFAULT 0.0,
+            fecha VARCHAR NOT NULL,
+            hora VARCHAR NOT NULL,
+            estado VARCHAR DEFAULT 'Aplicado',
+            observaciones VARCHAR DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );""",
     ]
     for stmt in migraciones_sql:
         try:

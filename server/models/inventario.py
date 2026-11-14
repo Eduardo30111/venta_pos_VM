@@ -82,3 +82,61 @@ class DetalleCompra(Base):
     costo_unidad_compra = Column(Float, default=0.0)
     costo_unitario_convertido = Column(Float, default=0.0)
     subtotal = Column(Float, default=0.0)
+
+
+class InventarioOperario(Base):
+    __tablename__ = "inventario_operarios"
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_id = Column(Integer, nullable=True)
+    usuario_nombre = Column(String, index=True, nullable=False)
+    rol = Column(String, default="Operario", nullable=False)
+    producto_id = Column(Integer, ForeignKey("productos.id"), nullable=False, index=True)
+    codigo_producto = Column(String, nullable=False)
+    nombre_producto = Column(String, nullable=False)
+    unidad_medida = Column(String, default="Unidad", nullable=False)
+    stock_disponible = Column(Float, default=0.0, nullable=False)
+    total_recibido = Column(Float, default=0.0, nullable=False)
+    total_consumido = Column(Float, default=0.0, nullable=False)
+    total_desperdiciado = Column(Float, default=0.0, nullable=False)
+    total_devuelto = Column(Float, default=0.0, nullable=False)
+    ultimo_movimiento = Column(String, nullable=True)
+    fecha_actualizacion = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PresentacionProducto(Base):
+    __tablename__ = "presentaciones_producto"
+    id = Column(Integer, primary_key=True, index=True)
+    producto_id = Column(Integer, ForeignKey("productos.id"), nullable=False, index=True)
+    codigo_producto = Column(String, nullable=False)
+    nombre_presentacion = Column(String, nullable=False)
+    unidad_compra = Column(String, default="Paquete", nullable=False)
+    cantidad_unidades_base = Column(Float, default=1.0, nullable=False)
+    unidad_consumo = Column(String, default="Unidad", nullable=False)
+    costo_defecto = Column(Float, default=0.0)
+    codigo_barras = Column(String, default="")
+    activo = Column(Integer, default=1, nullable=False)
+    fecha_creacion = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ConsumoMaterialVenta(Base):
+    __tablename__ = "consumos_materiales_venta"
+    id = Column(Integer, primary_key=True, index=True)
+    venta_id = Column(Integer, nullable=False, index=True)
+    numero_factura = Column(String, default="")
+    usuario_responsable = Column(String, index=True, nullable=False)
+    producto_id = Column(Integer, ForeignKey("productos.id"), nullable=False, index=True)
+    codigo_producto = Column(String, nullable=False)
+    nombre_producto = Column(String, nullable=False)
+    cantidad_consumida = Column(Float, nullable=False)
+    unidad_medida = Column(String, default="Unidad", nullable=False)
+    saldo_anterior = Column(Float, default=0.0)
+    saldo_restante = Column(Float, default=0.0)
+    costo_unitario = Column(Float, default=0.0)
+    costo_total = Column(Float, default=0.0)
+    fecha = Column(String, nullable=False)
+    hora = Column(String, nullable=False)
+    estado = Column(String, default="Aplicado", nullable=False)
+    observaciones = Column(String, default="")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

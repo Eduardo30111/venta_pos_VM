@@ -654,6 +654,88 @@ def inicializar_base_datos(db_path=None):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cola_sync_fecha ON cola_sincronizacion(fecha_hora)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cola_sync_tipo ON cola_sincronizacion(tipo_operacion)")
 
+        # 24. Tabla de Inventario Individual de Operarios y Administrador (Materiales e Insumos)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS inventario_operarios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario_id INTEGER,
+                usuario_nombre TEXT NOT NULL,
+                rol TEXT NOT NULL DEFAULT 'Operario',
+                producto_id INTEGER NOT NULL,
+                codigo_producto TEXT NOT NULL,
+                nombre_producto TEXT NOT NULL,
+                unidad_medida TEXT NOT NULL DEFAULT 'Unidad',
+                stock_disponible REAL NOT NULL DEFAULT 0.0,
+                total_recibido REAL NOT NULL DEFAULT 0.0,
+                total_consumido REAL NOT NULL DEFAULT 0.0,
+                total_desperdiciado REAL NOT NULL DEFAULT 0.0,
+                total_devuelto REAL NOT NULL DEFAULT 0.0,
+                ultimo_movimiento TEXT,
+                fecha_actualizacion TEXT,
+                UNIQUE(usuario_nombre, producto_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_op_user ON inventario_operarios(usuario_nombre)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_op_prod ON inventario_operarios(producto_id)")
+
+        # 25. Tabla de Presentaciones de Compra y Factores de Conversión a Unidades Base
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS presentaciones_producto (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                producto_id INTEGER NOT NULL,
+                codigo_producto TEXT NOT NULL,
+                nombre_presentacion TEXT NOT NULL,
+                unidad_compra TEXT NOT NULL DEFAULT 'Paquete',
+                cantidad_unidades_base REAL NOT NULL DEFAULT 1.0,
+                unidad_consumo TEXT NOT NULL DEFAULT 'Unidad',
+                costo_defecto REAL DEFAULT 0.0,
+                codigo_barras TEXT DEFAULT '',
+                activo INTEGER NOT NULL DEFAULT 1,
+                fecha_creacion TEXT,
+                FOREIGN KEY (producto_id) REFERENCES productos (id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pres_prod ON presentaciones_producto(producto_id)")
+
+        # 26. Tabla de Consumo de Materiales en Ventas y Trabajos
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS consumos_materiales_venta (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                venta_id INTEGER NOT NULL,
+                numero_factura TEXT DEFAULT '',
+                usuario_responsable TEXT NOT NULL,
+                producto_id INTEGER NOT NULL,
+                codigo_producto TEXT NOT NULL,
+                nombre_producto TEXT NOT NULL,
+                cantidad_consumida REAL NOT NULL,
+                unidad_medida TEXT NOT NULL DEFAULT 'Unidad',
+                saldo_anterior REAL NOT NULL DEFAULT 0.0,
+                saldo_restante REAL NOT NULL DEFAULT 0.0,
+                costo_unitario REAL DEFAULT 0.0,
+                costo_total REAL DEFAULT 0.0,
+                fecha TEXT NOT NULL,
+                hora TEXT NOT NULL,
+                estado TEXT NOT NULL DEFAULT 'Aplicado',
+                observaciones TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cons_venta ON consumos_materiales_venta(venta_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cons_usuario ON consumos_materiales_venta(usuario_responsable)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cons_prod ON consumos_materiales_venta(producto_id)")
+
+        # 27. Migraciones para Clasificación de Materiales en Productos
+        for col_def in [
+            "es_material INTEGER DEFAULT 0",
+            "presentacion_defecto TEXT DEFAULT 'Paquete'",
+            "factor_conversion_defecto REAL DEFAULT 1.0",
+            "unidad_consumo_defecto TEXT DEFAULT 'Unidad'"
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE productos ADD COLUMN {col_def}")
+            except sqlite3.OperationalError:
+                pass
+
         # Índices de aceleración de consultas frecuentes (Ventas, Detalles, Productos y Clientes)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_fecha_estado ON ventas(fecha_venta, estado)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_fecha ON ventas(fecha_venta)")

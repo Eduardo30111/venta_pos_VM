@@ -761,6 +761,7 @@ class App:
         self._ultimo_escaneo_codigo = ""
         self._ultimo_escaneo_tiempo = 0.0
         self._dialogo_pago_activo = False
+        self.materiales_cargados = []
 
     def setup_datos(self):
         """Carga de datos desde la base de datos"""
@@ -833,6 +834,9 @@ class App:
                                  font=("Segoe UI", 9, "bold"), bg=bg_h, fg=fg_h, selectcolor=self.t["bg_header_sub"],
                                  activebackground=bg_h, activeforeground=fg_h)
         chk_esp.pack(side="left", padx=5)
+
+        btn_mat_bar = crear_boton(payment_frame, "Cargar Material (F8)", command=self.abrir_modal_cargar_material, tipo="info", icono="📦", tam_fuente=10)
+        btn_mat_bar.pack(side="left", padx=5)
 
         if self.puede_procesar_venta:
             btn_accion = crear_boton(payment_frame, "PROCESAR PAGO (F12)", command=self.pagar, tipo="success", icono="💳", tam_fuente=11)
@@ -1205,6 +1209,7 @@ class App:
         self.ventana.bind('<F12>', lambda e: comando_f12())
         self.ventana.bind('<F5>', lambda e: self.limpiar_formulario())
         self.ventana.bind('<F7>', lambda e: self.abrir_cajon_manual())
+        self.ventana.bind('<F8>', lambda e: self.abrir_modal_cargar_material())
 
     def abrir_cajon_manual(self, event=None):
         """Abre el cajón monedero conectado a la impresora térmica (F7 / Botón)."""
@@ -3097,6 +3102,276 @@ class App:
         except Exception:
             pass
 
+    def _obtener_texto_resumen_materiales(self) -> str:
+        """Devuelve un texto descriptivo de los materiales actualmente cargados para la venta."""
+        if not getattr(self, "materiales_cargados", None):
+            return "⚪ Sin materiales cargados para este trabajo."
+        items = self.materiales_cargados
+        if len(items) == 1:
+            it = items[0]
+            cant_str = f"{it['cantidad']:g}" if isinstance(it['cantidad'], (int, float)) else str(it['cantidad'])
+            return f"📦 1 material listo: {cant_str} {it.get('unidad', 'Unid.')} de {it.get('nombre', 'Material')}"
+        resumenes = []
+        for it in items[:3]:
+            cant_str = f"{it['cantidad']:g}" if isinstance(it['cantidad'], (int, float)) else str(it['cantidad'])
+            resumenes.append(f"{cant_str} {it.get('unidad', 'Unid.')} {it.get('nombre', '')}")
+        txt = ", ".join(resumenes)
+        if len(items) > 3:
+            txt += f" y {len(items) - 3} más"
+        return f"📦 {len(items)} materiales listos: {txt}"
+
+    def abrir_modal_cargar_material(self, parent=None, on_confirm_callback=None):
+        """
+        Modal para cargar materiales del inventario individual del usuario activo a la venta actual.
+        Valida stock disponible individual, bloquea excesos y prepara el descuento para cuando se confirme la venta.
+        """
+        modal_padre = parent or self.ventana
+        usuario_responsable = getattr(self, "user_nombre", None) or getattr(self, "rol", None) or "Administrador"
+
+        try:
+            try:
+                from materiales_manager import obtener_inventario_operario
+            except ImportError:
+                from interface.materiales_manager import obtener_inventario_operario
+            inv_usuario = obtener_inventario_operario(usuario_responsable)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo consultar el inventario de materiales: {e}", parent=modal_padre)
+            return
+
+        dlg = tk.Toplevel(modal_padre)
+        dlg.title(f"📦 Cargar Materiales — {usuario_responsable}")
+        t_m = aplicar_tema(dlg)
+        calcular_geometria_segura(dlg, 620, 560, 520, 440)
+        dlg.configure(bg=t_m["bg_app"])
+        dlg.transient(modal_padre)
+        dlg.grab_set()
+
+        # Header
+        hdr = tk.Frame(dlg, bg=t_m["bg_header"], height=48)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        tk.Label(
+            hdr,
+            text=f"📦 CONSUMO DE MATERIALES EN TRABAJO / VENTA",
+            font=("Segoe UI", 11, "bold"),
+            bg=t_m["bg_header"],
+            fg=t_m["text_header"]
+        ).pack(side="left", padx=15, pady=10)
+
+        # Info del trabajador
+        f_info = tk.Frame(dlg, bg=t_m["bg_card"], bd=1, relief="solid", padx=12, pady=6)
+        f_info.pack(fill="x", padx=15, pady=(8, 6))
+        tk.Label(
+            f_info,
+            text=f"👤 Responsable: {usuario_responsable} | Rol: {getattr(self, 'rol', 'Operario')}",
+            font=("Segoe UI", 9, "bold"),
+            bg=t_m["bg_card"],
+            fg=t_m["text_main"]
+        ).pack(anchor="w")
+        tk.Label(
+            f_info,
+            text="Los materiales seleccionados se descontarán exclusivamente de tu saldo individual al confirmar la venta.",
+            font=("Segoe UI", 8, "italic"),
+            bg=t_m["bg_card"],
+            fg=t_m["text_muted"]
+        ).pack(anchor="w")
+
+        # Lista de trabajo temporal (clonada de self.materiales_cargados)
+        materiales_temp = [dict(x) for x in getattr(self, "materiales_cargados", [])]
+
+        # Contenedor central
+        body = tk.Frame(dlg, bg=t_m["bg_surface"], padx=15, pady=10, bd=1, relief="solid")
+        body.pack(fill="both", expand=True, padx=15, pady=(0, 6))
+
+        # Mapa de materiales del usuario
+        mapa_materiales = {row["producto_id"]: row for row in inv_usuario}
+
+        if not inv_usuario:
+            tk.Label(
+                body,
+                text=f"⚠️ No tienes materiales asignados actualmente en tu inventario individual.\n\n"
+                     f"Para cargar materiales en ventas, un administrador debe realizar un\n"
+                     f"traslado desde Bodega hacia tu usuario en el módulo de Inventario.",
+                font=("Segoe UI", 10),
+                bg=t_m["bg_surface"],
+                fg=t_m["text_muted"],
+                justify="center"
+            ).pack(expand=True, pady=30)
+        else:
+            f_add = tk.Frame(body, bg=t_m["bg_surface"])
+            f_add.pack(fill="x", pady=(0, 8))
+
+            tk.Label(f_add, text="Material:", font=("Segoe UI", 9, "bold"), bg=t_m["bg_surface"], fg=t_m["text_main"]).grid(row=0, column=0, sticky="w", padx=4, pady=2)
+            tk.Label(f_add, text="Cantidad:", font=("Segoe UI", 9, "bold"), bg=t_m["bg_surface"], fg=t_m["text_main"]).grid(row=0, column=1, sticky="w", padx=4, pady=2)
+
+            combo_mat = ttk.Combobox(f_add, state="readonly", width=34, font=("Segoe UI", 9))
+            combo_mat.grid(row=1, column=0, sticky="w", padx=4, pady=2)
+
+            ent_cant = tk.Entry(f_add, width=10, font=("Segoe UI", 10, "bold"), justify="center",
+                                bg=t_m["input_bg"], fg=t_m["input_fg"], insertbackground=t_m["input_insert"], relief="solid", bd=1)
+            ent_cant.grid(row=1, column=1, sticky="w", padx=4, pady=2)
+            ent_cant.insert(0, "1")
+
+            # Opciones para combobox
+            opciones_combo = []
+            id_by_label = {}
+            for row in inv_usuario:
+                pid = row["producto_id"]
+                disp = float(row["stock_disponible"] or 0.0)
+                etq = f"{row['nombre_producto']} [{row['codigo_producto']}] — Disp: {disp:g} {row.get('unidad_medida', 'Unid')}"
+                opciones_combo.append(etq)
+                id_by_label[etq] = pid
+
+            combo_mat["values"] = opciones_combo
+            if opciones_combo:
+                combo_mat.current(0)
+
+            lbl_saldo_din = tk.Label(f_add, text="", font=("Segoe UI", 8, "bold"), bg=t_m["bg_surface"], fg="#059669")
+            lbl_saldo_din.grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 0))
+
+            def _actualizar_disp_label(event=None):
+                sel = combo_mat.get()
+                pid = id_by_label.get(sel)
+                if pid and pid in mapa_materiales:
+                    r = mapa_materiales[pid]
+                    ya_agregado = sum(x["cantidad"] for x in materiales_temp if x["producto_id"] == pid)
+                    disp_real = float(r["stock_disponible"] or 0.0) - ya_agregado
+                    lbl_saldo_din.config(
+                        text=f"Saldo disponible para agregar: {disp_real:g} {r.get('unidad_medida', 'Unid.')} (Total en tu inventario: {float(r['stock_disponible']):g})",
+                        fg="#059669" if disp_real > 0 else "#DC2626"
+                    )
+
+            combo_mat.bind("<<ComboboxSelected>>", _actualizar_disp_label)
+            _actualizar_disp_label()
+
+            def _agregar_material():
+                sel = combo_mat.get()
+                pid = id_by_label.get(sel)
+                if not pid or pid not in mapa_materiales:
+                    messagebox.showwarning("Atención", "Seleccione un material válido de la lista.", parent=dlg)
+                    return
+                r = mapa_materiales[pid]
+                try:
+                    cant = float(ent_cant.get().strip().replace(",", "."))
+                    if cant <= 0:
+                        raise ValueError()
+                except ValueError:
+                    messagebox.showwarning("Cantidad Inválida", "Ingrese una cantidad válida mayor a cero.", parent=dlg)
+                    return
+
+                ya_agregado = sum(x["cantidad"] for x in materiales_temp if x["producto_id"] == pid)
+                disp_total = float(r["stock_disponible"] or 0.0)
+                if (ya_agregado + cant) > disp_total:
+                    restante = max(0.0, disp_total - ya_agregado)
+                    messagebox.showerror(
+                        "Saldo Insuficiente",
+                        f"No puedes agregar {cant:g} {r.get('unidad_medida', 'Unidades')} de '{r['nombre_producto']}'.\n\n"
+                        f"• Tu saldo actual disponible: {disp_total:g}\n"
+                        f"• Ya agregados a esta venta: {ya_agregado:g}\n"
+                        f"• Máximo restante que puedes usar: {restante:g}",
+                        parent=dlg
+                    )
+                    return
+
+                encontrado = False
+                for item in materiales_temp:
+                    if item["producto_id"] == pid:
+                        item["cantidad"] += cant
+                        encontrado = True
+                        break
+                if not encontrado:
+                    materiales_temp.append({
+                        "producto_id": pid,
+                        "codigo": r["codigo_producto"],
+                        "nombre": r["nombre_producto"],
+                        "cantidad": cant,
+                        "unidad": r.get("unidad_medida", "Unidad"),
+                        "usuario_responsable": usuario_responsable
+                    })
+
+                ent_cant.delete(0, tk.END)
+                ent_cant.insert(0, "1")
+                _refrescar_tabla_temp()
+                _actualizar_disp_label()
+
+            btn_add = crear_boton(f_add, "➕ Agregar Material", command=_agregar_material, tipo="success", tam_fuente=9)
+            btn_add.grid(row=1, column=2, sticky="w", padx=6, pady=2)
+
+        # Tabla de materiales agregados a este trabajo
+        tk.Label(body, text="📋 Materiales a descontar en esta venta:", font=("Segoe UI", 9, "bold"), bg=t_m["bg_surface"], fg=t_m["text_main"]).pack(anchor="w", pady=(6, 2))
+
+        cols = ("codigo", "nombre", "cantidad", "unidad", "disp_inicial", "disp_final")
+        tree_temp = ttk.Treeview(body, columns=cols, show="headings", height=5)
+        tree_temp.heading("codigo", text="Código")
+        tree_temp.heading("nombre", text="Material")
+        tree_temp.heading("cantidad", text="Cant. a Usar")
+        tree_temp.heading("unidad", text="Unidad")
+        tree_temp.heading("disp_inicial", text="Saldo Actual")
+        tree_temp.heading("disp_final", text="Saldo Tras Venta")
+
+        tree_temp.column("codigo", width=80, anchor="center")
+        tree_temp.column("nombre", width=190, anchor="w")
+        tree_temp.column("cantidad", width=85, anchor="center")
+        tree_temp.column("unidad", width=70, anchor="center")
+        tree_temp.column("disp_inicial", width=85, anchor="center")
+        tree_temp.column("disp_final", width=95, anchor="center")
+        tree_temp.pack(fill="both", expand=True, pady=2)
+
+        def _refrescar_tabla_temp():
+            for it in tree_temp.get_children():
+                tree_temp.delete(it)
+            for idx, item in enumerate(materiales_temp):
+                pid = item["producto_id"]
+                r = mapa_materiales.get(pid, {})
+                d_ini = float(r.get("stock_disponible", 0.0))
+                c_usar = float(item["cantidad"])
+                d_fin = max(0.0, d_ini - c_usar)
+                tree_temp.insert("", "end", iid=str(idx), values=(
+                    item["codigo"],
+                    item["nombre"],
+                    f"{c_usar:g}",
+                    item.get("unidad", "Unid"),
+                    f"{d_ini:g}",
+                    f"{d_fin:g}"
+                ))
+
+        _refrescar_tabla_temp()
+
+        def _quitar_seleccionado():
+            sel = tree_temp.selection()
+            if not sel:
+                return
+            idx = int(sel[0])
+            if 0 <= idx < len(materiales_temp):
+                materiales_temp.pop(idx)
+                _refrescar_tabla_temp()
+                if 'combo_mat' in locals():
+                    _actualizar_disp_label()
+
+        btn_quitar = crear_boton(body, "🗑️ Quitar Material Seleccionado", command=_quitar_seleccionado, tipo="danger", tam_fuente=8)
+        btn_quitar.pack(anchor="w", pady=(4, 0))
+
+        # Footer con Confirmar / Cancelar
+        footer = tk.Frame(dlg, bg=t_m["bg_app"], padx=15, pady=10)
+        footer.pack(fill="x", side="bottom")
+
+        def _confirmar():
+            self.materiales_cargados = list(materiales_temp)
+            dlg.destroy()
+            if callable(on_confirm_callback):
+                on_confirm_callback()
+
+        def _limpiar_sin_materiales():
+            self.materiales_cargados = []
+            dlg.destroy()
+            if callable(on_confirm_callback):
+                on_confirm_callback()
+
+        crear_boton(footer, "Cancelar", dlg.destroy, tipo="secondary", tam_fuente=9).pack(side="right", padx=5)
+        crear_boton(footer, "🧹 Sin Materiales", command=_limpiar_sin_materiales, tipo="warning", tam_fuente=9).pack(side="right", padx=5)
+        btn_ok = crear_boton(footer, "✅ Confirmar Selección", command=_confirmar, tipo="success", tam_fuente=10, negrita=True)
+        btn_ok.pack(side="right", padx=5)
+
     def pagar(self):
         """Abre la ventana para procesar el pago con layout responsive, clientes centrales y confirmación asíncrona idempotente."""
         if getattr(self, "_registrando_venta", False):
@@ -3364,6 +3639,47 @@ class App:
         # 3. CUERPO CENTRAL (Selección de método y campos)
         body_p = tk.Frame(ventana, bg=t_p["bg_app"])
         body_p.pack(side="top", fill="both", expand=True, padx=20, pady=10)
+
+        # Card interactiva: Cargar Material para este trabajo
+        card_mat = tk.Frame(body_p, bg=t_p["bg_card"], bd=1, relief="solid", padx=12, pady=8)
+        card_mat.pack(fill="x", pady=(0, 10))
+
+        lbl_mat_tit = tk.Label(
+            card_mat,
+            text="📦 ¿Vas a cargar algún material para este trabajo?",
+            font=("Segoe UI", 10, "bold"),
+            bg=t_p["bg_card"],
+            fg=t_p["text_main"]
+        )
+        lbl_mat_tit.pack(anchor="w")
+
+        lbl_mat_res = tk.Label(
+            card_mat,
+            text=self._obtener_texto_resumen_materiales(),
+            font=("Segoe UI", 9),
+            bg=t_p["bg_card"],
+            fg="#059669" if self.materiales_cargados else t_p["text_muted"]
+        )
+        lbl_mat_res.pack(anchor="w", pady=(2, 6))
+
+        f_mat_actions = tk.Frame(card_mat, bg=t_p["bg_card"])
+        f_mat_actions.pack(fill="x")
+
+        def _actualizar_resumen_mat():
+            lbl_mat_res.config(
+                text=self._obtener_texto_resumen_materiales(),
+                fg="#059669" if self.materiales_cargados else t_p["text_muted"]
+            )
+
+        def _click_si_mat():
+            self.abrir_modal_cargar_material(parent=ventana, on_confirm_callback=_actualizar_resumen_mat)
+
+        def _click_no_mat():
+            self.materiales_cargados = []
+            _actualizar_resumen_mat()
+
+        crear_boton(f_mat_actions, "📦 Sí, Cargar Material", command=_click_si_mat, tipo="info", tam_fuente=9).pack(side="left", padx=(0, 6))
+        crear_boton(f_mat_actions, "➡️ No, Sin Materiales", command=_click_no_mat, tipo="secondary", tam_fuente=9).pack(side="left")
 
         metodo_var = tk.StringVar(value="Efectivo")
 
@@ -4041,10 +4357,29 @@ class App:
                     self.cliente_id_seleccionado = None
                     self._restaurar_boton_principal_pos()
 
+                    materiales_a_descontar = list(getattr(self, "materiales_cargados", []))
+
                     if orden_id_actual:
                         self.cancelar_orden_activa()
                     else:
                         self.limpiar_formulario()
+
+                    # Descuento atómico de materiales asociados a la venta
+                    if materiales_a_descontar:
+                        try:
+                            try:
+                                from materiales_manager import descontar_materiales_venta
+                            except ImportError:
+                                from interface.materiales_manager import descontar_materiales_venta
+                            descontar_materiales_venta(
+                                venta_id=id_central,
+                                numero_factura=numero_factura,
+                                usuario_operario=operario_nombre,
+                                items_materiales=materiales_a_descontar,
+                                observaciones="Consumo directo en venta POS"
+                            )
+                        except Exception as e_mat_desc:
+                            print(f"Aviso descontando materiales en venta #{id_central}: {e_mat_desc}")
 
                     # Persistencia local en SQLite para Registro de Ventas, auditoría permanente y modo offline
                     try:
@@ -4333,6 +4668,7 @@ class App:
         self._exceso_credito_autorizado = False
         self._venta_idempotency_key = None
         self._venta_fingerprint = None
+        self.materiales_cargados = []
         if hasattr(self, 'banner_frame'):
             self.banner_frame.pack_forget()
         for item in self.tabla.get_children():

@@ -43,3 +43,5 @@ assets/logos/
 # Sistema operativo
 .DS_Store
 Thumbs.db
+backups/
+config/token.json

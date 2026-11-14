@@ -489,11 +489,37 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                 messagebox.showwarning("Campo Obligatorio", "Debes ingresar el motivo de la anulación (mínimo 3 caracteres).", parent=modal)
                 return
 
+            accion_mat = "devolver"
+            try:
+                from interface.database_manager import conectar_db
+                c_chk = conectar_db()
+                if c_chk:
+                    cur_chk = c_chk.cursor()
+                    cur_chk.execute(
+                        "SELECT COUNT(*) FROM consumos_materiales_venta WHERE venta_id = ? AND estado = 'Aplicado'",
+                        (id_venta,)
+                    )
+                    row_chk = cur_chk.fetchone()
+                    if row_chk and row_chk[0] > 0:
+                        devolver = messagebox.askyesno(
+                            "Materiales Consumidos",
+                            f"Esta venta tiene {row_chk[0]} registro(s) de materiales consumidos.\n\n"
+                            "¿Desea DEVOLVER los materiales al inventario del trabajador?\n\n"
+                            "• [Sí]: Reintegrar los materiales al saldo del trabajador.\n"
+                            "• [No]: Registrar los materiales como desperdicio/merma del trabajo.",
+                            parent=modal
+                        )
+                        accion_mat = "devolver" if devolver else "desperdicio"
+                    c_chk.close()
+            except Exception:
+                pass
+
             try:
                 res = anular_venta_completa(
                     id_venta=id_venta,
                     usuario_admin=usuario_actual,
-                    motivo=motivo
+                    motivo=motivo,
+                    accion_materiales=accion_mat
                 )
                 modal.destroy()
                 cargar_ventas()

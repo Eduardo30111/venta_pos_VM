@@ -804,6 +804,7 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     tab_vitrina = tk.Frame(notebook, bg=t["bg_surface"])
     tab_traslados = tk.Frame(notebook, bg=t["bg_surface"])
     tab_compras = tk.Frame(notebook, bg=t["bg_surface"])
+    tab_materiales = tk.Frame(notebook, bg=t["bg_surface"])
     tab_kardex = tk.Frame(notebook, bg=t["bg_surface"])
 
     notebook.add(tab_catalogo, text="📋 Catálogo de Artículos")
@@ -811,6 +812,7 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     notebook.add(tab_vitrina, text="🏪 Vitrina (Punto de Venta)")
     notebook.add(tab_traslados, text="🔄 Traslados Internos")
     notebook.add(tab_compras, text="📥 Entradas y Compras")
+    notebook.add(tab_materiales, text="👷 Materiales de Operarios")
     notebook.add(tab_kardex, text="📜 Kárdex e Historial")
 
     # ==========================================================================
@@ -2326,12 +2328,702 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     frame_tree_kdx.rowconfigure(0, weight=1)
     frame_tree_kdx.columnconfigure(0, weight=1)
 
+    # ==========================================================================
+    # SECCIÓN 7: MATERIALES DE OPERARIOS (BODEGA, TRASLADOS, CONSUMOS Y SALDOS)
+    # ==========================================================================
+    from interface.materiales_manager import (
+        obtener_trabajadores_para_materiales,
+        obtener_materiales_catalogo,
+        obtener_resumen_todos_operarios,
+        obtener_historial_materiales,
+        trasladar_bodega_a_operario,
+        devolver_operario_a_bodega,
+        registrar_desperdicio_material,
+        obtener_presentaciones_material,
+        guardar_presentacion_material,
+        obtener_kpis_materiales
+    )
+
+    # 1. Barra de KPIs / Tarjetas Resumen de Materiales
+    bar_mat_kpis = tk.Frame(tab_materiales, bg=t["bg_surface"], padx=15, pady=8)
+    bar_mat_kpis.pack(fill="x")
+
+    def _crear_badge_mat(parent_f, titulo, valor, color_fg="#3B82F6"):
+        f = tk.Frame(parent_f, bg=t["bg_card"], bd=1, relief="solid", padx=10, pady=5)
+        f.pack(side="left", padx=4, fill="y")
+        tk.Label(f, text=titulo, font=("Segoe UI", 8), bg=t["bg_card"], fg=t["text_muted"]).pack(anchor="w")
+        lbl_v = tk.Label(f, text=valor, font=("Segoe UI", 11, "bold"), bg=t["bg_card"], fg=color_fg)
+        lbl_v.pack(anchor="w")
+        return lbl_v
+
+    badge_mat_bodega = _crear_badge_mat(bar_mat_kpis, "Stock en Bodega", "0", color_fg="#2563eb")
+    badge_mat_operarios = _crear_badge_mat(bar_mat_kpis, "En Poder de Operarios", "0", color_fg="#059669")
+    badge_mat_consumido = _crear_badge_mat(bar_mat_kpis, "Consumido en Trabajos", "0", color_fg="#7c3aed")
+    badge_mat_desperdicio = _crear_badge_mat(bar_mat_kpis, "Desperdiciado / Merma", "0", color_fg="#dc2626")
+    badge_mat_devuelto = _crear_badge_mat(bar_mat_kpis, "Devuelto a Bodega", "0", color_fg="#d97706")
+
+    # 2. Barra de Filtros y Acciones
+    bar_mat_ctrl = tk.Frame(tab_materiales, bg=t["bg_surface"], padx=15, pady=6)
+    bar_mat_ctrl.pack(fill="x")
+
+    tk.Label(bar_mat_ctrl, text="Trabajador:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_mat_filtro_user = tk.StringVar(value="Todos")
+    cb_mat_filtro_user = ttk.Combobox(bar_mat_ctrl, textvariable=var_mat_filtro_user, state="readonly", width=18)
+    cb_mat_filtro_user.pack(side="left", padx=(0, 10))
+
+    tk.Label(bar_mat_ctrl, text="Buscar:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_mat_filtro_txt = tk.StringVar()
+    e_mat_filtro_txt = tk.Entry(bar_mat_ctrl, textvariable=var_mat_filtro_txt, font=("Segoe UI", 9), width=18,
+                                bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"], relief="solid", bd=1)
+    e_mat_filtro_txt.pack(side="left", padx=(0, 10))
+
+    # 3. Notebook Secundario: Saldos vs Historial
+    nb_mat = ttk.Notebook(tab_materiales)
+    nb_mat.pack(fill="both", expand=True, padx=15, pady=(4, 10))
+
+    subtab_saldos = tk.Frame(nb_mat, bg=t["bg_surface"])
+    subtab_hist = tk.Frame(nb_mat, bg=t["bg_surface"])
+    nb_mat.add(subtab_saldos, text="  👥 Saldos Actuales por Trabajador  ")
+    nb_mat.add(subtab_hist, text="  📜 Historial y Trazabilidad de Materiales  ")
+
+    # Treeview Saldos
+    frame_tree_saldos = tk.Frame(subtab_saldos, bg=t["bg_surface"])
+    frame_tree_saldos.pack(fill="both", expand=True, padx=8, pady=8)
+
+    cols_sal = ("Trabajador", "Rol", "Código", "Material", "Unidad", "Disponible", "Recibido", "Consumido", "Desperdicio", "Devuelto", "Último Movimiento", "Fecha Act.")
+    tree_saldos = ttk.Treeview(frame_tree_saldos, columns=cols_sal, show="headings", selectmode="browse")
+    for c in cols_sal:
+        tree_saldos.heading(c, text=c)
+    tree_saldos.column("Trabajador", width=110, anchor="w")
+    tree_saldos.column("Rol", width=85, anchor="center")
+    tree_saldos.column("Código", width=75, anchor="center")
+    tree_saldos.column("Material", width=180, anchor="w")
+    tree_saldos.column("Unidad", width=70, anchor="center")
+    tree_saldos.column("Disponible", width=95, anchor="e")
+    tree_saldos.column("Recibido", width=85, anchor="e")
+    tree_saldos.column("Consumido", width=85, anchor="e")
+    tree_saldos.column("Desperdicio", width=85, anchor="e")
+    tree_saldos.column("Devuelto", width=85, anchor="e")
+    tree_saldos.column("Último Movimiento", width=130, anchor="center")
+    tree_saldos.column("Fecha Act.", width=110, anchor="center")
+
+    sc_sal_y = ttk.Scrollbar(frame_tree_saldos, orient="vertical", command=tree_saldos.yview)
+    tree_saldos.configure(yscrollcommand=sc_sal_y.set)
+    tree_saldos.pack(side="left", fill="both", expand=True)
+    sc_sal_y.pack(side="right", fill="y")
+
+    tree_saldos.tag_configure("disponible", foreground="#059669")
+    tree_saldos.tag_configure("agotado", foreground="#dc2626")
+
+    # Treeview Historial de Materiales
+    frame_hist_ctrl = tk.Frame(subtab_hist, bg=t["bg_surface"], padx=10, pady=6)
+    frame_hist_ctrl.pack(fill="x")
+
+    tk.Label(frame_hist_ctrl, text="Tipo de Movimiento:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_hist_tipo = tk.StringVar(value="Todos")
+    cb_hist_tipo = ttk.Combobox(frame_hist_ctrl, textvariable=var_hist_tipo,
+                                values=["Todos", "TRASLADO_BODEGA_A_OPERARIO", "DEVOLUCION_OPERARIO_A_BODEGA", "CONSUMO_VENTA", "DESPERDICIO", "ENTRADA_COMPRA"],
+                                state="readonly", width=25)
+    cb_hist_tipo.pack(side="left", padx=(0, 10))
+
+    frame_tree_hist = tk.Frame(subtab_hist, bg=t["bg_surface"])
+    frame_tree_hist.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    cols_hmat = ("ID", "Fecha", "Hora", "Tipo Movimiento", "Código", "Material", "Cantidad", "Unidad", "Origen", "Destino", "Responsable", "Referencia", "Observaciones")
+    tree_hist_mat = ttk.Treeview(frame_tree_hist, columns=cols_hmat, show="headings", selectmode="browse")
+    for c in cols_hmat:
+        tree_hist_mat.heading(c, text=c)
+    tree_hist_mat.column("ID", width=45, anchor="center")
+    tree_hist_mat.column("Fecha", width=80, anchor="center")
+    tree_hist_mat.column("Hora", width=70, anchor="center")
+    tree_hist_mat.column("Tipo Movimiento", width=180, anchor="center")
+    tree_hist_mat.column("Código", width=70, anchor="center")
+    tree_hist_mat.column("Material", width=170, anchor="w")
+    tree_hist_mat.column("Cantidad", width=85, anchor="e")
+    tree_hist_mat.column("Unidad", width=70, anchor="center")
+    tree_hist_mat.column("Origen", width=130, anchor="center")
+    tree_hist_mat.column("Destino", width=130, anchor="center")
+    tree_hist_mat.column("Responsable", width=95, anchor="center")
+    tree_hist_mat.column("Referencia", width=120, anchor="center")
+    tree_hist_mat.column("Observaciones", width=200, anchor="w")
+
+    sc_hmat_y = ttk.Scrollbar(frame_tree_hist, orient="vertical", command=tree_hist_mat.yview)
+    tree_hist_mat.configure(yscrollcommand=sc_hmat_y.set)
+    tree_hist_mat.pack(side="left", fill="both", expand=True)
+    sc_hmat_y.pack(side="right", fill="y")
+
+    # Función principal de carga de tablas de materiales
+    def cargar_tabla_materiales():
+        # 1. Actualizar lista de trabajadores en el combo
+        trabajadores = obtener_trabajadores_para_materiales()
+        valores_cb = ["Todos"] + [t_w["usuario"] for t_w in trabajadores]
+        cb_mat_filtro_user["values"] = valores_cb
+        if var_mat_filtro_user.get() not in valores_cb:
+            var_mat_filtro_user.set("Todos")
+
+        # 2. Actualizar KPIs
+        kpis = obtener_kpis_materiales()
+        badge_mat_bodega.config(text=f"{kpis.get('total_bodega', 0):,.0f}")
+        badge_mat_operarios.config(text=f"{kpis.get('total_operarios_disponible', 0):,.0f}")
+        badge_mat_consumido.config(text=f"{kpis.get('total_operarios_consumido', 0):,.0f}")
+        badge_mat_desperdicio.config(text=f"{kpis.get('total_operarios_desperdiciado', 0):,.0f}")
+        badge_mat_devuelto.config(text=f"{kpis.get('total_operarios_devuelto', 0):,.0f}")
+
+        # 3. Cargar Saldos
+        f_u = var_mat_filtro_user.get()
+        f_t = var_mat_filtro_txt.get().strip()
+        saldos = obtener_resumen_todos_operarios(filtro_usuario=f_u, filtro_texto=f_t)
+
+        tree_saldos.delete(*tree_saldos.get_children())
+        for s in saldos:
+            disp = float(s.get("stock_disponible", 0.0))
+            tag = "disponible" if disp > 0 else "agotado"
+            f_act = s.get("fecha_actualizacion") or ""
+            if " " in f_act:
+                f_act = f_act.split()[0]
+            tree_saldos.insert("", "end", values=(
+                s.get("usuario_nombre"),
+                s.get("rol", "Operario"),
+                s.get("codigo_producto"),
+                s.get("nombre_producto"),
+                s.get("unidad_medida"),
+                f"{disp:,.0f}" if disp.is_integer() else f"{disp:,.2f}",
+                f"{float(s.get('total_recibido', 0)):,.0f}",
+                f"{float(s.get('total_consumido', 0)):,.0f}",
+                f"{float(s.get('total_desperdiciado', 0)):,.0f}",
+                f"{float(s.get('total_devuelto', 0)):,.0f}",
+                s.get("ultimo_movimiento", ""),
+                f_act
+            ), tags=(tag,))
+
+        # 4. Cargar Historial
+        tipo_h = var_hist_tipo.get()
+        historial = obtener_historial_materiales(
+            filtro_usuario=f_u if f_u != "Todos" else None,
+            filtro_material=f_t if f_t else None,
+            limit=250
+        )
+        tree_hist_mat.delete(*tree_hist_mat.get_children())
+        for h in historial:
+            t_mov = h.get("tipo_movimiento", "")
+            if tipo_h != "Todos" and t_mov != tipo_h:
+                continue
+            cant_flt = float(h.get("cantidad", 0.0))
+            cant_fmt = f"{cant_flt:,.0f}" if cant_flt.is_integer() else f"{cant_flt:,.2f}"
+            tree_hist_mat.insert("", "end", values=(
+                h.get("id"),
+                h.get("fecha"),
+                h.get("hora"),
+                t_mov,
+                h.get("codigo_producto"),
+                h.get("nombre_producto"),
+                cant_fmt,
+                h.get("unidad_medida"),
+                h.get("ubicacion_origen"),
+                h.get("ubicacion_destino"),
+                h.get("usuario"),
+                h.get("referencia"),
+                h.get("observaciones", "")
+            ))
+
+    cb_mat_filtro_user.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_materiales())
+    e_mat_filtro_txt.bind("<KeyRelease>", lambda e: cargar_tabla_materiales())
+    cb_hist_tipo.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_materiales())
+
+    # ==========================================================================
+    # MODALES DE GESTIÓN DE MATERIALES
+    # ==========================================================================
+
+    def abrir_modal_traslado_mat():
+        """Modal para entregar materiales desde Bodega hacia un trabajador."""
+        dlg = tk.Toplevel(ventana)
+        dlg.title("➕ Trasladar Material de Bodega a Trabajador")
+        t_d = aplicar_tema(dlg)
+        calcular_geometria_segura(dlg, 540, 480, 460, 420)
+        dlg.configure(bg=t_d["bg_surface"])
+        dlg.transient(ventana)
+        dlg.grab_set()
+
+        head_f = tk.Frame(dlg, bg=t_d["primary"], height=42)
+        head_f.pack(fill="x")
+        head_f.pack_propagate(False)
+        tk.Label(head_f, text="➕ TRASLADO DE BODEGA A OPERARIO / ADMINISTRADOR", font=("Segoe UI", 10, "bold"), bg=t_d["primary"], fg="white").pack(side="left", padx=12)
+
+        body = tk.Frame(dlg, bg=t_d["bg_surface"], padx=20, pady=12)
+        body.pack(fill="both", expand=True)
+
+        materiales = obtener_materiales_catalogo()
+        if not materiales:
+            messagebox.showwarning("Sin Materiales", "No hay artículos físicos ni materiales en el catálogo.", parent=dlg)
+            dlg.destroy()
+            return
+
+        trabajadores = obtener_trabajadores_para_materiales()
+        if not trabajadores:
+            messagebox.showwarning("Sin Trabajadores", "No hay trabajadores registrados para recibir materiales.", parent=dlg)
+            dlg.destroy()
+            return
+
+        # 1. Seleccionar Material
+        tk.Label(body, text="Material a entregar (desde Bodega):", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(anchor="w", pady=(0, 2))
+        var_mat_sel = tk.StringVar(value=f"{materiales[0]['codigo']} - {materiales[0]['nombre']}")
+        cb_mat = ttk.Combobox(body, textvariable=var_mat_sel, values=[f"{m['codigo']} - {m['nombre']}" for m in materiales], state="readonly")
+        cb_mat.pack(fill="x", pady=(0, 8))
+
+        lbl_bod_stock = tk.Label(body, text="", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg="#2563eb")
+        lbl_bod_stock.pack(anchor="w", pady=(0, 6))
+
+        def _on_mat_change(*a):
+            sel = var_mat_sel.get()
+            for m in materiales:
+                if f"{m['codigo']} - {m['nombre']}" == sel:
+                    st_b = float(m.get("stock_bodega", 0.0))
+                    lbl_bod_stock.config(text=f"📦 Existencias en Bodega: {st_b:g} {m.get('unidad_medida', 'Unidad')}")
+                    lbl_unid_hint.config(text=f"Unidades ({m.get('unidad_medida', 'Unidad')}):")
+                    break
+
+        # 2. Seleccionar Trabajador Destino
+        tk.Label(body, text="Trabajador receptor (Operario o Administrador):", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(anchor="w", pady=(2, 2))
+        var_dest_user = tk.StringVar(value=trabajadores[0]["usuario"])
+        cb_dest_user = ttk.Combobox(body, textvariable=var_dest_user, values=[tw["usuario"] for tw in trabajadores], state="readonly")
+        cb_dest_user.pack(fill="x", pady=(0, 8))
+
+        # 3. Cantidad a Trasladar
+        lbl_unid_hint = tk.Label(body, text="Cantidad a entregar:", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"])
+        lbl_unid_hint.pack(anchor="w", pady=(2, 2))
+        var_cant_tras = tk.StringVar(value="50")
+        e_cant_tras = tk.Entry(body, textvariable=var_cant_tras, font=("Segoe UI", 11, "bold"),
+                               bg=t_d["input_bg"], fg=t_d["input_fg"], insertbackground=t_d["input_insert"], relief="solid", bd=1)
+        e_cant_tras.pack(fill="x", pady=(0, 8))
+
+        # 4. Observaciones
+        tk.Label(body, text="Observaciones / Motivo de entrega (opcional):", font=("Segoe UI", 8), bg=t_d["bg_surface"], fg=t_d["text_muted"]).pack(anchor="w", pady=(2, 2))
+        e_obs_tras = tk.Entry(body, font=("Segoe UI", 9), bg=t_d["input_bg"], fg=t_d["input_fg"], insertbackground=t_d["input_insert"], relief="solid", bd=1)
+        e_obs_tras.pack(fill="x", pady=(0, 12))
+
+        cb_mat.bind("<<ComboboxSelected>>", _on_mat_change)
+        _on_mat_change()
+
+        def _confirmar():
+            sel_m = var_mat_sel.get()
+            mat_obj = next((m for m in materiales if f"{m['codigo']} - {m['nombre']}" == sel_m), None)
+            if not mat_obj:
+                return
+
+            try:
+                cant = float(var_cant_tras.get().strip() or 0.0)
+            except ValueError:
+                messagebox.showwarning("Cantidad Inválida", "Ingrese un número válido.", parent=dlg)
+                return
+
+            if cant <= 0:
+                messagebox.showwarning("Cantidad Inválida", "La cantidad debe ser mayor a cero.", parent=dlg)
+                return
+
+            dest_u = var_dest_user.get()
+            obs = e_obs_tras.get().strip()
+
+            try:
+                res = trasladar_bodega_a_operario(
+                    producto_id=mat_obj["id"],
+                    usuario_destino=dest_u,
+                    cantidad_unidades=cant,
+                    usuario_responsable=usuario_actual,
+                    observaciones=obs
+                )
+                dlg.destroy()
+                cargar_tabla_materiales()
+                refrescar_kpis()
+                messagebox.showinfo(
+                    "Traslado Exitoso",
+                    f"✅ Entregadas {cant:g} {mat_obj['unidad_medida']} de '{mat_obj['nombre']}' al trabajador '{dest_u}'.\n\n"
+                    f"• Saldo restante en Bodega: {res['saldo_bodega_restante']:g}\n"
+                    f"• Saldo nuevo del trabajador: {res['saldo_operario_nuevo']:g}",
+                    parent=ventana
+                )
+            except Exception as ex:
+                messagebox.showerror("Error al Trasladar", str(ex), parent=dlg)
+
+        bot_f = tk.Frame(dlg, bg=t_d["bg_surface"], padx=20, pady=10)
+        bot_f.pack(side="bottom", fill="x")
+        crear_boton(bot_f, "Cancelar", dlg.destroy, tipo="secondary", tam_fuente=9).pack(side="right", padx=4)
+        crear_boton(bot_f, "Confirmar Entrega", _confirmar, tipo="success", tam_fuente=9, negrita=True).pack(side="right", padx=4)
+
+    def abrir_modal_devolucion_mat():
+        """Modal para devolver material sobrante de un trabajador a Bodega."""
+        dlg = tk.Toplevel(ventana)
+        dlg.title("↩️ Devolver Material a Bodega")
+        t_d = aplicar_tema(dlg)
+        calcular_geometria_segura(dlg, 540, 460, 460, 400)
+        dlg.configure(bg=t_d["bg_surface"])
+        dlg.transient(ventana)
+        dlg.grab_set()
+
+        head_f = tk.Frame(dlg, bg="#d97706", height=42)
+        head_f.pack(fill="x")
+        head_f.pack_propagate(False)
+        tk.Label(head_f, text="↩️ DEVOLUCIÓN DE MATERIAL A BODEGA", font=("Segoe UI", 10, "bold"), bg="#d97706", fg="white").pack(side="left", padx=12)
+
+        body = tk.Frame(dlg, bg=t_d["bg_surface"], padx=20, pady=12)
+        body.pack(fill="both", expand=True)
+
+        trabajadores = obtener_trabajadores_para_materiales()
+        tk.Label(body, text="Trabajador que devuelve el material:", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(anchor="w", pady=(0, 2))
+        var_dev_user = tk.StringVar(value=trabajadores[0]["usuario"] if trabajadores else "Administrador")
+        cb_dev_user = ttk.Combobox(body, textvariable=var_dev_user, values=[tw["usuario"] for tw in trabajadores], state="readonly")
+        cb_dev_user.pack(fill="x", pady=(0, 8))
+
+        tk.Label(body, text="Material a devolver:", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(anchor="w", pady=(2, 2))
+        var_mat_dev = tk.StringVar()
+        cb_mat_dev = ttk.Combobox(body, textvariable=var_mat_dev, state="readonly")
+        cb_mat_dev.pack(fill="x", pady=(0, 6))
+
+        lbl_saldo_dev = tk.Label(body, text="", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg="#059669")
+        lbl_saldo_dev.pack(anchor="w", pady=(0, 6))
+
+        materiales_usuario_map = {}
+
+        def _recargar_materiales_usuario(*a):
+            u = var_dev_user.get()
+            from interface.materiales_manager import obtener_inventario_operario
+            items_u = obtener_inventario_operario(u)
+            materiales_usuario_map.clear()
+            opciones = []
+            for it in items_u:
+                if float(it.get("stock_disponible", 0.0)) > 0:
+                    key = f"{it['codigo_producto']} - {it['nombre_producto']}"
+                    materiales_usuario_map[key] = it
+                    opciones.append(key)
+            cb_mat_dev["values"] = opciones
+            if opciones:
+                var_mat_dev.set(opciones[0])
+                _on_mat_dev_change()
+            else:
+                var_mat_dev.set("")
+                lbl_saldo_dev.config(text="⚠️ Este trabajador no tiene materiales disponibles con saldo.", fg="#dc2626")
+
+        def _on_mat_dev_change(*a):
+            key = var_mat_dev.get()
+            it = materiales_usuario_map.get(key)
+            if it:
+                disp = float(it.get("stock_disponible", 0.0))
+                lbl_saldo_dev.config(text=f"Saldo disponible en manos de {it['usuario_nombre']}: {disp:g} {it['unidad_medida']}", fg="#059669")
+
+        cb_dev_user.bind("<<ComboboxSelected>>", _recargar_materiales_usuario)
+        cb_mat_dev.bind("<<ComboboxSelected>>", _on_mat_dev_change)
+        _recargar_materiales_usuario()
+
+        tk.Label(body, text="Cantidad a reintegrar a Bodega:", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(anchor="w", pady=(2, 2))
+        var_cant_dev = tk.StringVar(value="10")
+        e_cant_dev = tk.Entry(body, textvariable=var_cant_dev, font=("Segoe UI", 11, "bold"),
+                              bg=t_d["input_bg"], fg=t_d["input_fg"], insertbackground=t_d["input_insert"], relief="solid", bd=1)
+        e_cant_dev.pack(fill="x", pady=(0, 8))
+
+        tk.Label(body, text="Motivo / Observación:", font=("Segoe UI", 8), bg=t_d["bg_surface"], fg=t_d["text_muted"]).pack(anchor="w", pady=(2, 2))
+        e_obs_dev = tk.Entry(body, font=("Segoe UI", 9), bg=t_d["input_bg"], fg=t_d["input_fg"], insertbackground=t_d["input_insert"], relief="solid", bd=1)
+        e_obs_dev.pack(fill="x", pady=(0, 10))
+
+        def _confirmar_dev():
+            it = materiales_usuario_map.get(var_mat_dev.get())
+            if not it:
+                messagebox.showwarning("Seleccione Material", "Seleccione un material con saldo para devolver.", parent=dlg)
+                return
+
+            try:
+                cant = float(var_cant_dev.get().strip() or 0.0)
+            except ValueError:
+                messagebox.showwarning("Cantidad Inválida", "Ingrese un valor numérico.", parent=dlg)
+                return
+
+            if cant <= 0:
+                messagebox.showwarning("Cantidad Inválida", "La cantidad debe ser mayor a cero.", parent=dlg)
+                return
+
+            try:
+                res = devolver_operario_a_bodega(
+                    producto_id=it["producto_id"],
+                    usuario_origen=it["usuario_nombre"],
+                    cantidad_unidades=cant,
+                    usuario_responsable=usuario_actual,
+                    observaciones=e_obs_dev.get().strip()
+                )
+                dlg.destroy()
+                cargar_tabla_materiales()
+                refrescar_kpis()
+                messagebox.showinfo(
+                    "Devolución Exitosa",
+                    f"✅ Devueltas {cant:g} {it['unidad_medida']} a Bodega.\n\n"
+                    f"• Nuevo saldo de {it['usuario_nombre']}: {res['nuevo_saldo_operario']:g}\n"
+                    f"• Nuevo saldo en Bodega: {res['nuevo_saldo_bodega']:g}",
+                    parent=ventana
+                )
+            except Exception as ex:
+                messagebox.showerror("Error al Devolver", str(ex), parent=dlg)
+
+        bot_f = tk.Frame(dlg, bg=t_d["bg_surface"], padx=20, pady=10)
+        bot_f.pack(side="bottom", fill="x")
+        crear_boton(bot_f, "Cancelar", dlg.destroy, tipo="secondary", tam_fuente=9).pack(side="right", padx=4)
+        crear_boton(bot_f, "Confirmar Devolución", _confirmar_dev, tipo="warning", tam_fuente=9, negrita=True).pack(side="right", padx=4)
+
+    def abrir_modal_desperdicio_mat():
+        """Modal para reportar material dañado / merma de un trabajador."""
+        dlg = tk.Toplevel(ventana)
+        dlg.title("⚠️ Registrar Desperdicio o Merma de Material")
+        t_d = aplicar_tema(dlg)
+        calcular_geometria_segura(dlg, 540, 460, 460, 400)
+        dlg.configure(bg=t_d["bg_surface"])
+        dlg.transient(ventana)
+        dlg.grab_set()
+
+        head_f = tk.Frame(dlg, bg="#dc2626", height=42)
+        head_f.pack(fill="x")
+        head_f.pack_propagate(False)
+        tk.Label(head_f, text="⚠️ REGISTRAR DESPERDICIO O MERMA", font=("Segoe UI", 10, "bold"), bg="#dc2626", fg="white").pack(side="left", padx=12)
+
+        body = tk.Frame(dlg, bg=t_d["bg_surface"], padx=20, pady=12)
+        body.pack(fill="both", expand=True)
+
+        trabajadores = obtener_trabajadores_para_materiales()
+        tk.Label(body, text="Trabajador responsable del material:", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(anchor="w", pady=(0, 2))
+        var_dsp_user = tk.StringVar(value=trabajadores[0]["usuario"] if trabajadores else "Administrador")
+        cb_dsp_user = ttk.Combobox(body, textvariable=var_dsp_user, values=[tw["usuario"] for tw in trabajadores], state="readonly")
+        cb_dsp_user.pack(fill="x", pady=(0, 8))
+
+        tk.Label(body, text="Material dañado / desperdiciado:", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(anchor="w", pady=(2, 2))
+        var_mat_dsp = tk.StringVar()
+        cb_mat_dsp = ttk.Combobox(body, textvariable=var_mat_dsp, state="readonly")
+        cb_mat_dsp.pack(fill="x", pady=(0, 6))
+
+        lbl_saldo_dsp = tk.Label(body, text="", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg="#059669")
+        lbl_saldo_dsp.pack(anchor="w", pady=(0, 6))
+
+        mat_dsp_map = {}
+
+        def _recargar_mat_dsp(*a):
+            u = var_dsp_user.get()
+            from interface.materiales_manager import obtener_inventario_operario
+            items_u = obtener_inventario_operario(u)
+            mat_dsp_map.clear()
+            opciones = []
+            for it in items_u:
+                if float(it.get("stock_disponible", 0.0)) > 0:
+                    key = f"{it['codigo_producto']} - {it['nombre_producto']}"
+                    mat_dsp_map[key] = it
+                    opciones.append(key)
+            cb_mat_dsp["values"] = opciones
+            if opciones:
+                var_mat_dsp.set(opciones[0])
+                _on_mat_dsp_change()
+            else:
+                var_mat_dsp.set("")
+                lbl_saldo_dsp.config(text="⚠️ Este trabajador no tiene saldo disponible en ningún material.", fg="#dc2626")
+
+        def _on_mat_dsp_change(*a):
+            it = mat_dsp_map.get(var_mat_dsp.get())
+            if it:
+                lbl_saldo_dsp.config(text=f"Saldo disponible: {float(it.get('stock_disponible', 0)):g} {it['unidad_medida']}", fg="#059669")
+
+        cb_dsp_user.bind("<<ComboboxSelected>>", _recargar_mat_dsp)
+        cb_mat_dsp.bind("<<ComboboxSelected>>", _on_mat_dsp_change)
+        _recargar_mat_dsp()
+
+        tk.Label(body, text="Cantidad desperdiciada:", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(anchor="w", pady=(2, 2))
+        var_cant_dsp = tk.StringVar(value="5")
+        e_cant_dsp = tk.Entry(body, textvariable=var_cant_dsp, font=("Segoe UI", 11, "bold"),
+                              bg=t_d["input_bg"], fg=t_d["input_fg"], insertbackground=t_d["input_insert"], relief="solid", bd=1)
+        e_cant_dsp.pack(fill="x", pady=(0, 8))
+
+        tk.Label(body, text="Motivo del desperdicio (obligatorio):", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(anchor="w", pady=(2, 2))
+        e_motivo_dsp = tk.Entry(body, font=("Segoe UI", 9), bg=t_d["input_bg"], fg=t_d["input_fg"], insertbackground=t_d["input_insert"], relief="solid", bd=1)
+        e_motivo_dsp.insert(0, "Hoja atascada / error de impresión")
+        e_motivo_dsp.pack(fill="x", pady=(0, 10))
+
+        def _confirmar_dsp():
+            it = mat_dsp_map.get(var_mat_dsp.get())
+            if not it:
+                messagebox.showwarning("Seleccione Material", "Seleccione un material con saldo.", parent=dlg)
+                return
+
+            try:
+                cant = float(var_cant_dsp.get().strip() or 0.0)
+            except ValueError:
+                messagebox.showwarning("Cantidad Inválida", "Ingrese un valor numérico.", parent=dlg)
+                return
+
+            if cant <= 0:
+                messagebox.showwarning("Cantidad Inválida", "La cantidad debe ser mayor a cero.", parent=dlg)
+                return
+
+            mot = e_motivo_dsp.get().strip()
+            if not mot or len(mot) < 3:
+                messagebox.showwarning("Motivo Requerido", "Por favor ingrese el motivo del desperdicio (mínimo 3 caracteres).", parent=dlg)
+                return
+
+            try:
+                res = registrar_desperdicio_material(
+                    producto_id=it["producto_id"],
+                    usuario_origen=it["usuario_nombre"],
+                    cantidad_unidades=cant,
+                    motivo=mot,
+                    usuario_responsable=usuario_actual
+                )
+                dlg.destroy()
+                cargar_tabla_materiales()
+                refrescar_kpis()
+                messagebox.showinfo(
+                    "Desperdicio Registrado",
+                    f"⚠️ Registradas {cant:g} {it['unidad_medida']} de desperdicio.\n\n"
+                    f"• Saldo restante de {it['usuario_nombre']}: {res['saldo_restante']:g} {it['unidad_medida']}",
+                    parent=ventana
+                )
+            except Exception as ex:
+                messagebox.showerror("Error al Registrar", str(ex), parent=dlg)
+
+        bot_f = tk.Frame(dlg, bg=t_d["bg_surface"], padx=20, pady=10)
+        bot_f.pack(side="bottom", fill="x")
+        crear_boton(bot_f, "Cancelar", dlg.destroy, tipo="secondary", tam_fuente=9).pack(side="right", padx=4)
+        crear_boton(bot_f, "Registrar Desperdicio", _confirmar_dsp, tipo="danger", tam_fuente=9, negrita=True).pack(side="right", padx=4)
+
+    def abrir_modal_presentaciones():
+        """Modal para configurar paquetes, resmas y factores de conversión a unidades base."""
+        dlg = tk.Toplevel(ventana)
+        dlg.title("📦 Configuración de Presentaciones y Factores de Conversión")
+        t_d = aplicar_tema(dlg)
+        calcular_geometria_segura(dlg, 680, 520, 560, 420)
+        dlg.configure(bg=t_d["bg_surface"])
+        dlg.transient(ventana)
+        dlg.grab_set()
+
+        head_f = tk.Frame(dlg, bg=t_d["primary"], height=42)
+        head_f.pack(fill="x")
+        head_f.pack_propagate(False)
+        tk.Label(head_f, text="📦 CONFIGURAR PRESENTACIONES Y CONVERSIÓN DE PAQUETES", font=("Segoe UI", 10, "bold"), bg=t_d["primary"], fg="white").pack(side="left", padx=12)
+
+        body = tk.Frame(dlg, bg=t_d["bg_surface"], padx=15, pady=10)
+        body.pack(fill="both", expand=True)
+
+        materiales = obtener_materiales_catalogo()
+
+        row_sel = tk.Frame(body, bg=t_d["bg_surface"])
+        row_sel.pack(fill="x", pady=(0, 8))
+        tk.Label(row_sel, text="Material / Producto:", font=("Segoe UI", 9, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(side="left", padx=(0, 6))
+        var_pres_prod = tk.StringVar(value=f"{materiales[0]['codigo']} - {materiales[0]['nombre']}" if materiales else "")
+        cb_pres_prod = ttk.Combobox(row_sel, textvariable=var_pres_prod, values=[f"{m['codigo']} - {m['nombre']}" for m in materiales], state="readonly", width=35)
+        cb_pres_prod.pack(side="left")
+
+        # Treeview de presentaciones existentes
+        frame_t_pres = tk.Frame(body, bg=t_d["bg_card"], bd=1, relief="solid")
+        frame_t_pres.pack(fill="both", expand=True, pady=6)
+
+        cols_p = ("ID", "Presentación", "Unidad Compra", "Contenido (Factor)", "Unidad Consumo", "Costo Ref.")
+        tree_pres = ttk.Treeview(frame_t_pres, columns=cols_p, show="headings", height=5)
+        for c in cols_p:
+            tree_pres.heading(c, text=c)
+        tree_pres.column("ID", width=40, anchor="center")
+        tree_pres.column("Presentación", width=160, anchor="w")
+        tree_pres.column("Unidad Compra", width=100, anchor="center")
+        tree_pres.column("Contenido (Factor)", width=120, anchor="center")
+        tree_pres.column("Unidad Consumo", width=110, anchor="center")
+        tree_pres.column("Costo Ref.", width=90, anchor="e")
+        tree_pres.pack(fill="both", expand=True)
+
+        def _recargar_tree_pres(*a):
+            tree_pres.delete(*tree_pres.get_children())
+            sel = var_pres_prod.get()
+            m_obj = next((m for m in materiales if f"{m['codigo']} - {m['nombre']}" == sel), None)
+            if m_obj:
+                pres_list = obtener_presentaciones_material(m_obj["id"])
+                for p in pres_list:
+                    tree_pres.insert("", "end", values=(
+                        p["id"], p["nombre_presentacion"], p["unidad_compra"],
+                        f"{float(p['cantidad_unidades_base']):g}",
+                        p["unidad_consumo"],
+                        f"${float(p.get('costo_defecto') or 0):,.0f}"
+                    ))
+
+        cb_pres_prod.bind("<<ComboboxSelected>>", _recargar_tree_pres)
+        _recargar_tree_pres()
+
+        # Formulario para agregar nueva presentación
+        f_add = tk.LabelFrame(body, text=" ➕ Agregar Nueva Presentación ", font=("Segoe UI", 9, "bold"),
+                              bg=t_d["bg_surface"], fg=t_d["text_main"], padx=10, pady=6)
+        f_add.pack(fill="x", pady=6)
+
+        r1 = tk.Frame(f_add, bg=t_d["bg_surface"])
+        r1.pack(fill="x", pady=2)
+        tk.Label(r1, text="Nombre Presentación:", font=("Segoe UI", 8, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(side="left", padx=(0, 4))
+        e_p_nom = tk.Entry(r1, font=("Segoe UI", 9), width=18, bg=t_d["input_bg"], fg=t_d["input_fg"], insertbackground=t_d["input_insert"], relief="solid", bd=1)
+        e_p_nom.insert(0, "Paquete x500")
+        e_p_nom.pack(side="left", padx=(0, 10))
+
+        tk.Label(r1, text="Unidad Compra:", font=("Segoe UI", 8), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(side="left", padx=(0, 4))
+        var_p_ucomp = tk.StringVar(value="Paquete")
+        cb_p_ucomp = ttk.Combobox(r1, textvariable=var_p_ucomp, values=["Paquete", "Resma", "Caja", "Docena", "Cartón", "Rollo"], state="readonly", width=10)
+        cb_p_ucomp.pack(side="left")
+
+        r2 = tk.Frame(f_add, bg=t_d["bg_surface"])
+        r2.pack(fill="x", pady=4)
+        tk.Label(r2, text="Contenido (Unidades base por paquete):", font=("Segoe UI", 8, "bold"), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(side="left", padx=(0, 4))
+        e_p_factor = tk.Entry(r2, font=("Segoe UI", 9, "bold"), width=8, bg=t_d["input_bg"], fg=t_d["input_fg"], insertbackground=t_d["input_insert"], relief="solid", bd=1)
+        e_p_factor.insert(0, "500")
+        e_p_factor.pack(side="left", padx=(0, 10))
+
+        tk.Label(r2, text="Unidad de Consumo:", font=("Segoe UI", 8), bg=t_d["bg_surface"], fg=t_d["text_main"]).pack(side="left", padx=(0, 4))
+        var_p_ucons = tk.StringVar(value="Hoja")
+        cb_p_ucons = ttk.Combobox(r2, textvariable=var_p_ucons, values=["Hoja", "Unidad", "Metro", "Gramo"], state="readonly", width=8)
+        cb_p_ucons.pack(side="left")
+
+        def _guardar_pres():
+            m_obj = next((m for m in materiales if f"{m['codigo']} - {m['nombre']}" == var_pres_prod.get()), None)
+            if not m_obj:
+                return
+            nom_p = e_p_nom.get().strip()
+            if not nom_p:
+                messagebox.showwarning("Nombre Requerido", "Ingrese el nombre de la presentación.", parent=dlg)
+                return
+            try:
+                fac = float(e_p_factor.get().strip() or 1.0)
+            except ValueError:
+                messagebox.showwarning("Factor Inválido", "Ingrese una cantidad numérica válida.", parent=dlg)
+                return
+            if fac <= 0:
+                messagebox.showwarning("Factor Inválido", "El factor debe ser mayor a cero.", parent=dlg)
+                return
+
+            try:
+                guardar_presentacion_material(
+                    producto_id=m_obj["id"],
+                    codigo_producto=m_obj["codigo"],
+                    nombre_presentacion=nom_p,
+                    unidad_compra=var_p_ucomp.get(),
+                    cantidad_unidades_base=fac,
+                    unidad_consumo=var_p_ucons.get()
+                )
+                _recargar_tree_pres()
+                messagebox.showinfo("Éxito", f"✅ Presentación '{nom_p}' registrada (1 {var_p_ucomp.get()} = {fac:g} {var_p_ucons.get()}).", parent=dlg)
+            except Exception as ex:
+                messagebox.showerror("Error", str(ex), parent=dlg)
+
+        crear_boton(f_add, "Guardar Presentación", _guardar_pres, tipo="success", tam_fuente=8, icono="💾").pack(side="right", pady=2)
+
+        bot_p = tk.Frame(dlg, bg=t_d["bg_surface"], padx=15, pady=8)
+        bot_p.pack(side="bottom", fill="x")
+        crear_boton(bot_p, "Cerrar", dlg.destroy, tipo="secondary", tam_fuente=9).pack(side="right")
+
+    # Botones en la barra de control
+    crear_boton(bar_mat_ctrl, "Trasladar desde Bodega", abrir_modal_traslado_mat, tipo="success", icono="➕", tam_fuente=8).pack(side="right", padx=2)
+    crear_boton(bar_mat_ctrl, "Devolución a Bodega", abrir_modal_devolucion_mat, tipo="warning", icono="↩️", tam_fuente=8).pack(side="right", padx=2)
+    crear_boton(bar_mat_ctrl, "Registrar Desperdicio", abrir_modal_desperdicio_mat, tipo="danger", icono="⚠️", tam_fuente=8).pack(side="right", padx=2)
+    crear_boton(bar_mat_ctrl, "Presentaciones", abrir_modal_presentaciones, tipo="info", icono="📦", tam_fuente=8).pack(side="right", padx=2)
+    crear_boton(bar_mat_ctrl, "Refrescar", cargar_tabla_materiales, tipo="secondary", icono="🔄", tam_fuente=8).pack(side="right", padx=2)
+
     # Cargar datos iniciales en todas las vistas
     cargar_tabla_catalogo()
     cargar_tabla_bodega()
     cargar_tabla_vitrina()
     cargar_tabla_traslados()
     cargar_tabla_compras()
+    cargar_tabla_materiales()
     cargar_tabla_kardex()
 
     import time as _time_sync
@@ -2355,6 +3047,8 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
             elif idx == 4:
                 cargar_tabla_compras()
             elif idx == 5:
+                cargar_tabla_materiales()
+            elif idx == 6:
                 cargar_tabla_kardex()
         except Exception:
             pass

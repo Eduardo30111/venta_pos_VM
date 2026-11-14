@@ -1073,7 +1073,8 @@ def anular_venta_completa(
     usuario_admin: str = "Administrador",
     motivo: str = "Anulación administrativa",
     terminal: str = "Terminal-1",
-    usuario: Optional[str] = None
+    usuario: Optional[str] = None,
+    accion_materiales: str = "devolver"
 ) -> Dict[str, Any]:
     """
     Anula una venta con reversión atómica de inventario, caja/fiado, comisiones y registro en auditoría.
@@ -1425,6 +1426,21 @@ def anular_venta_completa(
             )
         except Exception as e_rev_nom:
             print(f"Aviso revirtiendo devengos de nómina en anulación: {e_rev_nom}")
+
+        # 8. Gestionar materiales consumidos vinculados a la venta (devolución a operario o registro de desperdicio)
+        try:
+            try:
+                from materiales_manager import gestionar_consumo_anulacion_venta
+            except ImportError:
+                from interface.materiales_manager import gestionar_consumo_anulacion_venta
+            gestionar_consumo_anulacion_venta(
+                venta_id=id_venta,
+                accion=accion_materiales,
+                usuario_admin=usuario_admin,
+                motivo=motivo
+            )
+        except Exception as e_mat_anul:
+            print(f"Aviso gestionando consumo de materiales en anulación: {e_mat_anul}")
 
         return {
             "ok": True,

@@ -78,6 +78,82 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                             cur.execute(f"ALTER TABLE proveedores ADD COLUMN {c_nom} {c_def};")
                         except Exception:
                             pass
+
+            cur.execute("PRAGMA table_info(productos);")
+            cols_prod = [r[1] for r in cur.fetchall()]
+            if cols_prod:
+                cols_pr = [
+                    ("es_material", "INTEGER DEFAULT 0"),
+                    ("presentacion_defecto", "TEXT DEFAULT 'Paquete'"),
+                    ("factor_conversion_defecto", "REAL DEFAULT 1.0"),
+                    ("unidad_consumo_defecto", "TEXT DEFAULT 'Unidad'"),
+                ]
+                for c_nom, c_def in cols_pr:
+                    if c_nom not in cols_prod:
+                        try:
+                            cur.execute(f"ALTER TABLE productos ADD COLUMN {c_nom} {c_def};")
+                        except Exception:
+                            pass
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS inventario_operarios (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    usuario_id INTEGER,
+                    usuario_nombre TEXT NOT NULL,
+                    rol TEXT NOT NULL DEFAULT 'Operario',
+                    producto_id INTEGER NOT NULL,
+                    codigo_producto TEXT NOT NULL,
+                    nombre_producto TEXT NOT NULL,
+                    unidad_medida TEXT NOT NULL DEFAULT 'Unidad',
+                    stock_disponible REAL NOT NULL DEFAULT 0.0,
+                    total_recibido REAL NOT NULL DEFAULT 0.0,
+                    total_consumido REAL NOT NULL DEFAULT 0.0,
+                    total_desperdiciado REAL NOT NULL DEFAULT 0.0,
+                    total_devuelto REAL NOT NULL DEFAULT 0.0,
+                    ultimo_movimiento TEXT,
+                    fecha_actualizacion TEXT,
+                    UNIQUE(usuario_nombre, producto_id)
+                );
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS presentaciones_producto (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    producto_id INTEGER NOT NULL,
+                    codigo_producto TEXT NOT NULL,
+                    nombre_presentacion TEXT NOT NULL,
+                    unidad_compra TEXT NOT NULL DEFAULT 'Paquete',
+                    cantidad_unidades_base REAL NOT NULL DEFAULT 1.0,
+                    unidad_consumo TEXT NOT NULL DEFAULT 'Unidad',
+                    costo_defecto REAL DEFAULT 0.0,
+                    codigo_barras TEXT DEFAULT '',
+                    activo INTEGER NOT NULL DEFAULT 1,
+                    fecha_creacion TEXT
+                );
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS consumos_materiales_venta (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    venta_id INTEGER NOT NULL,
+                    numero_factura TEXT DEFAULT '',
+                    usuario_responsable TEXT NOT NULL,
+                    producto_id INTEGER NOT NULL,
+                    codigo_producto TEXT NOT NULL,
+                    nombre_producto TEXT NOT NULL,
+                    cantidad_consumida REAL NOT NULL,
+                    unidad_medida TEXT NOT NULL DEFAULT 'Unidad',
+                    saldo_anterior REAL NOT NULL DEFAULT 0.0,
+                    saldo_restante REAL NOT NULL DEFAULT 0.0,
+                    costo_unitario REAL DEFAULT 0.0,
+                    costo_total REAL DEFAULT 0.0,
+                    fecha TEXT NOT NULL,
+                    hora TEXT NOT NULL,
+                    estado TEXT NOT NULL DEFAULT 'Aplicado',
+                    observaciones TEXT DEFAULT '',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             conn.commit()
         finally:
             conn.close()
