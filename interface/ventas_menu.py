@@ -629,6 +629,7 @@ class App:
         self.user_id = user_id
         self.rol = rol
         self.user_nombre = usuario_nombre or ""
+        self.user_login = usuario_nombre or ""
         
         # Obtener información del usuario desde la API si no vino completa
         if not self.user_nombre or not self.rol:
@@ -638,7 +639,8 @@ class App:
                     me_data = me.json()
                     self.user_id = self.user_id or str(me_data.get("id", ""))
                     self.rol = self.rol or me_data.get("rol", "")
-                    self.user_nombre = self.user_nombre or f"{me_data.get('nombre', '')} {me_data.get('apellidos', '')}".strip() or me_data.get("usuario", "")
+                    self.user_login = me_data.get("usuario", "") or self.user_login
+                    self.user_nombre = self.user_nombre or f"{me_data.get('nombre', '')} {me_data.get('apellidos', '')}".strip() or self.user_login
             except Exception as e:
                 print("DEBUG: Error obteniendo perfil:", e)
 
@@ -661,6 +663,7 @@ class App:
                     row_u = cur_u.fetchone()
                     if row_u:
                         nom_comp = f"{row_u[3] or ''} {row_u[4] or ''}".strip()
+                        self.user_login = self.user_login or row_u[1]
                         self.user_nombre = self.user_nombre or nom_comp or row_u[1]
                         self.rol = self.rol or row_u[2]
                         self.user_id = self.user_id or str(row_u[0])
@@ -670,6 +673,8 @@ class App:
 
         if not self.user_nombre:
             self.user_nombre = str(self.rol or "Usuario").capitalize()
+        if not getattr(self, "user_login", None):
+            self.user_login = self.user_nombre
             
         rol_clean = str(self.rol or "").strip().lower()
         self.es_admin = rol_clean in ("administrador", "admin", "gerente")
@@ -3126,7 +3131,7 @@ class App:
         Valida stock disponible individual, bloquea excesos y prepara el descuento para cuando se confirme la venta.
         """
         modal_padre = parent or self.ventana
-        usuario_responsable = getattr(self, "user_nombre", None) or getattr(self, "rol", None) or "Administrador"
+        usuario_responsable = getattr(self, "user_login", None) or getattr(self, "user_nombre", None) or getattr(self, "rol", None) or "Administrador"
 
         try:
             try:
@@ -4237,7 +4242,7 @@ class App:
             cambio_payload = 0.0 if str(metodo_pago) == "Fiado" else max(0.0, float(recibido) - float(total))
             orden_id_actual = getattr(self, "orden_id_activa", None)
             autorizado_exceso = bool(getattr(self, "_exceso_credito_autorizado", False))
-            operario_nombre = getattr(self, "user_nombre", None) or getattr(self, "rol", None) or "Administrador"
+            operario_nombre = getattr(self, "user_login", None) or getattr(self, "user_nombre", None) or getattr(self, "rol", None) or "Administrador"
 
             fingerprint = self._calcular_fingerprint_carrito(metodo_pago, total, cliente_id_val, doc_cli)
             idem_key = self._obtener_idempotency_key_venta(fingerprint)

@@ -29,8 +29,158 @@ except ImportError:
 
 
 # ==============================================================================
-# 1. CONSULTA DE TRABAJADORES (OPERARIOS Y ADMINISTRADOR)
+# 1. CONSULTA Y RESOLUCIÓN DE IDENTIFICADORES DE TRABAJADORES
 # ==============================================================================
+
+def resolver_identificadores_usuario(usuario_ref: Any) -> Tuple[List[str], Optional[int]]:
+    """
+    Dada una referencia de usuario (id, login 'admin', rol 'Administrador', o nombre completo),
+    consulta las tablas de usuarios y retorna (lista_de_alias_en_minuscula, usuario_id).
+    Permite encontrar de forma 100% tolerante los registros en inventario_operarios,
+    independientemente de diferencias entre login 'admin' y nombre 'Administrador'.
+    """
+    aliases = set()
+    user_id = None
+    ref_str = str(usuario_ref or "").strip()
+    if not ref_str:
+        return ["administrador", "admin"], 1
+
+    aliases.add(ref_str.lower())
+    if ref_str.lower() in ("admin", "administrador"):
+        aliases.add("admin")
+        aliases.add("administrador")
+
+    # Intentar resolver en usuarios.db o ventas.db
+    base_dir = os.path.dirname(DB_USUARIOS_PATH)
+    for db_path in (DB_USUARIOS_PATH, os.path.join(base_dir, "ventas.db"), os.path.join(base_dir, "vmpos_server.db")):
+        if not db_path or not os.path.exists(db_path):
+            continue
+        try:
+            c = sqlite3.connect(db_path, timeout=2.5)
+            c.row_factory = sqlite3.Row
+            cu = c.cursor()
+            cu.execute("PRAGMA table_info(usuarios);")
+            cols = {r[1] for r in cu.fetchall()}
+            if not cols:
+                c.close()
+                continue
+
+            has_apellidos = "apellidos" in cols
+            has_nombre = "nombre" in cols
+
+            query = "SELECT id, usuario, rol"
+            if has_nombre:
+                query += ", nombre"
+            if has_apellidos:
+                query += ", apellidos"
+            query += " FROM usuarios WHERE 1=1"
+
+            conds = ["LOWER(usuario) = LOWER(?)", "LOWER(rol) = LOWER(?)"]
+            params = [ref_str, ref_str]
+            if ref_str.isdigit():
+                conds.append("id = ?")
+                params.append(int(ref_str))
+            if has_nombre:
+                conds.append("LOWER(nombre) = LOWER(?)")
+                params.append(ref_str)
+            if has_nombre and has_apellidos:
+                conds.append("LOWER(nombre || ' ' || apellidos) = LOWER(?)")
+                params.append(ref_str)
+
+            cu.execute(f"{query} AND ({' OR '.join(conds)})", params)
+            rows = cu.fetchall()
+            for r in rows:
+                if user_id is None and r["id"]:
+                    try:
+                        user_id = int(r["id"])
+                    except Exception:
+                        pass
+                if r["usuario"]:
+                    aliases.add(str(r["usuario"]).strip().lower())
+                if r["rol"]:
+                    aliases.add(str(r["rol"]).strip().lower())
+                if has_nombre and r["nombre"]:
+                    aliases.add(str(r["nombre"]).strip().lower())
+                if has_nombre and has_apellidos and r["nombre"] and r["apellidos"]:
+                    nom_comp = f"{r['nombre']} {r['apellidos']}".strip().lower()
+                    aliases.add(nom_comp)
+            c.close()
+        except Exception:
+            pass
+
+    return list(aliases), user_id
+
+
+def sincronizar_stock_central_local(codigos: Optional[List[str]] = None) -> bool:
+    """
+    Sincroniza existencias de Bodega y Vitrina desde el Servidor Central hacia local SQLite (ventas.db).
+    Garantiza que compras o ajustes registrados centralmente se reflejen de inmediato en materiales.
+    """
+    try:
+        try:
+            from client.api_client import api
+        except ImportError:
+            _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if _root not in sys.path:
+                sys.path.insert(0, _root)
+            from client.api_client import api
+        if not api or not api.esta_disponible():
+            return False
+
+        resp = api.get("/inventario/catalogo", timeout=3.5)
+        if resp.status_code != 200:
+            return False
+        catalogo = resp.json()
+        if not isinstance(catalogo, list) or not catalogo:
+            return False
+
+        conn = conectar_db()
+        if not conn:
+            return False
+        try:
+            cur = conn.cursor()
+            for it in catalogo:
+                cod = str(it.get("codigo") or "").strip()
+                if not cod:
+                    continue
+                if codigos and cod not in codigos and str(it.get("id")) not in codigos:
+                    continue
+                sb = float(it.get("stock_bodega") or 0.0)
+                sv = float(it.get("stock_vitrina") or 0.0)
+                st = float(it.get("stock") or (sb + sv))
+                costo = float(it.get("costo") or 0.0)
+                precio = float(it.get("precio") or 0.0)
+                nombre = it.get("nombre") or ""
+                tipo_prod = it.get("tipo_producto") or "Producto"
+                unidad = it.get("unidad_medida") or "Unidad"
+
+                cur.execute("SELECT id FROM productos WHERE codigo = ?", (cod,))
+                row = cur.fetchone()
+                if row:
+                    cur.execute("""
+                        UPDATE productos SET
+                            stock_bodega = ?,
+                            stock_vitrina = ?,
+                            stock = ?,
+                            costo = CASE WHEN ? > 0 THEN ? ELSE costo END,
+                            precio = CASE WHEN ? > 0 THEN ? ELSE precio END
+                        WHERE id = ?
+                    """, (sb, sv, st, costo, costo, precio, precio, row[0]))
+                else:
+                    cur.execute("""
+                        INSERT INTO productos (
+                            codigo, nombre, tipo_producto, unidad_medida,
+                            stock_bodega, stock_vitrina, stock, costo, precio, estado
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Activo')
+                    """, (cod, nombre, tipo_prod, unidad, sb, sv, st, costo, precio))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"Aviso en sincronizar_stock_central_local: {e}")
+        return False
+
 
 def obtener_trabajadores_para_materiales() -> List[Dict[str, Any]]:
     """
@@ -73,7 +223,13 @@ def obtener_trabajadores_para_materiales() -> List[Dict[str, Any]]:
 def obtener_materiales_catalogo(filtro: str = "") -> List[Dict[str, Any]]:
     """
     Retorna los productos físicos o materiales configurados en el catálogo.
+    Sincroniza proactivamente las existencias centrales si hay conexión para evitar desfasajes.
     """
+    try:
+        sincronizar_stock_central_local()
+    except Exception:
+        pass
+
     materiales = []
     conn = conectar_db()
     if not conn:
@@ -194,6 +350,7 @@ def guardar_presentacion_material(
 def obtener_inventario_operario(usuario_nombre: str) -> List[Dict[str, Any]]:
     """
     Retorna todos los materiales asignados y saldos disponibles para un usuario determinado.
+    Tolerante a diferencias de mayúsculas/minúsculas y correspondencia entre login y nombre.
     """
     items = []
     conn = conectar_db()
@@ -202,17 +359,21 @@ def obtener_inventario_operario(usuario_nombre: str) -> List[Dict[str, Any]]:
     try:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute("""
+        aliases, uid = resolver_identificadores_usuario(usuario_nombre)
+        placeholders = ", ".join("?" for _ in aliases)
+        params = list(aliases) + ([uid] if uid is not None else [-999999])
+
+        cur.execute(f"""
             SELECT io.id, io.usuario_nombre, io.rol, io.producto_id, io.codigo_producto,
                    io.nombre_producto, io.unidad_medida, io.stock_disponible,
                    io.total_recibido, io.total_consumido, io.total_desperdiciado, io.total_devuelto,
                    io.ultimo_movimiento, io.fecha_actualizacion,
-                   p.costo as costo_unitario, p.stock_bodega
+                   COALESCE(p.costo, 0.0) as costo_unitario, COALESCE(p.stock_bodega, 0.0) as stock_bodega
             FROM inventario_operarios io
-            JOIN productos p ON p.id = io.producto_id
-            WHERE io.usuario_nombre = ?
+            LEFT JOIN productos p ON p.id = io.producto_id
+            WHERE (LOWER(io.usuario_nombre) IN ({placeholders}) OR (io.usuario_id IS NOT NULL AND io.usuario_id = ?))
             ORDER BY io.nombre_producto ASC
-        """, (usuario_nombre,))
+        """, params)
         for r in cur.fetchall():
             items.append(dict(r))
     finally:
@@ -227,11 +388,16 @@ def obtener_saldo_material_usuario(usuario_nombre: str, producto_id: int) -> flo
         return 0.0
     try:
         cur = conn.cursor()
-        cur.execute("""
+        aliases, uid = resolver_identificadores_usuario(usuario_nombre)
+        placeholders = ", ".join("?" for _ in aliases)
+        params = list(aliases) + ([uid] if uid is not None else [-999999]) + [producto_id, str(producto_id)]
+
+        cur.execute(f"""
             SELECT COALESCE(stock_disponible, 0.0)
             FROM inventario_operarios
-            WHERE usuario_nombre = ? AND producto_id = ?
-        """, (usuario_nombre, producto_id))
+            WHERE (LOWER(usuario_nombre) IN ({placeholders}) OR (usuario_id IS NOT NULL AND usuario_id = ?))
+              AND (producto_id = ? OR codigo_producto = ?)
+        """, params)
         r = cur.fetchone()
         return float(r[0]) if r else 0.0
     finally:
@@ -327,11 +493,22 @@ def trasladar_bodega_a_operario(
 
         stock_bodega_ant = float(prod["stock_bodega"] or 0.0)
         if stock_bodega_ant < cantidad_unidades:
-            raise ValueError(
-                f"Stock insuficiente en Bodega para '{prod['nombre']}'.\n"
-                f"Disponible en bodega: {stock_bodega_ant:g} {prod['unidad_medida']}.\n"
-                f"Cantidad solicitada: {cantidad_unidades:g} {prod['unidad_medida']}."
-            )
+            # Sincronización preventiva con Servidor Central por si hubo compras recientes
+            try:
+                sincronizar_stock_central_local([prod["codigo"]])
+                cur.execute("SELECT stock_bodega, stock_vitrina, stock, costo FROM productos WHERE id = ?", (producto_id,))
+                prod_actualizado = cur.fetchone()
+                if prod_actualizado:
+                    stock_bodega_ant = float(prod_actualizado["stock_bodega"] or 0.0)
+            except Exception:
+                pass
+
+            if stock_bodega_ant < cantidad_unidades:
+                raise ValueError(
+                    f"Stock insuficiente en Bodega para '{prod['nombre']}'.\n"
+                    f"Disponible en bodega: {stock_bodega_ant:g} {prod['unidad_medida']}.\n"
+                    f"Cantidad solicitada: {cantidad_unidades:g} {prod['unidad_medida']}."
+                )
 
         stock_bodega_des = stock_bodega_ant - cantidad_unidades
         stock_total_des = stock_bodega_des + float(prod["stock_vitrina"] or 0.0)
@@ -348,13 +525,31 @@ def trasladar_bodega_a_operario(
             WHERE id = ?
         """, (stock_bodega_des, stock_total_des, f"{f_str} {h_str}", producto_id))
 
-        # 3. Obtener o crear registro en inventario_operarios
-        cur.execute("""
-            SELECT id, stock_disponible, total_recibido
+        # 3. Obtener o crear registro en inventario_operarios de forma tolerante a nombres/alias
+        aliases_dest, uid_dest = resolver_identificadores_usuario(usuario_destino)
+        placeholders_dest = ", ".join("?" for _ in aliases_dest)
+        params_dest = list(aliases_dest) + ([uid_dest] if uid_dest is not None else [-999999]) + [producto_id, str(prod["codigo"])]
+
+        cur.execute(f"""
+            SELECT id, stock_disponible, total_recibido, usuario_nombre
             FROM inventario_operarios
-            WHERE usuario_nombre = ? AND producto_id = ?
-        """, (usuario_destino, producto_id))
+            WHERE (LOWER(usuario_nombre) IN ({placeholders_dest}) OR (usuario_id IS NOT NULL AND usuario_id = ?))
+              AND (producto_id = ? OR codigo_producto = ?)
+        """, params_dest)
         inv_op = cur.fetchone()
+
+        # Consultar rol del usuario
+        rol_u = "Administrador" if usuario_destino.lower() in ("admin", "administrador") else "Operario"
+        try:
+            conn_u = sqlite3.connect(DB_USUARIOS_PATH, timeout=3.0)
+            cur_u = conn_u.cursor()
+            cur_u.execute("SELECT id, rol FROM usuarios WHERE usuario = ?", (usuario_destino,))
+            row_u = cur_u.fetchone()
+            if row_u:
+                rol_u = row_u[1]
+            conn_u.close()
+        except Exception:
+            pass
 
         stock_op_ant = 0.0
         if inv_op:
@@ -371,30 +566,18 @@ def trasladar_bodega_a_operario(
             """, (stock_op_des, tot_recibido_des, f"{f_str} {h_str}", inv_op["id"]))
         else:
             stock_op_des = cantidad_unidades
-            # Consultar rol del usuario
-            rol_u = "Administrador" if usuario_destino.lower() in ("admin", "administrador") else "Operario"
-            try:
-                conn_u = sqlite3.connect(DB_USUARIOS_PATH, timeout=3.0)
-                cur_u = conn_u.cursor()
-                cur_u.execute("SELECT id, rol FROM usuarios WHERE usuario = ?", (usuario_destino,))
-                row_u = cur_u.fetchone()
-                if row_u:
-                    rol_u = row_u[1]
-                conn_u.close()
-            except Exception:
-                pass
-
             cur.execute("""
                 INSERT INTO inventario_operarios (
                     usuario_nombre, rol, producto_id, codigo_producto,
                     nombre_producto, unidad_medida, stock_disponible,
                     total_recibido, total_consumido, total_desperdiciado,
-                    total_devuelto, ultimo_movimiento, fecha_actualizacion
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, 0.0, 0.0, 'TRASLADO_BODEGA', ?)
+                    total_devuelto, ultimo_movimiento, fecha_actualizacion,
+                    usuario_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, 0.0, 0.0, 'TRASLADO_BODEGA', ?, ?)
             """, (
                 usuario_destino, rol_u, producto_id, prod["codigo"],
                 prod["nombre"], prod["unidad_medida"], cantidad_unidades,
-                cantidad_unidades, f"{f_str} {h_str}"
+                cantidad_unidades, f"{f_str} {h_str}", uid_dest
             ))
 
         # 4. Registrar en traslados_inventario
@@ -493,12 +676,17 @@ def devolver_operario_a_bodega(
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
-        # 1. Verificar existencia y saldo del operario
-        cur.execute("""
+        # 1. Verificar existencia y saldo del operario de forma tolerante a alias
+        aliases_orig, uid_orig = resolver_identificadores_usuario(usuario_origen)
+        ph_orig = ", ".join("?" for _ in aliases_orig)
+        params_orig = list(aliases_orig) + ([uid_orig] if uid_orig is not None else [-999999]) + [producto_id, str(producto_id)]
+
+        cur.execute(f"""
             SELECT id, stock_disponible, total_devuelto, nombre_producto, codigo_producto, unidad_medida
             FROM inventario_operarios
-            WHERE usuario_nombre = ? AND producto_id = ?
-        """, (usuario_origen, producto_id))
+            WHERE (LOWER(usuario_nombre) IN ({ph_orig}) OR (usuario_id IS NOT NULL AND usuario_id = ?))
+              AND (producto_id = ? OR codigo_producto = ?)
+        """, params_orig)
         inv_op = cur.fetchone()
         if not inv_op:
             raise ValueError(f"El usuario '{usuario_origen}' no posee registro de inventario para este material.")
@@ -627,11 +815,16 @@ def registrar_desperdicio_material(
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
-        cur.execute("""
+        aliases_desp, uid_desp = resolver_identificadores_usuario(usuario_origen)
+        ph_desp = ", ".join("?" for _ in aliases_desp)
+        params_desp = list(aliases_desp) + ([uid_desp] if uid_desp is not None else [-999999]) + [producto_id, str(producto_id)]
+
+        cur.execute(f"""
             SELECT id, stock_disponible, total_desperdiciado, nombre_producto, codigo_producto, unidad_medida
             FROM inventario_operarios
-            WHERE usuario_nombre = ? AND producto_id = ?
-        """, (usuario_origen, producto_id))
+            WHERE (LOWER(usuario_nombre) IN ({ph_desp}) OR (usuario_id IS NOT NULL AND usuario_id = ?))
+              AND (producto_id = ? OR codigo_producto = ?)
+        """, params_desp)
         inv_op = cur.fetchone()
         if not inv_op:
             raise ValueError(f"El usuario '{usuario_origen}' no posee registro para este material.")
@@ -744,17 +937,23 @@ def descontar_materiales_venta(
         h_str = ahora.strftime("%H:%M:%S")
 
         # 1. Validar existencias de todos los ítems antes de aplicar cambios
+        aliases_op, uid_op = resolver_identificadores_usuario(usuario_operario)
+        ph_op = ", ".join("?" for _ in aliases_op)
+
         for it in items_materiales:
             pid = int(it.get("producto_id") or it.get("id") or 0)
             cant_req = float(it.get("cantidad") or 0.0)
+            cod_req = str(it.get("codigo") or it.get("codigo_producto") or "").strip()
             if cant_req <= 0:
                 continue
 
-            cur.execute("""
+            params_chk = list(aliases_op) + ([uid_op] if uid_op is not None else [-999999]) + [pid, cod_req]
+            cur.execute(f"""
                 SELECT stock_disponible, nombre_producto, unidad_medida
                 FROM inventario_operarios
-                WHERE usuario_nombre = ? AND producto_id = ?
-            """, (usuario_operario, pid))
+                WHERE (LOWER(usuario_nombre) IN ({ph_op}) OR (usuario_id IS NOT NULL AND usuario_id = ?))
+                  AND (producto_id = ? OR (codigo_producto = ? AND codigo_producto != ''))
+            """, params_chk)
             row_inv = cur.fetchone()
             disponible = float(row_inv["stock_disponible"] or 0.0) if row_inv else 0.0
             nom_m = it.get("nombre") or (row_inv["nombre_producto"] if row_inv else f"Material #{pid}")
@@ -777,14 +976,17 @@ def descontar_materiales_venta(
         for it in items_materiales:
             pid = int(it.get("producto_id") or it.get("id") or 0)
             cant_req = float(it.get("cantidad") or 0.0)
+            cod_req = str(it.get("codigo") or it.get("codigo_producto") or "").strip()
             if cant_req <= 0:
                 continue
 
-            cur.execute("""
+            params_upd = list(aliases_op) + ([uid_op] if uid_op is not None else [-999999]) + [pid, cod_req]
+            cur.execute(f"""
                 SELECT id, stock_disponible, total_consumido, codigo_producto, nombre_producto, unidad_medida
                 FROM inventario_operarios
-                WHERE usuario_nombre = ? AND producto_id = ?
-            """, (usuario_operario, pid))
+                WHERE (LOWER(usuario_nombre) IN ({ph_op}) OR (usuario_id IS NOT NULL AND usuario_id = ?))
+                  AND (producto_id = ? OR (codigo_producto = ? AND codigo_producto != ''))
+            """, params_upd)
             inv_row = cur.fetchone()
 
             saldo_ant = float(inv_row["stock_disponible"] or 0.0)

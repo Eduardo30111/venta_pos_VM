@@ -544,8 +544,8 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
             self.tab_billetes = tk.Frame(self.nb, bg=self.t["bg_surface"])
             self.tab_monedas = tk.Frame(self.nb, bg=self.t["bg_surface"])
 
-            self.nb.add(self.tab_billetes, text="  💵  Billetes (COP)  ")
-            self.nb.add(self.tab_monedas, text="  🪙  Monedas (COP)  ")
+            self.nb.add(self.tab_billetes, text="💵 Billetes (COP)")
+            self.nb.add(self.tab_monedas, text="🪙 Monedas (COP)")
 
             self._construir_filas(self.tab_billetes, self.DENOM_BILLETES, es_moneda=False)
             self._construir_filas(self.tab_monedas, self.DENOM_MONEDAS, es_moneda=True)
@@ -565,15 +565,31 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
             canvas.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=2)
 
             def _on_frame_cfg(event=None):
-                canvas.configure(scrollregion=canvas.bbox("all"))
+                interior.update_idletasks()
+                bbox = canvas.bbox("all")
+                if bbox:
+                    canvas.configure(scrollregion=bbox)
 
             def _on_canvas_cfg(event):
                 if event.width > 30:
                     canvas.itemconfig(interior_id, width=event.width - 4)
-                canvas.configure(scrollregion=canvas.bbox("all"))
+                bbox = canvas.bbox("all")
+                if bbox:
+                    canvas.configure(scrollregion=bbox)
 
             interior.bind("<Configure>", _on_frame_cfg)
             canvas.bind("<Configure>", _on_canvas_cfg)
+
+            def _on_map(event=None):
+                interior.update_idletasks()
+                bbox = canvas.bbox("all")
+                if bbox:
+                    canvas.configure(scrollregion=bbox)
+
+            canvas.bind("<Map>", _on_map)
+            interior.bind("<Map>", _on_map)
+            parent_tab.after(30, _on_map)
+            parent_tab.after(120, _on_map)
 
             def _on_wheel(e):
                 if sys.platform == "darwin":
@@ -697,7 +713,10 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
             for c in [self.tab_billetes, self.tab_monedas]:
                 for w in c.winfo_children():
                     if isinstance(w, tk.Canvas):
-                        w.configure(scrollregion=w.bbox("all"))
+                        w.update_idletasks()
+                        bbox = w.bbox("all")
+                        if bbox:
+                            w.configure(scrollregion=bbox)
 
         def recalcular_totales(self):
             total = 0
@@ -790,7 +809,7 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         dlg = tk.Toplevel(ventana)
         dlg.title("🟢 Apertura de Turno — Arqueo de Efectivo Inicial")
         t_dlg = aplicar_tema(dlg)
-        calcular_geometria_segura(dlg, 620, 680, 540, 560)
+        calcular_geometria_segura(dlg, 560, 640, 480, 500)
         dlg.configure(bg=t_dlg["bg_surface"])
         dlg.transient(ventana)
         dlg.grab_set()
@@ -1021,7 +1040,7 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         dlg = tk.Toplevel(ventana)
         dlg.title("🔒 Cierre de Turno y Arqueo Físico de Caja")
         t_dlg = aplicar_tema(dlg)
-        calcular_geometria_segura(dlg, 660, 740, 580, 600)
+        calcular_geometria_segura(dlg, 620, 700, 520, 540)
         dlg.configure(bg=t_dlg["bg_surface"])
         dlg.transient(ventana)
         dlg.grab_set()

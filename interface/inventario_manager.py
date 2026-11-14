@@ -669,6 +669,238 @@ def ejecutar_traslado(
 # 5. ENTRADAS DE MERCANCÍA Y COMPRAS
 # ==============================================================================
 
+def _sincronizar_compra_local_sqlite(
+    compra_id: Optional[int],
+    numero_compra: str,
+    proveedor_id: Optional[int],
+    proveedor_nombre: str,
+    doc_referencia: str,
+    ubicacion_destino: str,
+    usuario: str,
+    observaciones: str,
+    items: List[Dict[str, Any]],
+    conn: Optional[sqlite3.Connection] = None,
+):
+    debo_cerrar = False
+    if conn is None:
+        try:
+            from interface.database_manager import conectar_db
+        except ImportError:
+            from database_manager import conectar_db
+        conn = conectar_db()
+        debo_cerrar = True
+    if not conn:
+        return
+
+    try:
+        cur = conn.cursor()
+        ahora = datetime.now()
+        f_str = ahora.strftime("%Y-%m-%d")
+        h_str = ahora.strftime("%H:%M:%S")
+        ubic = (ubicacion_destino or "BODEGA").strip().upper()
+        if ubic not in ("BODEGA", "VITRINA"):
+            ubic = "BODEGA"
+
+        # Cabecera de compra
+        cur.execute("""
+            INSERT OR REPLACE INTO compras_inventario (
+                numero_compra, fecha, hora, proveedor_id, proveedor_nombre,
+                documento_referencia, ubicacion_destino, total_compra, usuario,
+                observaciones, estado
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Recibida')
+        """, (
+            numero_compra, f_str, h_str, proveedor_id, proveedor_nombre or "Sin Proveedor",
+            doc_referencia or "", ubic, 0.0, usuario or "Administrador",
+            observaciones or ""
+        ))
+        cid = cur.lastrowid or compra_id
+
+        total_compra = 0.0
+        for it in items or []:
+            cod = str(it.get("codigo") or it.get("codigo_producto") or "").strip()
+            cant_comp = float(it.get("cantidad_comprada") or 0.0)
+            factor = float(it.get("factor_conversion") or 1.0)
+            if factor <= 0:
+                factor = 1.0
+            unid_reales = round(cant_comp * factor, 4)
+            costo_empaque = float(it.get("costo_unidad_compra") or 0.0)
+            costo_unit = round(costo_empaque / factor, 4) if factor > 0 else costo_empaque
+            subtot = round(cant_comp * costo_empaque, 2)
+            total_compra += subtot
+
+            cur.execute("SELECT id, codigo, nombre, unidad_medida, stock_bodega, stock_vitrina, stock, costo FROM productos WHERE codigo = ? OR id = ?", (cod, it.get("producto_id") or 0))
+            row_p = cur.fetchone()
+            if row_p:
+                pid, p_cod, p_nom, p_unid, sb_ant, sv_ant, st_ant, c_ant = row_p
+                sb_ant = float(sb_ant or 0.0)
+                sv_ant = float(sv_ant or 0.0)
+                st_ant = float(st_ant or (sb_ant + sv_ant))
+
+                if ubic == "BODEGA":
+                    sb_des = sb_ant + unid_reales
+                    sv_des = sv_ant
+                else:
+                    sb_des = sb_ant
+                    sv_des = sv_ant + unid_reales
+                st_des = sb_des + sv_des
+
+                cur.execute("""
+                    UPDATE productos SET
+                        stock_bodega = ?,
+                        stock_vitrina = ?,
+                        stock = ?,
+                        costo = CASE WHEN ? > 0 THEN ? ELSE costo END,
+                        precio_costo = CASE WHEN ? > 0 THEN ? ELSE precio_costo END
+                    WHERE id = ?
+                """, (sb_des, sv_des, st_des, costo_unit, costo_unit, costo_unit, costo_unit, pid))
+
+                cur.execute("""
+                    INSERT INTO detalle_compras (
+                        compra_id, producto_id, codigo_producto, nombre_producto,
+                        unidad_compra, factor_conversion, cantidad_comprada, cantidad_unidades,
+                        costo_unidad_compra, costo_unitario_convertido, subtotal
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    cid, pid, p_cod, p_nom, it.get("unidad_compra") or "Paquete",
+                    factor, cant_comp, unid_reales, costo_empaque, costo_unit, subtot
+                ))
+
+                cur.execute("""
+                    INSERT INTO movimientos_inventario (
+                        fecha, hora, producto_id, codigo_producto, nombre_producto,
+                        tipo_movimiento, tipo, cantidad, unidad_medida,
+                        ubicacion_origen, ubicacion_destino,
+                        stock_origen_ant, stock_origen_des,
+                        stock_destino_ant, stock_destino_des,
+                        stock_anterior, stock_nuevo,
+                        costo_unitario, valor_total, referencia,
+                        usuario, usuario_nombre, observacion, observaciones, estado
+                    ) VALUES (
+                        ?, ?, ?, ?, ?,
+                        'COMPRA', 'COMPRA', ?, ?,
+                        'PROVEEDOR', ?,
+                        0.0, 0.0,
+                        ?, ?,
+                        ?, ?,
+                        ?, ?, ?,
+                        ?, ?, ?, ?, 'Completado'
+                    )
+                """, (
+                    f_str, h_str, pid, p_cod, p_nom,
+                    unid_reales, p_unid or "Unidad",
+                    ubic,
+                    sb_ant if ubic == "BODEGA" else sv_ant,
+                    sb_des if ubic == "BODEGA" else sv_des,
+                    st_ant, st_des,
+                    costo_unit, subtot, numero_compra,
+                    usuario, usuario, f"Entrada compra {numero_compra}", f"Entrada compra {numero_compra}"
+                ))
+
+        cur.execute("UPDATE compras_inventario SET total_compra = ? WHERE id = ? OR numero_compra = ?", (total_compra, cid, numero_compra))
+        conn.commit()
+    except Exception as e_c_sync:
+        print(f"Aviso sincronizando compra localmente: {e_c_sync}")
+    finally:
+        if debo_cerrar:
+            conn.close()
+
+
+def _sincronizar_ajuste_local_sqlite(
+    codigo_o_id: Any,
+    ubicacion: str,
+    conteo_fisico: float,
+    usuario: str = "Administrador",
+    motivo: str = "Conteo físico",
+    conn: Optional[sqlite3.Connection] = None
+):
+    debo_cerrar = False
+    if conn is None:
+        try:
+            from interface.database_manager import conectar_db
+        except ImportError:
+            from database_manager import conectar_db
+        conn = conectar_db()
+        debo_cerrar = True
+    if not conn:
+        return
+
+    try:
+        cur = conn.cursor()
+        ahora = datetime.now()
+        f_str = ahora.strftime("%Y-%m-%d")
+        h_str = ahora.strftime("%H:%M:%S")
+        ubic = (ubicacion or "BODEGA").strip().upper()
+        if ubic not in ("BODEGA", "VITRINA"):
+            ubic = "BODEGA"
+
+        cur.execute("SELECT id, codigo, nombre, unidad_medida, stock_bodega, stock_vitrina, stock, costo FROM productos WHERE codigo = ? OR id = ?", (str(codigo_o_id), int(codigo_o_id) if str(codigo_o_id).isdigit() else -1))
+        row = cur.fetchone()
+        if row:
+            pid, cod, nom, unid, sb, sv, st, costo = row
+            sb = float(sb or 0.0)
+            sv = float(sv or 0.0)
+            st = float(st or (sb + sv))
+            costo = float(costo or 0.0)
+
+            if ubic == "BODEGA":
+                s_ant = sb
+                s_des = float(conteo_fisico)
+                sb_des = s_des
+                sv_des = sv
+            else:
+                s_ant = sv
+                s_des = float(conteo_fisico)
+                sb_des = sb
+                sv_des = s_des
+            st_des = sb_des + sv_des
+            dif = round(s_des - s_ant, 4)
+
+            cur.execute("""
+                UPDATE productos SET
+                    stock_bodega = ?,
+                    stock_vitrina = ?,
+                    stock = ?
+                WHERE id = ?
+            """, (sb_des, sv_des, st_des, pid))
+
+            cur.execute("""
+                INSERT INTO movimientos_inventario (
+                    fecha, hora, producto_id, codigo_producto, nombre_producto,
+                    tipo_movimiento, tipo, cantidad, unidad_medida,
+                    ubicacion_origen, ubicacion_destino,
+                    stock_origen_ant, stock_origen_des,
+                    stock_destino_ant, stock_destino_des,
+                    stock_anterior, stock_nuevo,
+                    costo_unitario, valor_total, referencia,
+                    usuario, usuario_nombre, observacion, observaciones, estado
+                ) VALUES (
+                    ?, ?, ?, ?, ?,
+                    'AJUSTE_CONTEO', 'AJUSTE_CONTEO', ?, ?,
+                    ?, ?,
+                    ?, ?,
+                    ?, ?,
+                    ?, ?,
+                    ?, ?, 'AJUSTE-FISICO',
+                    ?, ?, ?, ?, 'Completado'
+                )
+            """, (
+                f_str, h_str, pid, cod, nom,
+                abs(dif), unid or "Unidad",
+                ubic, ubic,
+                s_ant, s_des,
+                s_ant, s_des,
+                st, st_des,
+                costo, round(abs(dif) * costo, 2),
+                usuario, usuario, motivo, motivo
+            ))
+            conn.commit()
+    except Exception as e_a_sync:
+        print(f"Aviso sincronizando ajuste localmente: {e_a_sync}")
+    finally:
+        if debo_cerrar:
+            conn.close()
+
+
 def registrar_compra_entrada(
     proveedor_id,
     proveedor_nombre,
@@ -689,7 +921,23 @@ def registrar_compra_entrada(
         "items": items or [],
     }
     resp = api.post("/inventario/compras", json=payload)
-    return _asegurar_respuesta_ok(resp)
+    res = _asegurar_respuesta_ok(resp)
+    try:
+        _sincronizar_compra_local_sqlite(
+            compra_id=res.get("compra_id"),
+            numero_compra=res.get("numero_compra", "COMPRA-NUEVA"),
+            proveedor_id=proveedor_id,
+            proveedor_nombre=proveedor_nombre,
+            doc_referencia=doc_referencia,
+            ubicacion_destino=ubicacion_destino,
+            usuario=usuario,
+            observaciones=observaciones,
+            items=items,
+            conn=conn
+        )
+    except Exception as e_s:
+        print(f"Aviso sincronizando compra local: {e_s}")
+    return res
 
 
 def obtener_detalle_compra(compra_id, conn=None) -> Optional[Dict[str, Any]]:
@@ -748,7 +996,19 @@ def registrar_ajuste_inventario(
         "motivo": str(motivo or "Conteo físico"),
     }
     resp = api.post("/inventario/ajustes", json=payload)
-    return _asegurar_respuesta_ok(resp)
+    res = _asegurar_respuesta_ok(resp)
+    try:
+        _sincronizar_ajuste_local_sqlite(
+            codigo_o_id=codigo_o_id,
+            ubicacion=ubicacion,
+            conteo_fisico=conteo_fisico,
+            usuario=usuario,
+            motivo=motivo,
+            conn=conn
+        )
+    except Exception as e_s:
+        print(f"Aviso sincronizando ajuste local: {e_s}")
+    return res
 
 
 # ==============================================================================
