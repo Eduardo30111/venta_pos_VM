@@ -413,7 +413,8 @@ def inicializar_base_datos(db_path=None):
             "monto_transferencias_verificado REAL DEFAULT 0.0",
             "diferencia_banco REAL DEFAULT 0.0",
             "estado_banco TEXT DEFAULT 'Pendiente'",
-            "arqueo_apertura_json TEXT"
+            "arqueo_apertura_json TEXT",
+            "arqueo_cierre_json TEXT"
         ]:
             try:
                 cursor.execute(f"ALTER TABLE sesiones_caja ADD COLUMN {col_def}")

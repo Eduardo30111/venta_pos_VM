@@ -28,6 +28,7 @@ class CajaService:
                     from sqlalchemy import text
                     cols_caja = [
                         ("arqueo_apertura_json", "TEXT"),
+                        ("arqueo_cierre_json", "TEXT"),
                         ("monto_transferencias_esperado", "FLOAT DEFAULT 0.0"),
                         ("monto_transferencias_verificado", "FLOAT DEFAULT 0.0"),
                         ("diferencia_banco", "FLOAT DEFAULT 0.0"),
@@ -305,6 +306,7 @@ class CajaService:
             "estado_banco": s.estado_banco or "Pendiente",
             "observaciones": s.observaciones or "",
             "arqueo_apertura_json": getattr(s, "arqueo_apertura_json", "") or "",
+            "arqueo_cierre_json": getattr(s, "arqueo_cierre_json", "") or "",
             "estado": s.estado or "Abierta",
         }
 
@@ -415,6 +417,8 @@ class CajaService:
         observaciones: str = "",
         terminal: str = "CAJA-01",
         monto_transferencias_verificado: Optional[float] = None,
+        arqueo_cierre: Optional[Dict[str, Any]] = None,
+        arqueo_cierre_json: Optional[str] = None,
     ) -> Dict[str, Any]:
         res_s = await db.execute(select(SesionCaja).with_for_update().where(SesionCaja.id == sesion_id))
         sesion = res_s.scalars().first()
@@ -453,6 +457,15 @@ class CajaService:
         sesion.monto_transferencias_verificado = transf_verif
         sesion.diferencia_banco = dif_banco
         sesion.estado_banco = estado_banco
+
+        arq_cierre_str = arqueo_cierre_json
+        if not arq_cierre_str and arqueo_cierre:
+            try:
+                arq_cierre_str = json.dumps(arqueo_cierre, ensure_ascii=False)
+            except Exception:
+                arq_cierre_str = None
+        if arq_cierre_str:
+            sesion.arqueo_cierre_json = arq_cierre_str
 
         mov_cierre = MovimientoCaja(
             sesion_caja_id=sesion_id,

@@ -473,43 +473,15 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         refrescar_tabla()
 
     # =========================================================================
-    # MODAL 1: ABRIR TURNO DE CAJA
+    # COMPONENTE REUTILIZABLE: PANEL DE ARQUEO VISUAL POR DENOMINACIONES
     # =========================================================================
-    # =========================================================================
-    # MODAL 1: ABRIR TURNO DE CAJA CON ARQUEO VISUAL DE DENOMINACIONES
-    # =========================================================================
-    def modal_abrir_caja():
-        dlg = tk.Toplevel(ventana)
-        dlg.title("🟢 Apertura de Turno — Arqueo de Efectivo Inicial")
-        t_dlg = aplicar_tema(dlg)
-        calcular_geometria_segura(dlg, 620, 680, 540, 560)
-        dlg.configure(bg=t_dlg["bg_surface"])
-        dlg.transient(ventana)
-        dlg.grab_set()
-
-        try:
-            from PIL import Image, ImageTk
-            pil_activa = True
-        except Exception:
-            pil_activa = False
-
-        assets_denom_dir = None
-        try:
-            from interface.config import BUNDLE_DIR, BASE_DIR
-            for c in [
-                os.path.join(BUNDLE_DIR, "assets", "denominaciones"),
-                os.path.join(BASE_DIR, "assets", "denominaciones"),
-                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "denominaciones"),
-            ]:
-                if c and os.path.isdir(c):
-                    assets_denom_dir = c
-                    break
-        except Exception:
-            pass
-        if not assets_denom_dir:
-            _base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            assets_denom_dir = os.path.join(_base_dir, "assets", "denominaciones")
-
+    class PanelArqueoDenominaciones:
+        """
+        Componente visual universal de conteo de efectivo por denominaciones colombianas.
+        Reutilizado de forma idéntica en:
+        - Apertura de caja (definición de base inicial)
+        - Cierre de caja (conteo físico de efectivo y comparación con esperado)
+        """
         DENOM_BILLETES = [
             {"valor": 100000, "nombre": "Billete de $100.000", "archivo": "billete_100000.png"},
             {"valor": 50000,  "nombre": "Billete de $50.000",  "archivo": "billete_50000.png"},
@@ -528,7 +500,300 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
             {"valor": 50,   "nombre": "Moneda de $50",     "archivo": "moneda_50.png"},
         ]
 
-        img_cache = []
+        def __init__(self, parent, t_theme, master_dialog, on_change=None):
+            self.parent = parent
+            self.t = t_theme
+            self.master_dialog = master_dialog
+            self.on_change = on_change
+            self.cant_vars = {}
+            self.subtotal_lbls = {}
+            self.img_cache = []
+
+            # Directorio de assets de denominaciones
+            self.assets_denom_dir = None
+            try:
+                from interface.config import BUNDLE_DIR, BASE_DIR
+                for c in [
+                    os.path.join(BUNDLE_DIR, "assets", "denominaciones"),
+                    os.path.join(BASE_DIR, "assets", "denominaciones"),
+                    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "denominaciones"),
+                ]:
+                    if c and os.path.isdir(c):
+                        self.assets_denom_dir = c
+                        break
+            except Exception:
+                pass
+            if not self.assets_denom_dir:
+                _base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                self.assets_denom_dir = os.path.join(_base_dir, "assets", "denominaciones")
+
+            try:
+                from PIL import Image, ImageTk
+                self.pil_activa = True
+                self.Image = Image
+                self.ImageTk = ImageTk
+            except Exception:
+                self.pil_activa = False
+                self.Image = None
+                self.ImageTk = None
+
+            # Notebook de Pestañas: Billetes / Monedas
+            self.nb = ttk.Notebook(self.parent)
+            self.nb.pack(fill="both", expand=True, padx=14, pady=(4, 6))
+
+            self.tab_billetes = tk.Frame(self.nb, bg=self.t["bg_surface"])
+            self.tab_monedas = tk.Frame(self.nb, bg=self.t["bg_surface"])
+
+            self.nb.add(self.tab_billetes, text="  💵  Billetes (COP)  ")
+            self.nb.add(self.tab_monedas, text="  🪙  Monedas (COP)  ")
+
+            self._construir_filas(self.tab_billetes, self.DENOM_BILLETES, es_moneda=False)
+            self._construir_filas(self.tab_monedas, self.DENOM_MONEDAS, es_moneda=True)
+
+            self.nb.bind("<<NotebookTabChanged>>", self._on_tab_change)
+
+        def _construir_filas(self, parent_tab, lista_denoms, es_moneda=False):
+            scrollbar = ttk.Scrollbar(parent_tab, orient="vertical")
+            canvas = tk.Canvas(parent_tab, bg=self.t["bg_surface"], highlightthickness=0, bd=0)
+            scrollbar.configure(command=canvas.yview)
+            canvas.configure(yscrollcommand=scrollbar.set)
+
+            interior = tk.Frame(canvas, bg=self.t["bg_surface"])
+            interior_id = canvas.create_window((0, 0), window=interior, anchor="nw")
+
+            scrollbar.pack(side="right", fill="y", pady=2)
+            canvas.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=2)
+
+            def _on_frame_cfg(event=None):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            def _on_canvas_cfg(event):
+                if event.width > 30:
+                    canvas.itemconfig(interior_id, width=event.width - 4)
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            interior.bind("<Configure>", _on_frame_cfg)
+            canvas.bind("<Configure>", _on_canvas_cfg)
+
+            def _on_wheel(e):
+                if sys.platform == "darwin":
+                    delta = int(-1 * (e.delta)) if abs(e.delta) >= 1 else (-1 if e.delta > 0 else 1)
+                    canvas.yview_scroll(delta, "units")
+                else:
+                    canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+            canvas.bind("<MouseWheel>", _on_wheel)
+            interior.bind("<MouseWheel>", _on_wheel)
+
+            for item in lista_denoms:
+                val = item["valor"]
+                nom = item["nombre"]
+                fname = item["archivo"]
+                fpath = os.path.join(self.assets_denom_dir, fname) if self.assets_denom_dir else ""
+                k = (es_moneda, val)
+
+                row_f = tk.Frame(interior, bg=self.t["bg_surface"], bd=1, relief="ridge", padx=8, pady=5)
+                row_f.pack(fill="x", pady=2, padx=4)
+
+                # Icono o imagen
+                lbl_img = None
+                if self.pil_activa and fpath and os.path.exists(fpath):
+                    try:
+                        im = self.Image.open(fpath)
+                        target_size = (54, 28) if not es_moneda else (28, 28)
+                        resample_filter = getattr(self.Image, "Resampling", self.Image).LANCZOS if hasattr(self.Image, "Resampling") else getattr(self.Image, "ANTIALIAS", 1)
+                        im.thumbnail(target_size, resample_filter)
+                        im_tk = self.ImageTk.PhotoImage(im, master=self.master_dialog)
+                        self.img_cache.append(im_tk)
+                        lbl_img = tk.Label(row_f, image=im_tk, bg=self.t["bg_surface"], cursor="hand2")
+                        lbl_img.pack(side="left", padx=(2, 8))
+                    except Exception:
+                        lbl_img = None
+
+                if not lbl_img:
+                    icono_txt = "🪙" if es_moneda else "💵"
+                    lbl_ico = tk.Label(row_f, text=icono_txt, font=("Segoe UI", 13), bg=self.t["bg_surface"], cursor="hand2")
+                    lbl_ico.pack(side="left", padx=(4, 8))
+                    lbl_img = lbl_ico
+
+                # Steppers [-] y [+]
+                def _dec(k_dec=k):
+                    cur_str = self.cant_vars[k_dec].get().strip()
+                    try:
+                        cur_i = int(cur_str or 0)
+                    except ValueError:
+                        cur_i = 0
+                    if cur_i > 0:
+                        self.cant_vars[k_dec].set(str(cur_i - 1))
+                    self.recalcular_totales()
+
+                def _inc(k_inc=k):
+                    cur_str = self.cant_vars[k_inc].get().strip()
+                    try:
+                        cur_i = int(cur_str or 0)
+                    except ValueError:
+                        cur_i = 0
+                    self.cant_vars[k_inc].set(str(cur_i + 1))
+                    self.recalcular_totales()
+
+                if lbl_img:
+                    lbl_img.bind("<Button-1>", lambda e, k_i=k: _inc(k_i))
+
+                # Nombre denominación (click para incrementar)
+                lbl_nom = tk.Label(row_f, text=nom, font=("Segoe UI", 9, "bold"), bg=self.t["bg_surface"], fg=self.t["text_main"], width=17, anchor="w", cursor="hand2")
+                lbl_nom.pack(side="left")
+                lbl_nom.bind("<Button-1>", lambda e, k_i=k: _inc(k_i))
+
+                btn_sub = tk.Button(
+                    row_f, text="−", command=lambda k_sub=k: _dec(k_sub),
+                    width=2, font=("Segoe UI", 10, "bold"),
+                    bg=self.t["bg_surface_alt"], fg=self.t["text_main"],
+                    relief="solid", bd=1, cursor="hand2"
+                )
+                btn_sub.pack(side="left", padx=(8, 2))
+
+                # Entry cantidad
+                var_q = tk.StringVar(value="0")
+                self.cant_vars[k] = var_q
+
+                ent = tk.Entry(
+                    row_f, textvariable=var_q, width=6,
+                    font=("Segoe UI", 10, "bold"), justify="center",
+                    bg=self.t["input_bg"], fg=self.t["input_fg"],
+                    insertbackground=self.t["input_insert"], relief="solid", bd=1
+                )
+                ent.pack(side="left", padx=2)
+
+                def on_entry_key(event=None):
+                    self.recalcular_totales()
+
+                ent.bind("<KeyRelease>", on_entry_key)
+                ent.bind("<FocusIn>", lambda e, en=ent: en.select_range(0, "end"))
+
+                btn_add = tk.Button(
+                    row_f, text="+", command=lambda k_add=k: _inc(k_add),
+                    width=2, font=("Segoe UI", 10, "bold"),
+                    bg=self.t["bg_surface_alt"], fg=self.t["text_main"],
+                    relief="solid", bd=1, cursor="hand2"
+                )
+                btn_add.pack(side="left", padx=(2, 10))
+
+                # Subtotal
+                lbl_sub = tk.Label(row_f, text="$ 0", font=("Segoe UI", 10, "bold"), bg=self.t["bg_surface"], fg=self.t["text_main"], width=14, anchor="e")
+                lbl_sub.pack(side="right", padx=6)
+                self.subtotal_lbls[k] = lbl_sub
+
+            def _bind_wheel_recursively(w):
+                w.bind("<MouseWheel>", _on_wheel)
+                for child in w.winfo_children():
+                    _bind_wheel_recursively(child)
+            _bind_wheel_recursively(interior)
+
+            parent_tab.after(50, lambda: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        def _on_tab_change(self, event=None):
+            if self.master_dialog and self.master_dialog.winfo_exists():
+                self.master_dialog.update_idletasks()
+            for c in [self.tab_billetes, self.tab_monedas]:
+                for w in c.winfo_children():
+                    if isinstance(w, tk.Canvas):
+                        w.configure(scrollregion=w.bbox("all"))
+
+        def recalcular_totales(self):
+            total = 0
+            for (es_mon, v), v_var in self.cant_vars.items():
+                s = v_var.get().strip()
+                try:
+                    c = int(s or 0)
+                    if c < 0:
+                        c = 0
+                        v_var.set("0")
+                except ValueError:
+                    c = 0
+                sub = c * v
+                total += sub
+                if (es_mon, v) in self.subtotal_lbls:
+                    self.subtotal_lbls[(es_mon, v)].config(text=f"${sub:,.0f}")
+
+            if callable(self.on_change):
+                try:
+                    self.on_change(total)
+                except Exception:
+                    pass
+            return total
+
+        def poner_en_cero(self):
+            for v_var in self.cant_vars.values():
+                v_var.set("0")
+            return self.recalcular_totales()
+
+        def obtener_total(self):
+            return self.recalcular_totales()
+
+        def obtener_desglose(self, usuario="Administrador"):
+            total_val = self.recalcular_totales()
+            desglose = {
+                "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "usuario": usuario,
+                "total": float(total_val),
+                "billetes": [],
+                "monedas": []
+            }
+            for it in self.DENOM_BILLETES:
+                v = it["valor"]
+                try:
+                    q = int(self.cant_vars.get((False, v), tk.StringVar(value="0")).get().strip() or 0)
+                except ValueError:
+                    q = 0
+                if q > 0:
+                    desglose["billetes"].append({
+                        "denominacion": v,
+                        "nombre": it["nombre"],
+                        "cantidad": q,
+                        "subtotal": q * v
+                    })
+
+            for it in self.DENOM_MONEDAS:
+                v = it["valor"]
+                try:
+                    q = int(self.cant_vars.get((True, v), tk.StringVar(value="0")).get().strip() or 0)
+                except ValueError:
+                    q = 0
+                if q > 0:
+                    desglose["monedas"].append({
+                        "denominacion": v,
+                        "nombre": it["nombre"],
+                        "cantidad": q,
+                        "subtotal": q * v
+                    })
+            return desglose
+
+        def cargar_desde_desglose(self, desglose_dict):
+            if not desglose_dict or not isinstance(desglose_dict, dict):
+                return
+            for b in desglose_dict.get("billetes", []):
+                v = b.get("denominacion")
+                q = b.get("cantidad", 0)
+                if (False, v) in self.cant_vars:
+                    self.cant_vars[(False, v)].set(str(int(q)))
+            for m in desglose_dict.get("monedas", []):
+                v = m.get("denominacion")
+                q = m.get("cantidad", 0)
+                if (True, v) in self.cant_vars:
+                    self.cant_vars[(True, v)].set(str(int(q)))
+            self.recalcular_totales()
+
+    # =========================================================================
+    # MODAL 1: ABRIR TURNO DE CAJA CON ARQUEO VISUAL DE DENOMINACIONES
+    # =========================================================================
+    def modal_abrir_caja():
+        dlg = tk.Toplevel(ventana)
+        dlg.title("🟢 Apertura de Turno — Arqueo de Efectivo Inicial")
+        t_dlg = aplicar_tema(dlg)
+        calcular_geometria_segura(dlg, 620, 680, 540, 560)
+        dlg.configure(bg=t_dlg["bg_surface"])
+        dlg.transient(ventana)
+        dlg.grab_set()
 
         # Cabecera
         header_f = tk.Frame(dlg, bg=t_dlg["primary"], height=48)
@@ -566,29 +831,25 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         )
         lbl_total_contado.pack(side="left")
 
-        cant_vars = {}
-        subtotal_lbls = {}
+        # Barra inferior de acciones (se empaqueta PRIMERO al fondo para garantizar visibilidad siempre)
+        btn_f = tk.Frame(dlg, bg=t_dlg["bg_surface"], padx=15, pady=12)
+        btn_f.pack(side="bottom", fill="x")
 
-        def poner_en_cero():
-            for v_entry in list(cant_vars.values()):
-                v_entry.set("0")
-            recalcular_totales()
+        def al_cambiar_total(total):
+            lbl_total_contado.config(text=f"${total:,.0f} COP")
+            btn_confirmar.config(text=f"Confirmar Apertura (${total:,.0f})")
 
         btn_cero = crear_boton(
             row_total_box,
             "🧹 Poner en 0",
-            poner_en_cero,
+            lambda: panel_arqueo.poner_en_cero(),
             tipo="secondary",
             tam_fuente=9
         )
         btn_cero.pack(side="right")
 
-        # Barra inferior de acciones (se empaqueta PRIMERO al fondo para garantizar visibilidad siempre)
-        btn_f = tk.Frame(dlg, bg=t_dlg["bg_surface"], padx=15, pady=12)
-        btn_f.pack(side="bottom", fill="x")
-
         def confirmar():
-            total_val = recalcular_totales()
+            total_val = panel_arqueo.obtener_total()
             if total_val <= 0:
                 proceder = messagebox.askyesno(
                     "Apertura en $0",
@@ -598,42 +859,7 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
                 if not proceder:
                     return
 
-            # Construir desglose estructurado del arqueo
-            desglose = {
-                "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "usuario": usuario_actual,
-                "total": float(total_val),
-                "billetes": [],
-                "monedas": []
-            }
-            for it in DENOM_BILLETES:
-                v = it["valor"]
-                try:
-                    q = int(cant_vars.get((False, v), tk.StringVar(value="0")).get().strip() or 0)
-                except ValueError:
-                    q = 0
-                if q > 0:
-                    desglose["billetes"].append({
-                        "denominacion": v,
-                        "nombre": it["nombre"],
-                        "cantidad": q,
-                        "subtotal": q * v
-                    })
-
-            for it in DENOM_MONEDAS:
-                v = it["valor"]
-                try:
-                    q = int(cant_vars.get((True, v), tk.StringVar(value="0")).get().strip() or 0)
-                except ValueError:
-                    q = 0
-                if q > 0:
-                    desglose["monedas"].append({
-                        "denominacion": v,
-                        "nombre": it["nombre"],
-                        "cantidad": q,
-                        "subtotal": q * v
-                    })
-
+            desglose = panel_arqueo.obtener_desglose(usuario_actual)
             try:
                 abrir_sesion_caja(
                     usuario=usuario_actual,
@@ -655,209 +881,9 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         btn_confirmar = crear_boton(btn_f, "Confirmar Apertura ($0)", confirmar, tipo="success", tam_fuente=10, negrita=True)
         btn_confirmar.pack(side="right", padx=5)
 
-        # Notebook de Pestañas: Billetes / Monedas en el área central
-        nb = ttk.Notebook(dlg)
-        nb.pack(fill="both", expand=True, padx=15, pady=(4, 6))
-
-        tab_billetes = tk.Frame(nb, bg=t_dlg["bg_surface"])
-        tab_monedas = tk.Frame(nb, bg=t_dlg["bg_surface"])
-
-        nb.add(tab_billetes, text="  💵  Billetes (COP)  ")
-        nb.add(tab_monedas, text="  🪙  Monedas (COP)  ")
-
-        def construir_filas_denominacion(parent, lista_denoms, es_moneda=False):
-            # Contenedor con Canvas scrollable seguro
-            canvas = tk.Canvas(parent, bg=t_dlg["bg_surface"], highlightthickness=0, bd=0)
-            scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-            interior = tk.Frame(canvas, bg=t_dlg["bg_surface"])
-
-            interior_id = canvas.create_window((0, 0), window=interior, anchor="nw")
-            canvas.configure(yscrollcommand=scrollbar.set)
-
-            canvas.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
-            scrollbar.pack(side="right", fill="y", pady=4)
-
-            def _on_frame_cfg(event=None):
-                canvas.configure(scrollregion=canvas.bbox("all"))
-
-            def _on_canvas_cfg(event):
-                if event.width > 30:
-                    canvas.itemconfig(interior_id, width=event.width)
-                canvas.configure(scrollregion=canvas.bbox("all"))
-
-            interior.bind("<Configure>", _on_frame_cfg)
-            canvas.bind("<Configure>", _on_canvas_cfg)
-
-            def _on_wheel(e):
-                if sys.platform == "darwin":
-                    canvas.yview_scroll(int(-1 * (e.delta)), "units")
-                else:
-                    canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-
-            canvas.bind("<MouseWheel>", _on_wheel)
-            interior.bind("<MouseWheel>", _on_wheel)
-
-            for item in lista_denoms:
-                val = item["valor"]
-                nom = item["nombre"]
-                fname = item["archivo"]
-                fpath = os.path.join(assets_denom_dir, fname)
-                k = (es_moneda, val)
-
-                row_f = tk.Frame(interior, bg=t_dlg["bg_surface"], bd=1, relief="ridge", padx=8, pady=5)
-                row_f.pack(fill="x", pady=2, padx=4)
-
-                # Icono o imagen
-                lbl_img = None
-                if pil_activa and os.path.exists(fpath):
-                    try:
-                        im = Image.open(fpath)
-                        target_size = (36, 22) if not es_moneda else (26, 26)
-                        im.thumbnail(target_size, Image.Resampling.LANCZOS)
-                        im_tk = ImageTk.PhotoImage(im, master=dlg)
-                        img_cache.append(im_tk)
-                        lbl_img = tk.Label(row_f, image=im_tk, bg=t_dlg["bg_surface"])
-                        lbl_img.pack(side="left", padx=(2, 8))
-                    except Exception:
-                        lbl_img = None
-
-                if not lbl_img:
-                    icono_txt = "🪙" if es_moneda else "💵"
-                    tk.Label(
-                        row_f,
-                        text=icono_txt,
-                        font=("Segoe UI", 13),
-                        bg=t_dlg["bg_surface"]
-                    ).pack(side="left", padx=(4, 8))
-
-                # Nombre de denominación
-                tk.Label(
-                    row_f,
-                    text=nom,
-                    font=("Segoe UI", 9, "bold"),
-                    bg=t_dlg["bg_surface"],
-                    fg=t_dlg["text_main"],
-                    width=17,
-                    anchor="w"
-                ).pack(side="left")
-
-                # Stepper: [-]
-                def _dec(k_dec=k):
-                    cur_str = cant_vars[k_dec].get().strip()
-                    try:
-                        cur_i = int(cur_str or 0)
-                    except ValueError:
-                        cur_i = 0
-                    if cur_i > 0:
-                        cant_vars[k_dec].set(str(cur_i - 1))
-                    recalcular_totales()
-
-                def _inc(k_inc=k):
-                    cur_str = cant_vars[k_inc].get().strip()
-                    try:
-                        cur_i = int(cur_str or 0)
-                    except ValueError:
-                        cur_i = 0
-                    cant_vars[k_inc].set(str(cur_i + 1))
-                    recalcular_totales()
-
-                btn_sub = tk.Button(
-                    row_f,
-                    text="−",
-                    command=lambda k_sub=k: _dec(k_sub),
-                    width=2,
-                    font=("Segoe UI", 10, "bold"),
-                    bg=t_dlg["bg_surface_alt"],
-                    fg=t_dlg["text_main"],
-                    relief="solid",
-                    bd=1,
-                    cursor="hand2"
-                )
-                btn_sub.pack(side="left", padx=(8, 2))
-
-                # Entry cantidad
-                var_q = tk.StringVar(value="0")
-                cant_vars[k] = var_q
-
-                ent = tk.Entry(
-                    row_f,
-                    textvariable=var_q,
-                    width=5,
-                    font=("Segoe UI", 10, "bold"),
-                    justify="center",
-                    bg=t_dlg["input_bg"],
-                    fg=t_dlg["input_fg"],
-                    insertbackground=t_dlg["input_insert"],
-                    relief="solid",
-                    bd=1
-                )
-                ent.pack(side="left", padx=2)
-
-                def on_entry_key(event=None):
-                    recalcular_totales()
-
-                ent.bind("<KeyRelease>", on_entry_key)
-                ent.bind("<FocusIn>", lambda e, en=ent: en.select_range(0, "end"))
-
-                btn_add = tk.Button(
-                    row_f,
-                    text="+",
-                    command=lambda k_add=k: _inc(k_add),
-                    width=2,
-                    font=("Segoe UI", 10, "bold"),
-                    bg=t_dlg["bg_surface_alt"],
-                    fg=t_dlg["text_main"],
-                    relief="solid",
-                    bd=1,
-                    cursor="hand2"
-                )
-                btn_add.pack(side="left", padx=(2, 10))
-
-                # Subtotal
-                lbl_sub = tk.Label(
-                    row_f,
-                    text="$ 0",
-                    font=("Segoe UI", 9, "bold"),
-                    bg=t_dlg["bg_surface"],
-                    fg=t_dlg["text_main"],
-                    width=14,
-                    anchor="e"
-                )
-                lbl_sub.pack(side="right", padx=6)
-                subtotal_lbls[k] = lbl_sub
-
-        construir_filas_denominacion(tab_billetes, DENOM_BILLETES, es_moneda=False)
-        construir_filas_denominacion(tab_monedas, DENOM_MONEDAS, es_moneda=True)
-
-        def _on_tab_change(event=None):
-            dlg.update_idletasks()
-            for c in [tab_billetes, tab_monedas]:
-                for w in c.winfo_children():
-                    if isinstance(w, tk.Canvas):
-                        w.configure(scrollregion=w.bbox("all"))
-        nb.bind("<<NotebookTabChanged>>", _on_tab_change)
-
-        def recalcular_totales():
-            total = 0
-            for (es_mon, v), v_var in cant_vars.items():
-                s = v_var.get().strip()
-                try:
-                    c = int(s or 0)
-                    if c < 0:
-                        c = 0
-                        v_var.set("0")
-                except ValueError:
-                    c = 0
-                sub = c * v
-                total += sub
-                if (es_mon, v) in subtotal_lbls:
-                    subtotal_lbls[(es_mon, v)].config(text=f"${sub:,.0f}")
-
-            lbl_total_contado.config(text=f"${total:,.0f} COP")
-            btn_confirmar.config(text=f"Confirmar Apertura (${total:,.0f})")
-            return total
-
-        recalcular_totales()
+        # Panel de denominaciones en el área central
+        panel_arqueo = PanelArqueoDenominaciones(dlg, t_dlg, master_dialog=dlg, on_change=al_cambiar_total)
+        panel_arqueo.recalcular_totales()
 
     # =========================================================================
     # MODAL 2: REGISTRAR INGRESO AUTORIZADO (SENCILLO / APORTE)
@@ -978,7 +1004,7 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         crear_boton(btn_f, "Guardar Salida", confirmar, tipo="danger", tam_fuente=9).pack(side="right", padx=5)
 
     # =========================================================================
-    # MODAL 4: REALIZAR CIERRE Y ARQUEO FÍSICO
+    # MODAL 4: REALIZAR CIERRE Y ARQUEO FÍSICO DE CAJA CON DENOMINACIONES
     # =========================================================================
     def modal_cierre_caja():
         if not sesion_actual_id[0]:
@@ -986,131 +1012,204 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
             return
 
         arq = calcular_arqueo_sesion(sesion_actual_id[0])
-        esperado_efectivo = arq.get("efectivo_esperado", 0.0)
-        esperado_transf = arq.get("transferencias_esperadas", arq.get("ventas_transferencia", 0.0))
+        esperado_efectivo = float(arq.get("efectivo_esperado", 0.0))
+        base_inicial = float(arq.get("monto_inicial", 0.0))
+        entradas_efectivo = float(arq.get("entradas_efectivo", 0.0))
+        salidas_efectivo = float(arq.get("salidas_efectivo", 0.0))
+        esperado_transf = float(arq.get("transferencias_esperadas", arq.get("ventas_transferencia", 0.0)))
 
         dlg = tk.Toplevel(ventana)
-        dlg.title("🔒 Cierre de Turno y Arqueo de Caja")
+        dlg.title("🔒 Cierre de Turno y Arqueo Físico de Caja")
         t_dlg = aplicar_tema(dlg)
-        calcular_geometria_segura(dlg, 540, 560, 480, 480)
+        calcular_geometria_segura(dlg, 660, 740, 580, 600)
         dlg.configure(bg=t_dlg["bg_surface"])
         dlg.transient(ventana)
         dlg.grab_set()
 
-        tk.Label(dlg, text="🔒 ARQUEO Y CIERRE DE TURNO", font=("Segoe UI", 12, "bold"), bg=t_dlg["bg_surface"], fg=t_dlg["text_main"]).pack(pady=10)
-
-        # BLOQUE A: EFECTIVO EN GAVETA
-        box_efectivo = tk.LabelFrame(dlg, text=" Bloque A: Efectivo Físico en Gaveta ", font=("Segoe UI", 9, "bold"), bg=t_dlg["bg_surface"], fg=t_dlg["text_main"], padx=12, pady=6)
-        box_efectivo.pack(fill="x", padx=16, pady=4)
-
-        tk.Label(box_efectivo, text=f"• Base Inicial: ${arq.get('monto_inicial', 0):,.0f} COP", font=("Segoe UI", 8), bg=t_dlg["bg_surface"], fg=t_dlg["text_muted"]).pack(anchor="w")
-        tk.Label(box_efectivo, text=f"• (+) Entradas Efectivo: +${arq.get('entradas_efectivo', 0):,.0f} COP", font=("Segoe UI", 8), bg=t_dlg["bg_surface"], fg="#16a34a").pack(anchor="w")
-        tk.Label(box_efectivo, text=f"• (-) Salidas Efectivo: -${arq.get('salidas_efectivo', 0):,.0f} COP", font=("Segoe UI", 8), bg=t_dlg["bg_surface"], fg="#dc2626").pack(anchor="w")
-        tk.Label(box_efectivo, text=f"EFECTIVO ESPERADO EN GAVETA: ${esperado_efectivo:,.0f} COP", font=("Segoe UI", 10, "bold"), bg=t_dlg["bg_surface"], fg="#2563eb").pack(anchor="w", pady=(4, 2))
-
-        tk.Label(box_efectivo, text="Dinero físico contado por el cajero/administrador:", font=("Segoe UI", 9, "bold"), bg=t_dlg["bg_surface"], fg=t_dlg["text_main"]).pack(anchor="w", pady=(4, 2))
-
-        lbl_dif_efectivo = tk.Label(box_efectivo, text="Diferencia: $ 0 COP (✅ CAJA CUADRADA)", font=("Segoe UI", 10, "bold"), bg=t_dlg["bg_surface"], fg="#16a34a")
-
-        def al_cambiar_contado(val_contado):
-            dif = val_contado - esperado_efectivo
-            if abs(dif) < 0.01:
-                lbl_dif_efectivo.config(text="Diferencia: $ 0 COP (✅ CAJA CUADRADA)", fg="#16a34a")
-            elif dif < 0:
-                lbl_dif_efectivo.config(text=f"Diferencia: -${abs(dif):,.0f} COP (🚨 FALTANTE EN CAJA)", fg="#dc2626")
-            else:
-                lbl_dif_efectivo.config(text=f"Diferencia: +${dif:,.0f} COP (⚠️ SOBRANTE EN CAJA)", fg="#2563eb")
-
-        entry_contado = CurrencyEntry(
-            box_efectivo,
-            initial_value=esperado_efectivo,
-            show_symbol=True,
-            on_change=al_cambiar_contado,
-            font=("Segoe UI", 12, "bold"),
-            width=18,
-            bg=t_dlg["input_bg"],
-            fg=t_dlg["input_fg"],
-            insertbackground=t_dlg["input_insert"],
-            relief="solid",
-            bd=1
-        )
-        entry_contado.pack(anchor="w", fill="x", pady=2)
-        lbl_dif_efectivo.pack(anchor="w", pady=(2, 4))
-        al_cambiar_contado(int(round(esperado_efectivo)))
-
-        # BLOQUE B: CONCILIACIÓN BANCARIA (TRANSFERENCIAS)
-        box_banco = tk.LabelFrame(dlg, text=" Bloque B: Conciliación de Transferencias Bancarias ", font=("Segoe UI", 9, "bold"), bg=t_dlg["bg_surface"], fg=t_dlg["text_main"], padx=12, pady=6)
-        box_banco.pack(fill="x", padx=16, pady=4)
-
-        tk.Label(box_banco, text=f"• Transferencias Esperadas del Turno: ${esperado_transf:,.0f} COP", font=("Segoe UI", 9, "bold"), bg=t_dlg["bg_surface"], fg="#1E40AF").pack(anchor="w")
-        tk.Label(box_banco, text="Monto verificado en extractos bancarios / app digital:", font=("Segoe UI", 8), bg=t_dlg["bg_surface"], fg=t_dlg["text_muted"]).pack(anchor="w", pady=(2, 2))
-
-        entry_transf_verif = CurrencyEntry(
-            box_banco,
-            initial_value=esperado_transf,
-            show_symbol=True,
+        # 1. Cabecera roja de Cierre
+        header_f = tk.Frame(dlg, bg="#DC2626", height=46)
+        header_f.pack(side="top", fill="x")
+        header_f.pack_propagate(False)
+        tk.Label(
+            header_f,
+            text=f"🔒 CIERRE DE TURNO Y ARQUEO FÍSICO — SESIÓN #{sesion_actual_id[0]}",
             font=("Segoe UI", 11, "bold"),
-            width=18,
-            bg=t_dlg["input_bg"],
-            fg=t_dlg["input_fg"],
-            insertbackground=t_dlg["input_insert"],
-            relief="solid",
-            bd=1
-        )
-        entry_transf_verif.pack(anchor="w", fill="x", pady=2)
+            bg="#DC2626",
+            fg="white"
+        ).pack(side="left", padx=14, pady=10)
 
-        # OBSERVACIONES
-        tk.Label(dlg, text="Observaciones / Motivo de diferencias (opcional):", font=("Segoe UI", 8, "bold"), bg=t_dlg["bg_surface"], fg=t_dlg["text_main"]).pack(anchor="w", padx=18, pady=(4, 2))
-        entry_cierre_obs = tk.Entry(dlg, font=("Segoe UI", 9), bg=t_dlg["input_bg"], fg=t_dlg["input_fg"], insertbackground=t_dlg["input_insert"], relief="solid", bd=1)
-        entry_cierre_obs.pack(padx=18, pady=(0, 8), fill="x")
+        # 2. Tarjeta Superior de Comparación en Tiempo Real
+        card_comp = tk.Frame(dlg, bg=t_dlg["bg_card"], bd=1, relief="solid", padx=14, pady=8)
+        card_comp.pack(side="top", fill="x", padx=14, pady=(8, 4))
+
+        col_izq = tk.Frame(card_comp, bg=t_dlg["bg_card"])
+        col_izq.pack(side="left", fill="both", expand=True)
+
+        tk.Label(col_izq, text="EFECTIVO ESPERADO EN GAVETA:", font=("Segoe UI", 8, "bold"), bg=t_dlg["bg_card"], fg=t_dlg["text_muted"]).pack(anchor="w")
+        lbl_esp = tk.Label(col_izq, text=f"${esperado_efectivo:,.0f} COP", font=("Segoe UI", 14, "bold"), bg=t_dlg["bg_card"], fg="#2563eb")
+        lbl_esp.pack(anchor="w")
+        tk.Label(col_izq, text=f"Base: ${base_inicial:,.0f}  |  +Entradas: ${entradas_efectivo:,.0f}  |  -Salidas: ${salidas_efectivo:,.0f}", font=("Segoe UI", 8), bg=t_dlg["bg_card"], fg=t_dlg["text_muted"]).pack(anchor="w")
+
+        col_der = tk.Frame(card_comp, bg=t_dlg["bg_card"])
+        col_der.pack(side="right", fill="both")
+
+        row_der_top = tk.Frame(col_der, bg=t_dlg["bg_card"])
+        row_der_top.pack(fill="x", anchor="e")
+
+        tk.Label(row_der_top, text="EFECTIVO FÍSICO CONTADO:", font=("Segoe UI", 8, "bold"), bg=t_dlg["bg_card"], fg=t_dlg["text_muted"]).pack(side="left")
+        btn_cero = crear_boton(row_der_top, "🧹 Poner en 0", lambda: panel_arqueo.poner_en_cero(), tipo="secondary", tam_fuente=8)
+        btn_cero.pack(side="right", padx=(8, 0))
+
+        lbl_contado = tk.Label(col_der, text="$ 0 COP", font=("Segoe UI", 14, "bold"), bg=t_dlg["bg_card"], fg="#059669")
+        lbl_contado.pack(anchor="e")
+
+        lbl_dif_badge = tk.Label(col_der, text=f"Diferencia: -${esperado_efectivo:,.0f} COP (🚨 FALTANTE)", font=("Segoe UI", 9, "bold"), bg=t_dlg["bg_card"], fg="#dc2626")
+        lbl_dif_badge.pack(anchor="e")
+
+        # 3. Barra Inferior de Acciones (empaquetada primero al fondo con side="bottom")
+        btn_f = tk.Frame(dlg, bg=t_dlg["bg_surface"], padx=14, pady=10)
+        btn_f.pack(side="bottom", fill="x")
+
+        lbl_resumen_bar = tk.Label(btn_f, text="Contado: $0 COP  |  Diferencia: -$0 COP", font=("Segoe UI", 9), bg=t_dlg["bg_surface"], fg=t_dlg["text_muted"])
+        lbl_resumen_bar.pack(side="left", padx=4)
+
+        _procesando_cierre = [False]
 
         def confirmar_cierre():
-            contado = entry_contado.get_value()
+            if _procesando_cierre[0]:
+                return
+
+            total_contado = panel_arqueo.obtener_total()
             verif_banco = entry_transf_verif.get_value()
             obs = entry_cierre_obs.get().strip()
-            dif_ef = contado - esperado_efectivo
+            dif_ef = total_contado - esperado_efectivo
             dif_bk = verif_banco - esperado_transf
 
+            if total_contado <= 0:
+                proceder = messagebox.askyesno(
+                    "Efectivo Contado en $0",
+                    "El total físico contado es de $0 COP.\n¿Desea cerrar el turno de caja sin registrar dinero físico en gaveta?",
+                    parent=dlg
+                )
+                if not proceder:
+                    return
+
+            if abs(dif_ef) >= 0.01 and not obs:
+                estado_txt = f"FALTANTE de -${abs(dif_ef):,.0f} COP" if dif_ef < 0 else f"SOBRANTE de +${dif_ef:,.0f} COP"
+                resp_obs = messagebox.askyesno(
+                    "Diferencia Detectada",
+                    f"Existe un {estado_txt} en el efectivo físico y no se ha ingresado ninguna observación.\n\n"
+                    f"¿Desea confirmar el cierre sin registrar una justificación?",
+                    parent=dlg
+                )
+                if not resp_obs:
+                    entry_cierre_obs.focus()
+                    return
+
             conf = messagebox.askyesno(
-                "Confirmar Cierre de Caja",
+                "Confirmar Cierre Definitivo de Caja",
                 f"¿Confirmas el cierre definitivo del turno #{sesion_actual_id[0]}?\n\n"
-                f"💵 EFECTIVO GAVETA:\n"
-                f"   Esperado:  ${esperado_efectivo:,.0f} COP\n"
-                f"   Contado:   ${contado:,.0f} COP\n"
-                f"   Diferencia: ${dif_ef:+,.0f} COP\n\n"
+                f"💵 EFECTIVO FÍSICO EN GAVETA:\n"
+                f"   • Esperado en Sistema: ${esperado_efectivo:,.0f} COP\n"
+                f"   • Físico Contado:      ${total_contado:,.0f} COP\n"
+                f"   • Diferencia:          {('+' if dif_ef > 0 else '')}${dif_ef:,.0f} COP\n\n"
                 f"💳 BANCOS / TRANSFERENCIAS:\n"
-                f"   Esperado:   ${esperado_transf:,.0f} COP\n"
-                f"   Verificado: ${verif_banco:,.0f} COP\n"
-                f"   Diferencia: ${dif_bk:+,.0f} COP",
+                f"   • Esperado en Sistema: ${esperado_transf:,.0f} COP\n"
+                f"   • Verificado en Banco: ${verif_banco:,.0f} COP\n"
+                f"   • Diferencia:          {('+' if dif_bk > 0 else '')}${dif_bk:,.0f} COP\n\n"
+                f"El detalle por denominaciones de billetes y monedas quedará archivado permanentemente.",
                 parent=dlg
             )
             if not conf:
                 return
 
+            _procesando_cierre[0] = True
+            btn_confirmar.config(state="disabled")
+
+            desglose = panel_arqueo.obtener_desglose(usuario_actual)
             try:
                 res = cerrar_sesion_caja(
                     sesion_id=sesion_actual_id[0],
                     usuario=usuario_actual,
-                    monto_real_contado=contado,
+                    monto_real_contado=float(total_contado),
                     observaciones=obs,
-                    monto_transferencias_verificado=verif_banco
+                    monto_transferencias_verificado=float(verif_banco),
+                    arqueo_cierre_detalle=desglose
                 )
                 dlg.destroy()
                 refrescar_vista()
                 messagebox.showinfo(
                     "Cierre Exitoso",
-                    f"Turno de caja cerrado exitosamente.\n\n"
-                    f"Estado Efectivo: {res['tipo_diferencia']} (${res['diferencia']:+,.0f} COP)\n"
-                    f"Estado Bancos:   {res.get('estado_banco', 'Verificada')}",
+                    f"Turno de caja #{sesion_actual_id[0]} cerrado exitosamente.\n\n"
+                    f"Efectivo Contado: ${total_contado:,.0f} COP\n"
+                    f"Diferencia:       {('+' if dif_ef > 0 else '')}${dif_ef:,.0f} COP ({res.get('tipo_diferencia', 'Registrada')})\n"
+                    f"Estado Bancos:    {res.get('estado_banco', 'Verificada')}\n\n"
+                    f"El detalle por billetes y monedas quedó archivado en el arqueo del cierre.",
                     parent=ventana
                 )
             except Exception as e:
-                messagebox.showerror("Error", f"Error al cerrar caja: {e}", parent=dlg)
+                _procesando_cierre[0] = False
+                btn_confirmar.config(state="normal")
+                messagebox.showerror("Error al cerrar caja", f"No se pudo completar el cierre: {e}", parent=dlg)
 
-        btn_f = tk.Frame(dlg, bg=t_dlg["bg_surface"])
-        btn_f.pack(side="bottom", fill="x", padx=16, pady=10)
         crear_boton(btn_f, "Cancelar", dlg.destroy, tipo="secondary", tam_fuente=9).pack(side="right", padx=5)
-        crear_boton(btn_f, "🔒 Confirmar Cierre", confirmar_cierre, tipo="danger", tam_fuente=9).pack(side="right", padx=5)
+        btn_confirmar = crear_boton(btn_f, "🔒 Confirmar Cierre ($0)", confirmar_cierre, tipo="danger", tam_fuente=10, negrita=True)
+        btn_confirmar.pack(side="right", padx=5)
+
+        # 4. Tarjeta Inferior de Transferencias y Observaciones (side="bottom")
+        extra_card = tk.Frame(dlg, bg=t_dlg["bg_card"], bd=1, relief="solid", padx=12, pady=6)
+        extra_card.pack(side="bottom", fill="x", padx=14, pady=(2, 4))
+
+        row_tr = tk.Frame(extra_card, bg=t_dlg["bg_card"])
+        row_tr.pack(fill="x", pady=2)
+        tk.Label(row_tr, text=f"💳 Transferencias Esperadas: ${esperado_transf:,.0f} COP  •  Verificado en bancos:", font=("Segoe UI", 8, "bold"), bg=t_dlg["bg_card"], fg=t_dlg["text_main"]).pack(side="left")
+        entry_transf_verif = CurrencyEntry(
+            row_tr,
+            initial_value=esperado_transf,
+            show_symbol=True,
+            font=("Segoe UI", 10, "bold"),
+            width=15,
+            bg=t_dlg["input_bg"],
+            fg=t_dlg["input_fg"],
+            insertbackground=t_dlg["input_insert"],
+            relief="solid",
+            bd=1
+        )
+        entry_transf_verif.pack(side="right", padx=2)
+
+        row_obs = tk.Frame(extra_card, bg=t_dlg["bg_card"])
+        row_obs.pack(fill="x", pady=2)
+        tk.Label(row_obs, text="Observaciones / Justificación de diferencia:", font=("Segoe UI", 8, "bold"), bg=t_dlg["bg_card"], fg=t_dlg["text_muted"]).pack(anchor="w")
+        entry_cierre_obs = tk.Entry(
+            row_obs,
+            font=("Segoe UI", 9),
+            bg=t_dlg["input_bg"],
+            fg=t_dlg["input_fg"],
+            insertbackground=t_dlg["input_insert"],
+            relief="solid",
+            bd=1
+        )
+        entry_cierre_obs.pack(fill="x", pady=(2, 0))
+
+        # 5. Panel Central de Denominaciones (Billetes y Monedas idéntico al de Apertura)
+        def al_cambiar_contado(total):
+            lbl_contado.config(text=f"${total:,.0f} COP")
+            dif = total - esperado_efectivo
+            if abs(dif) < 0.01:
+                lbl_dif_badge.config(text="Diferencia: $0 COP (✅ CAJA CUADRADA)", fg="#059669")
+                lbl_resumen_bar.config(text=f"Físico: ${total:,.0f} COP  •  ✅ CAJA CUADRADA", fg="#059669")
+                btn_confirmar.config(text=f"🔒 Confirmar Cierre (${total:,.0f})")
+            elif dif < 0:
+                lbl_dif_badge.config(text=f"Diferencia: -${abs(dif):,.0f} COP (🚨 FALTANTE)", fg="#dc2626")
+                lbl_resumen_bar.config(text=f"Físico: ${total:,.0f} COP  •  🚨 Faltante: -${abs(dif):,.0f} COP", fg="#dc2626")
+                btn_confirmar.config(text=f"🔒 Confirmar Cierre (-${abs(dif):,.0f})")
+            else:
+                lbl_dif_badge.config(text=f"Diferencia: +${dif:,.0f} COP (⚠️ SOBRANTE)", fg="#2563eb")
+                lbl_resumen_bar.config(text=f"Físico: ${total:,.0f} COP  •  ⚠️ Sobrante: +${dif:,.0f} COP", fg="#2563eb")
+                btn_confirmar.config(text=f"🔒 Confirmar Cierre (+${dif:,.0f})")
+
+        panel_arqueo = PanelArqueoDenominaciones(dlg, t_dlg, master_dialog=dlg, on_change=al_cambiar_contado)
+        panel_arqueo.recalcular_totales()
 
     # =========================================================================
     # MODAL 5: CONSULTAR CIERRES ANTERIORES (HISTORIAL INMUTABLE)
@@ -1190,16 +1289,18 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
         tree_h.tag_configure("faltante", foreground="#dc2626")
         tree_h.tag_configure("sobrante", foreground="#2563eb")
 
-        def ver_detalle_arqueo_apertura(event=None):
+        def ver_detalle_arqueo(modo="cierre", event=None):
             sel = tree_h.selection()
             if not sel:
-                messagebox.showwarning("Seleccione Turno", "Por favor seleccione un turno de la lista para ver el arqueo de apertura.", parent=dlg_h)
+                messagebox.showwarning("Seleccione Turno", f"Por favor seleccione un turno de la lista para ver el arqueo de {modo}.", parent=dlg_h)
                 return
             idx = tree_h.index(sel[0])
             if idx >= len(cierres):
                 return
             c_sel = cierres[idx]
-            raw_json = c_sel.get("arqueo_apertura_json") or ""
+
+            clave_json = "arqueo_cierre_json" if modo == "cierre" else "arqueo_apertura_json"
+            raw_json = c_sel.get(clave_json) or ""
             import json
             datos_arq = None
             if raw_json:
@@ -1209,52 +1310,89 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
                     datos_arq = None
 
             dlg_arq = tk.Toplevel(dlg_h)
-            dlg_arq.title(f"🔍 Detalle Arqueo de Apertura — Turno #{c_sel.get('id')}")
+            nombre_modo = "Cierre" if modo == "cierre" else "Apertura"
+            icono_modo = "🔒" if modo == "cierre" else "🟢"
+            color_header = "#DC2626" if modo == "cierre" else t_h["primary"]
+            dlg_arq.title(f"{icono_modo} Detalle Arqueo de {nombre_modo} — Turno #{c_sel.get('id')}")
             t_a = aplicar_tema(dlg_arq)
-            calcular_geometria_segura(dlg_arq, 480, 480, 400, 380)
+            calcular_geometria_segura(dlg_arq, 520, 520, 420, 420)
             dlg_arq.configure(bg=t_a["bg_surface"])
             dlg_arq.transient(dlg_h)
             dlg_arq.grab_set()
 
-            h_f = tk.Frame(dlg_arq, bg=t_a["primary"], height=40)
+            h_f = tk.Frame(dlg_arq, bg=color_header, height=42)
             h_f.pack(fill="x")
             h_f.pack_propagate(False)
-            tk.Label(h_f, text=f"DETALLE ARQUEO DE APERTURA (Turno #{c_sel.get('id')})", font=("Segoe UI", 10, "bold"), bg=t_a["primary"], fg="white").pack(side="left", padx=12)
+            tk.Label(h_f, text=f"{icono_modo} DETALLE ARQUEO DE {nombre_modo.upper()} (Turno #{c_sel.get('id')})", font=("Segoe UI", 10, "bold"), bg=color_header, fg="white").pack(side="left", padx=12)
 
-            body_f = tk.Frame(dlg_arq, bg=t_a["bg_surface"], padx=15, pady=12)
+            body_f = tk.Frame(dlg_arq, bg=t_a["bg_surface"], padx=15, pady=10)
             body_f.pack(fill="both", expand=True)
 
-            tk.Label(body_f, text=f"Fecha Apertura: {c_sel.get('fecha_apertura', '')} {c_sel.get('hora_apertura', '')}", font=("Segoe UI", 9), bg=t_a["bg_surface"], fg=t_a["text_main"]).pack(anchor="w")
-            tk.Label(body_f, text=f"Responsable: {c_sel.get('usuario_apertura', '')}", font=("Segoe UI", 9), bg=t_a["bg_surface"], fg=t_a["text_main"]).pack(anchor="w")
-            tk.Label(body_f, text=f"Base Inicial: ${float(c_sel.get('base_inicial', 0.0)):,.0f} COP", font=("Segoe UI", 12, "bold"), bg=t_a["bg_surface"], fg="#059669").pack(anchor="w", pady=(2, 8))
+            if modo == "cierre":
+                dif = float(c_sel.get("diferencia", 0.0))
+                color_dif = "#059669" if abs(dif) < 0.01 else ("#dc2626" if dif < 0 else "#2563eb")
+                txt_estado = "CAJA CUADRADA" if abs(dif) < 0.01 else ("FALTANTE" if dif < 0 else "SOBRANTE")
+
+                tk.Label(body_f, text=f"Fecha Cierre: {c_sel.get('fecha_cierre', '')} {c_sel.get('hora_cierre', '')}", font=("Segoe UI", 9), bg=t_a["bg_surface"], fg=t_a["text_main"]).pack(anchor="w")
+                tk.Label(body_f, text=f"Responsable Cierre: {c_sel.get('usuario_cierre') or c_sel.get('usuario_apertura', '')}", font=("Segoe UI", 9), bg=t_a["bg_surface"], fg=t_a["text_main"]).pack(anchor="w")
+
+                box_m = tk.Frame(body_f, bg=t_a["bg_card"], bd=1, relief="solid", padx=10, pady=6)
+                box_m.pack(fill="x", pady=6)
+
+                row_m1 = tk.Frame(box_m, bg=t_a["bg_card"])
+                row_m1.pack(fill="x")
+                tk.Label(row_m1, text=f"Esperado: ${float(c_sel.get('monto_esperado', 0.0)):,.0f}", font=("Segoe UI", 9, "bold"), bg=t_a["bg_card"], fg="#2563eb").pack(side="left")
+                tk.Label(row_m1, text=f"Contado: ${float(c_sel.get('monto_real_contado', 0.0)):,.0f}", font=("Segoe UI", 9, "bold"), bg=t_a["bg_card"], fg="#059669").pack(side="left", padx=14)
+                tk.Label(row_m1, text=f"Diferencia: {('+' if dif > 0 else '')}${dif:,.0f} ({txt_estado})", font=("Segoe UI", 9, "bold"), bg=t_a["bg_card"], fg=color_dif).pack(side="right")
+
+                if c_sel.get("observaciones"):
+                    tk.Label(body_f, text=f"Observaciones: {c_sel.get('observaciones')}", font=("Segoe UI", 8, "italic"), bg=t_a["bg_surface"], fg=t_a["text_muted"], wraplength=480, justify="left").pack(anchor="w", pady=(2, 4))
+            else:
+                tk.Label(body_f, text=f"Fecha Apertura: {c_sel.get('fecha_apertura', '')} {c_sel.get('hora_apertura', '')}", font=("Segoe UI", 9), bg=t_a["bg_surface"], fg=t_a["text_main"]).pack(anchor="w")
+                tk.Label(body_f, text=f"Responsable Apertura: {c_sel.get('usuario_apertura', '')}", font=("Segoe UI", 9), bg=t_a["bg_surface"], fg=t_a["text_main"]).pack(anchor="w")
+                tk.Label(body_f, text=f"Base Inicial Apertura: ${float(c_sel.get('base_inicial', 0.0)):,.0f} COP", font=("Segoe UI", 11, "bold"), bg=t_a["bg_surface"], fg="#059669").pack(anchor="w", pady=(2, 6))
 
             if not datos_arq or (not datos_arq.get("billetes") and not datos_arq.get("monedas")):
-                tk.Label(body_f, text="⚠️ Esta sesión fue registrada con valor numérico global sin desglose de billetes/monedas.", font=("Segoe UI", 9, "italic"), bg=t_a["bg_surface"], fg=t_a["text_muted"], wraplength=420, justify="left").pack(pady=20)
+                tk.Label(body_f, text=f"⚠️ Esta sesión no tiene registrado el conteo por denominaciones de {nombre_modo.lower()}.\n(Fue guardada únicamente con valor numérico global).", font=("Segoe UI", 9, "italic"), bg=t_a["bg_surface"], fg=t_a["text_muted"], wraplength=460, justify="center").pack(pady=25)
             else:
                 txt_frame = tk.Frame(body_f, bg=t_a["bg_card"], bd=1, relief="solid")
                 txt_frame.pack(fill="both", expand=True, pady=4)
-                tree_d = ttk.Treeview(txt_frame, columns=("Denom", "Cant", "Subtotal"), show="headings", height=10)
+                tree_d = ttk.Treeview(txt_frame, columns=("Denom", "Cant", "Subtotal"), show="headings", height=9)
                 tree_d.heading("Denom", text="Denominación")
                 tree_d.heading("Cant", text="Cantidad")
-                tree_d.heading("Subtotal", text="Subtotal")
-                tree_d.column("Denom", width=180, anchor="w")
-                tree_d.column("Cant", width=70, anchor="center")
-                tree_d.column("Subtotal", width=110, anchor="e")
+                tree_d.heading("Subtotal", text="Subtotal ($)")
+                tree_d.column("Denom", width=200, anchor="w")
+                tree_d.column("Cant", width=80, anchor="center")
+                tree_d.column("Subtotal", width=120, anchor="e")
                 tree_d.pack(fill="both", expand=True)
 
+                total_sum = 0
                 for b in datos_arq.get("billetes", []):
-                    tree_d.insert("", "end", values=(b.get("nombre", f"${b.get('denominacion', 0):,.0f}"), b.get("cantidad", 0), f"${b.get('subtotal', 0):,.0f}"))
+                    sub = float(b.get("subtotal", 0))
+                    total_sum += sub
+                    tree_d.insert("", "end", values=(b.get("nombre", f"${b.get('denominacion', 0):,.0f}"), b.get("cantidad", 0), f"${sub:,.0f}"))
                 for m in datos_arq.get("monedas", []):
-                    tree_d.insert("", "end", values=(m.get("nombre", f"${m.get('denominacion', 0):,.0f}"), m.get("cantidad", 0), f"${m.get('subtotal', 0):,.0f}"))
+                    sub = float(m.get("subtotal", 0))
+                    total_sum += sub
+                    tree_d.insert("", "end", values=(m.get("nombre", f"${m.get('denominacion', 0):,.0f}"), m.get("cantidad", 0), f"${sub:,.0f}"))
 
-            crear_boton(dlg_arq, "Cerrar", dlg_arq.destroy, tipo="secondary", tam_fuente=9).pack(pady=8)
+                tk.Label(body_f, text=f"Total Físico Contado en {nombre_modo}: ${total_sum:,.0f} COP", font=("Segoe UI", 10, "bold"), bg=t_a["bg_surface"], fg="#059669").pack(anchor="e", pady=(4, 0))
 
-        tree_h.bind("<Double-1>", ver_detalle_arqueo_apertura)
+            bot_diag = tk.Frame(dlg_arq, bg=t_a["bg_surface"])
+            bot_diag.pack(fill="x", padx=14, pady=8)
+            crear_boton(bot_diag, "Cerrar", dlg_arq.destroy, tipo="secondary", tam_fuente=9).pack(side="right")
+            if modo == "cierre":
+                crear_boton(bot_diag, "🔍 Ver Arqueo Apertura", lambda: [dlg_arq.destroy(), ver_detalle_arqueo("apertura")], tipo="info", tam_fuente=9).pack(side="left")
+            else:
+                crear_boton(bot_diag, "🔍 Ver Arqueo Cierre", lambda: [dlg_arq.destroy(), ver_detalle_arqueo("cierre")], tipo="info", tam_fuente=9).pack(side="left")
+
+        tree_h.bind("<Double-1>", lambda e: ver_detalle_arqueo("cierre"))
 
         bot_f = tk.Frame(dlg_h, bg=t_h["bg_surface"])
         bot_f.pack(fill="x", padx=14, pady=8)
         crear_boton(bot_f, "Cerrar", dlg_h.destroy, tipo="secondary", tam_fuente=9).pack(side="right")
-        crear_boton(bot_f, "🔍 Ver Arqueo Apertura", ver_detalle_arqueo_apertura, tipo="info", tam_fuente=9).pack(side="right", padx=8)
+        crear_boton(bot_f, "🔍 Ver Arqueo Cierre", lambda: ver_detalle_arqueo("cierre"), tipo="success", tam_fuente=9).pack(side="right", padx=6)
+        crear_boton(bot_f, "🔍 Ver Arqueo Apertura", lambda: ver_detalle_arqueo("apertura"), tipo="info", tam_fuente=9).pack(side="right", padx=6)
         tk.Label(bot_f, text=f"Total de turnos cerrados consultados: {len(cierres)}", font=("Segoe UI", 9), bg=t_h["bg_surface"], fg=t_h["text_muted"]).pack(side="left")
 
     _last_focusin = [0.0]

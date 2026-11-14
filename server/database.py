@@ -31,6 +31,7 @@ def _migrar_archivo_sqlite_directo(db_url: str):
             if cols_caja:
                 cols_sesion = [
                     ("arqueo_apertura_json", "TEXT"),
+                    ("arqueo_cierre_json", "TEXT"),
                     ("monto_transferencias_esperado", "REAL DEFAULT 0.0"),
                     ("monto_transferencias_verificado", "REAL DEFAULT 0.0"),
                     ("diferencia_banco", "REAL DEFAULT 0.0"),
@@ -109,6 +110,7 @@ def _crear_engine(db_url: str):
                     if cols_caja:
                         cols_sesion = [
                             ("arqueo_apertura_json", "TEXT"),
+                    ("arqueo_cierre_json", "TEXT"),
                             ("monto_transferencias_esperado", "REAL DEFAULT 0.0"),
                             ("monto_transferencias_verificado", "REAL DEFAULT 0.0"),
                             ("diferencia_banco", "REAL DEFAULT 0.0"),

@@ -501,6 +501,7 @@ def obtener_cierres_anteriores(limit: int = 50, conn: Optional[sqlite3.Connectio
         col_dif_banco = "COALESCE(diferencia_banco, 0.0)" if "diferencia_banco" in cols_s else "0.0"
         col_est_banco = "COALESCE(estado_banco, 'Pendiente')" if "estado_banco" in cols_s else "'Pendiente'"
         col_arq = "COALESCE(arqueo_apertura_json, '')" if "arqueo_apertura_json" in cols_s else "''"
+        col_arq_cierre = "COALESCE(arqueo_cierre_json, '')" if "arqueo_cierre_json" in cols_s else "''"
 
         cur.execute(f"""
             SELECT 
@@ -515,7 +516,8 @@ def obtener_cierres_anteriores(limit: int = 50, conn: Optional[sqlite3.Connectio
                 {col_tr_ver} as transferencias_verificadas,
                 {col_dif_banco} as diferencia_banco,
                 {col_est_banco} as estado_banco,
-                {col_arq} as arqueo_apertura_json
+                {col_arq} as arqueo_apertura_json,
+                {col_arq_cierre} as arqueo_cierre_json
             FROM sesiones_caja
             WHERE estado = 'Cerrada'
             ORDER BY id DESC
@@ -912,11 +914,20 @@ def cerrar_sesion_caja(
     observaciones: str = "",
     monto_real_efectivo: Optional[float] = None,
     terminal: str = "Terminal-1",
-    monto_transferencias_verificado: Optional[float] = None
+    monto_transferencias_verificado: Optional[float] = None,
+    arqueo_cierre_detalle: Optional[Dict[str, Any]] = None,
+    arqueo_cierre_json: Optional[str] = None
 ) -> Dict[str, Any]:
     """Cierra formalmente el turno de caja, registrando el arqueo y la diferencia (faltante/sobrante)."""
     if monto_real_contado is None:
         monto_real_contado = monto_real_efectivo if monto_real_efectivo is not None else 0.0
+
+    arq_cierre_str = arqueo_cierre_json
+    if not arq_cierre_str and arqueo_cierre_detalle:
+        try:
+            arq_cierre_str = json.dumps(arqueo_cierre_detalle, ensure_ascii=False)
+        except Exception:
+            arq_cierre_str = None
 
     if api is not None:
         try:
@@ -928,6 +939,8 @@ def cerrar_sesion_caja(
                     "observaciones": observaciones or "",
                     "terminal": terminal,
                     "monto_transferencias_verificado": monto_transferencias_verificado,
+                    "arqueo_cierre": arqueo_cierre_detalle,
+                    "arqueo_cierre_json": arq_cierre_str,
                 },
                 timeout=5.0,
             )
@@ -959,30 +972,63 @@ def cerrar_sesion_caja(
 
         cur.execute("PRAGMA table_info(sesiones_caja)")
         cols_s = [c[1] for c in cur.fetchall()]
+        if "arqueo_cierre_json" not in cols_s:
+            try:
+                cur.execute("ALTER TABLE sesiones_caja ADD COLUMN arqueo_cierre_json TEXT")
+                cols_s.append("arqueo_cierre_json")
+            except Exception:
+                pass
+
         col_esp = "monto_esperado_efectivo" if "monto_esperado_efectivo" in cols_s else "monto_esperado"
 
-        cur.execute(f"""
-            UPDATE sesiones_caja SET
-                estado = 'Cerrada',
-                fecha_cierre = ?,
-                hora_cierre = ?,
-                usuario_cierre = ?,
-                {col_esp} = ?,
-                monto_real_contado = ?,
-                diferencia = ?,
-                observaciones = ?,
-                monto_transferencias_esperado = ?,
-                monto_transferencias_verificado = ?,
-                diferencia_banco = ?,
-                estado_banco = ?
-            WHERE id = ?
-        """, (
-            fecha_str, hora_str, usuario,
-            efectivo_esperado, float(monto_real_contado), diferencia,
-            observaciones,
-            transf_esperadas, float(transf_verificadas), dif_banco, estado_banco,
-            sesion_id
-        ))
+        if "arqueo_cierre_json" in cols_s:
+            cur.execute(f"""
+                UPDATE sesiones_caja SET
+                    estado = 'Cerrada',
+                    fecha_cierre = ?,
+                    hora_cierre = ?,
+                    usuario_cierre = ?,
+                    {col_esp} = ?,
+                    monto_real_contado = ?,
+                    diferencia = ?,
+                    observaciones = ?,
+                    monto_transferencias_esperado = ?,
+                    monto_transferencias_verificado = ?,
+                    diferencia_banco = ?,
+                    estado_banco = ?,
+                    arqueo_cierre_json = ?
+                WHERE id = ?
+            """, (
+                fecha_str, hora_str, usuario,
+                efectivo_esperado, float(monto_real_contado), diferencia,
+                observaciones,
+                transf_esperadas, float(transf_verificadas), dif_banco, estado_banco,
+                arq_cierre_str,
+                sesion_id
+            ))
+        else:
+            cur.execute(f"""
+                UPDATE sesiones_caja SET
+                    estado = 'Cerrada',
+                    fecha_cierre = ?,
+                    hora_cierre = ?,
+                    usuario_cierre = ?,
+                    {col_esp} = ?,
+                    monto_real_contado = ?,
+                    diferencia = ?,
+                    observaciones = ?,
+                    monto_transferencias_esperado = ?,
+                    monto_transferencias_verificado = ?,
+                    diferencia_banco = ?,
+                    estado_banco = ?
+                WHERE id = ?
+            """, (
+                fecha_str, hora_str, usuario,
+                efectivo_esperado, float(monto_real_contado), diferencia,
+                observaciones,
+                transf_esperadas, float(transf_verificadas), dif_banco, estado_banco,
+                sesion_id
+            ))
 
         # Registrar movimiento de cierre
         cur.execute("PRAGMA table_info(movimientos_caja)")

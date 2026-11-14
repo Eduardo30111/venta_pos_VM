@@ -28,6 +28,8 @@ class CerrarCajaRequest(BaseModel):
     observaciones: Optional[str] = ""
     terminal: Optional[str] = "CAJA-01"
     monto_transferencias_verificado: Optional[float] = None
+    arqueo_cierre: Optional[Dict[str, Any]] = None
+    arqueo_cierre_json: Optional[str] = None
 
 
 class MovimientoCajaCreateRequest(BaseModel):
@@ -122,6 +124,8 @@ async def post_cerrar_sesion(
         observaciones=req.observaciones or "",
         terminal=req.terminal or "CAJA-01",
         monto_transferencias_verificado=req.monto_transferencias_verificado,
+        arqueo_cierre=req.arqueo_cierre,
+        arqueo_cierre_json=req.arqueo_cierre_json,
     )
     await db.commit()
     return res
@@ -161,6 +165,8 @@ async def get_cierres_anteriores(
                 "transferencias_verificadas": float(s.monto_transferencias_verificado or 0.0),
                 "diferencia_banco": float(s.diferencia_banco or 0.0),
                 "estado_banco": s.estado_banco or "Pendiente",
+                "arqueo_apertura_json": getattr(s, "arqueo_apertura_json", "") or "",
+                "arqueo_cierre_json": getattr(s, "arqueo_cierre_json", "") or "",
             }
         )
     return salida

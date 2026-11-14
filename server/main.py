@@ -262,6 +262,7 @@ async def startup():
         "ALTER TABLE gastos ADD COLUMN usuario_nombre VARCHAR;",
         # Sesiones de caja y Arqueo
         "ALTER TABLE sesiones_caja ADD COLUMN arqueo_apertura_json TEXT;",
+        "ALTER TABLE sesiones_caja ADD COLUMN arqueo_cierre_json TEXT;",
         "ALTER TABLE sesiones_caja ADD COLUMN monto_transferencias_esperado FLOAT DEFAULT 0.0;",
         "ALTER TABLE sesiones_caja ADD COLUMN monto_transferencias_verificado FLOAT DEFAULT 0.0;",
         "ALTER TABLE sesiones_caja ADD COLUMN diferencia_banco FLOAT DEFAULT 0.0;",
