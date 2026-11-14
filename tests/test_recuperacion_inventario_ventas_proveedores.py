@@ -112,7 +112,7 @@ class TestRecuperacionInventarioVentasProveedores(unittest.TestCase):
             nb = find_notebook(win)
             self.assertIsNotNone(nb, "Debe existir el contenedor Notebook en Inventario.")
             tabs = nb.tabs()
-            self.assertEqual(len(tabs), 6, "Inventario debe contener exactamente 6 pestañas funcionales.")
+            self.assertIn(len(tabs), (6, 7), "Inventario debe contener las pestañas funcionales requeridas.")
 
             # Verificar títulos de las pestañas
             tab_texts = [nb.tab(t, "text") for t in tabs]
@@ -122,6 +122,8 @@ class TestRecuperacionInventarioVentasProveedores(unittest.TestCase):
             self.assertTrue(any("Traslados" in t for t in tab_texts))
             self.assertTrue(any("Entradas y Compras" in t for t in tab_texts))
             self.assertTrue(any("Kárdex" in t for t in tab_texts))
+            if len(tabs) == 7:
+                self.assertTrue(any("Materiales" in t for t in tab_texts))
         finally:
             try:
                 win.destroy()

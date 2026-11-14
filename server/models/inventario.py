@@ -11,7 +11,8 @@ class MovimientoInventario(Base):
     producto_id = Column(Integer, ForeignKey("productos.id"), nullable=False, index=True)
     codigo_producto = Column(String, nullable=True)
     nombre_producto = Column(String, nullable=True)
-    tipo = Column(String, nullable=False, index=True)  # ENTRADA_INICIAL/ENTRADA_COMPRA/REVERSION_COMPRA/VENTA/DEVOLUCION_VENTA/ANULACION/TRASLADO_BODEGA_A_VITRINA/TRASLADO_VITRINA_A_BODEGA/AJUSTE_POSITIVO/AJUSTE_NEGATIVO
+    tipo = Column(String, nullable=True, index=True)  # ENTRADA_INICIAL/ENTRADA_COMPRA/REVERSION_COMPRA/VENTA/DEVOLUCION_VENTA/ANULACION/TRASLADO_BODEGA_A_VITRINA/TRASLADO_VITRINA_A_BODEGA/AJUSTE_POSITIVO/AJUSTE_NEGATIVO
+    tipo_movimiento = Column(String, nullable=True, index=True)  # Compatibilidad con esquemas SQLite históricos (NOT NULL en ventas.db)
     cantidad = Column(Float, nullable=False)
     unidad_medida = Column(String, default="Unidad", nullable=True)
     ubicacion_origen = Column(String, nullable=True)
@@ -27,10 +28,28 @@ class MovimientoInventario(Base):
     referencia = Column(String, nullable=True, index=True)
     usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=True)
     usuario_nombre = Column(String, nullable=True)
+    usuario = Column(String, nullable=True)  # Compatibilidad con esquemas SQLite históricos
     terminal_id = Column(Integer, ForeignKey("terminales.id"), nullable=True)
     observacion = Column(String, nullable=True)
+    observaciones = Column(String, nullable=True)  # Compatibilidad con esquemas SQLite históricos
     estado = Column(String, default="Completado")
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=True)
+
+    def __init__(self, **kwargs):
+        # Sincronización automática de alias heredados para prevenir violación de restricciones NOT NULL
+        t = kwargs.get("tipo") or kwargs.get("tipo_movimiento")
+        if t:
+            kwargs["tipo"] = t
+            kwargs["tipo_movimiento"] = t
+        u = kwargs.get("usuario_nombre") or kwargs.get("usuario")
+        if u:
+            kwargs["usuario_nombre"] = u
+            kwargs["usuario"] = u
+        o = kwargs.get("observacion") if "observacion" in kwargs else kwargs.get("observaciones")
+        if o is not None:
+            kwargs["observacion"] = o
+            kwargs["observaciones"] = o
+        super().__init__(**kwargs)
 
 
 class TrasladoInventario(Base):

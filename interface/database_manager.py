@@ -748,6 +748,14 @@ def inicializar_base_datos(db_path=None):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_pagos_venta_id ON pagos_venta(id_venta)")
 
         conn.commit()
+
+        # Migración y sincronización exhaustiva de columnas para compatibilidad absoluta
+        try:
+            from server.database import asegurar_migraciones_sqlite
+            asegurar_migraciones_sqlite(f"sqlite:///{DB_VENTAS_PATH}")
+        except Exception:
+            pass
+
         print("✅ Base de datos ventas.db inicializada correctamente.")
         return True
     except Exception as e:

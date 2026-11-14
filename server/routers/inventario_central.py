@@ -1,4 +1,5 @@
 from datetime import datetime
+import unicodedata
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -136,13 +137,21 @@ def _servicio_a_catalogo(s: Servicio, prov_map: Dict[int, str], cat_map: Dict[in
     }
 
 
+def _norm_txt(s: Any) -> str:
+    if s is None:
+        return ""
+    return unicodedata.normalize("NFKD", str(s)).encode("ASCII", "ignore").decode("utf-8").lower().strip()
+
+
 @router.get("/catalogo")
 async def obtener_catalogo_endpoint(
     filtro: Optional[str] = None,
     categoria: Optional[str] = None,
     tipo: Optional[str] = None,
     solo_activos: bool = False,
+    estado: Optional[str] = None,
     proveedor_id: Optional[int] = None,
+    proveedor: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ):
@@ -154,18 +163,26 @@ async def obtener_catalogo_endpoint(
     rol_norm = (current_user.rol or "").strip().lower()
     items: List[Dict[str, Any]] = []
 
+    # Filtrado base por estado
+    debe_ser_activo = solo_activos or (estado == "Activo")
+    debe_ser_inactivo = (estado == "Inactivo")
+
     if not tipo or tipo in ("Todos", "Fisico", "Producto"):
         q_prod = select(Producto)
-        if solo_activos:
+        if debe_ser_activo:
             q_prod = q_prod.where(Producto.estado == "Activo")
+        elif debe_ser_inactivo:
+            q_prod = q_prod.where(Producto.estado == "Inactivo")
         res_p = await db.execute(q_prod)
         for p in res_p.scalars().all():
             items.append(_producto_a_catalogo(p, prov_map, cat_map))
 
     if not tipo or tipo in ("Todos", "Servicio"):
         q_serv = select(Servicio)
-        if solo_activos:
+        if debe_ser_activo:
             q_serv = q_serv.where(Servicio.estado == "Activo")
+        elif debe_ser_inactivo:
+            q_serv = q_serv.where(Servicio.estado == "Inactivo")
         if rol_norm == "operario":
             q_serv = q_serv.where(
                 or_(
@@ -177,24 +194,39 @@ async def obtener_catalogo_endpoint(
         for s in res_s.scalars().all():
             items.append(_servicio_a_catalogo(s, prov_map, cat_map))
 
+    # Filtro por categoría (insensible a tildes y mayúsculas)
     if categoria and categoria != "Todas":
-        cat_q = categoria.strip().lower()
-        items = [it for it in items if (it.get("categoria") or "").strip().lower() == cat_q]
+        cat_q = _norm_txt(categoria)
+        items = [it for it in items if _norm_txt(it.get("categoria")) == cat_q]
 
+    # Filtro por proveedor por ID o Nombre
     if proveedor_id is not None:
         items = [it for it in items if it.get("proveedor_id") == int(proveedor_id)]
+    elif proveedor and proveedor != "Todos":
+        prov_q = _norm_txt(proveedor)
+        items = [it for it in items if _norm_txt(it.get("proveedor_nombre")) == prov_q]
 
+    # Búsqueda universal por Nombre, Código interno, Código de barras, Categoría, Proveedor, Descripción y Marca
     if filtro and filtro.strip():
-        t_q = filtro.strip().lower()
-        items = [
-            it
-            for it in items
-            if t_q in (it.get("codigo") or "").lower()
-            or t_q in (it.get("nombre") or "").lower()
-            or t_q in (it.get("codigo_barras") or "").lower()
-        ]
+        t_q = _norm_txt(filtro)
+        def _coincide(it):
+            campos = (
+                it.get("codigo"),
+                it.get("nombre"),
+                it.get("codigo_barras"),
+                it.get("categoria"),
+                it.get("proveedor_nombre"),
+                it.get("descripcion"),
+                it.get("marca"),
+            )
+            for c in campos:
+                if c and t_q in _norm_txt(c):
+                    return True
+            return False
 
-    items.sort(key=lambda x: (x.get("nombre") or "").lower())
+        items = [it for it in items if _coincide(it)]
+
+    items.sort(key=lambda x: _norm_txt(x.get("nombre")))
     return items
 
 
@@ -897,98 +929,114 @@ async def registrar_ajuste_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ):
-    ubicacion = str(req.ubicacion or "").strip().upper()
-    if ubicacion not in ("BODEGA", "VITRINA"):
-        raise HTTPException(status_code=400, detail="La ubicación a ajustar debe ser BODEGA o VITRINA.")
-    conteo_flt = float(req.conteo_fisico)
-    if conteo_flt < 0:
-        raise HTTPException(status_code=400, detail="El conteo físico no puede ser negativo.")
+    try:
+        ubicacion = str(req.ubicacion or "").strip().upper()
+        if ubicacion not in ("BODEGA", "VITRINA"):
+            raise HTTPException(status_code=400, detail="La ubicación a ajustar debe ser BODEGA o VITRINA.")
+        conteo_flt = float(req.conteo_fisico)
+        if conteo_flt < 0:
+            raise HTTPException(status_code=400, detail="El conteo físico no puede ser negativo.")
 
-    key = str(req.codigo_o_id or "").strip()
-    prod = (
-        await db.execute(
-            select(Producto).with_for_update().where(
-                or_(
-                    Producto.codigo == key,
-                    Producto.codigo == key.zfill(5),
-                    Producto.codigo_barras == key,
+        key = str(req.codigo_o_id or "").strip()
+        prod = (
+            await db.execute(
+                select(Producto).with_for_update().where(
+                    or_(
+                        Producto.codigo == key,
+                        Producto.codigo == key.zfill(5),
+                        Producto.codigo_barras == key,
+                    )
                 )
             )
+        ).scalars().first()
+        if not prod and key.isdigit():
+            prod = (await db.execute(select(Producto).with_for_update().where(Producto.id == int(key)))).scalars().first()
+        if not prod:
+            raise HTTPException(status_code=404, detail=f"No se encontró el artículo físico '{key}'.")
+
+        sb_ant = float(prod.stock_bodega or 0.0)
+        sv_ant = float(prod.stock_vitrina or 0.0)
+        st_ant = float(prod.stock or 0.0)
+        if sb_ant == 0.0 and sv_ant == 0.0 and st_ant > 0.0:
+            sv_ant = st_ant
+
+        stock_actual_ub = sb_ant if ubicacion == "BODEGA" else sv_ant
+        delta = round(conteo_flt - stock_actual_ub, 4)
+        if abs(delta) < 0.0001:
+            return {"mensaje": "El conteo físico coincide exactamente con el sistema. No se requirió ajuste."}
+
+        tipo_mov = "AJUSTE_POSITIVO" if delta > 0 else "AJUSTE_NEGATIVO"
+        cant_ajuste = abs(delta)
+        if ubicacion == "BODEGA":
+            sb_des = conteo_flt
+            sv_des = sv_ant
+        else:
+            sb_des = sb_ant
+            sv_des = conteo_flt
+
+        st_nuevo = round(sb_des + sv_des, 4)
+        prod.stock_bodega = sb_des
+        prod.stock_vitrina = sv_des
+        prod.stock = st_nuevo
+
+        ahora = datetime.now()
+        f_str = ahora.strftime("%Y-%m-%d")
+        h_str = ahora.strftime("%H:%M:%S")
+        usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+        unidad = prod.unidad_medida or "Unidad"
+        costo_u = float(prod.precio_costo or 0.0)
+
+        user_id = current_user.id if current_user and getattr(current_user, "id", None) else None
+        if user_id:
+            u_chk = (await db.execute(select(Usuario.id).where(Usuario.id == user_id))).scalar()
+            if not u_chk:
+                user_id = None
+
+        db.add(
+            MovimientoInventario(
+                fecha=f_str,
+                hora=h_str,
+                producto_id=prod.id,
+                codigo_producto=prod.codigo,
+                nombre_producto=prod.nombre,
+                tipo=tipo_mov,
+                tipo_movimiento=tipo_mov,
+                cantidad=cant_ajuste,
+                unidad_medida=unidad,
+                ubicacion_origen=ubicacion if delta < 0 else "NINGUNA",
+                ubicacion_destino=ubicacion if delta > 0 else "NINGUNA",
+                stock_anterior=sb_ant + sv_ant,
+                stock_nuevo=st_nuevo,
+                stock_origen_ant=stock_actual_ub,
+                stock_origen_des=conteo_flt,
+                stock_destino_ant=stock_actual_ub,
+                stock_destino_des=conteo_flt,
+                costo_unitario=costo_u,
+                valor_total=round(cant_ajuste * costo_u, 2),
+                referencia="AJUSTE-FISICO",
+                usuario_id=user_id,
+                usuario_nombre=usuario_nom,
+                usuario=usuario_nom,
+                observacion=req.motivo or f"Ajuste en {ubicacion}: {stock_actual_ub:g} -> {conteo_flt:g} {unidad}",
+                observaciones=req.motivo or f"Ajuste en {ubicacion}: {stock_actual_ub:g} -> {conteo_flt:g} {unidad}",
+                estado="Completado",
+            )
         )
-    ).scalars().first()
-    if not prod and key.isdigit():
-        prod = (await db.execute(select(Producto).with_for_update().where(Producto.id == int(key)))).scalars().first()
-    if not prod:
-        raise HTTPException(status_code=404, detail=f"No se encontró el artículo físico '{key}'.")
-
-    sb_ant = float(prod.stock_bodega or 0.0)
-    sv_ant = float(prod.stock_vitrina or 0.0)
-    st_ant = float(prod.stock or 0.0)
-    if sb_ant == 0.0 and sv_ant == 0.0 and st_ant > 0.0:
-        sv_ant = st_ant
-
-    stock_actual_ub = sb_ant if ubicacion == "BODEGA" else sv_ant
-    delta = round(conteo_flt - stock_actual_ub, 4)
-    if abs(delta) < 0.0001:
-        return {"mensaje": "El conteo físico coincide exactamente con el sistema. No se requirió ajuste."}
-
-    tipo_mov = "AJUSTE_POSITIVO" if delta > 0 else "AJUSTE_NEGATIVO"
-    cant_ajuste = abs(delta)
-    if ubicacion == "BODEGA":
-        sb_des = conteo_flt
-        sv_des = sv_ant
-    else:
-        sb_des = sb_ant
-        sv_des = conteo_flt
-
-    st_nuevo = round(sb_des + sv_des, 4)
-    prod.stock_bodega = sb_des
-    prod.stock_vitrina = sv_des
-    prod.stock = st_nuevo
-
-    ahora = datetime.now()
-    f_str = ahora.strftime("%Y-%m-%d")
-    h_str = ahora.strftime("%H:%M:%S")
-    usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
-    unidad = prod.unidad_medida or "Unidad"
-    costo_u = float(prod.precio_costo or 0.0)
-
-    db.add(
-        MovimientoInventario(
-            fecha=f_str,
-            hora=h_str,
-            producto_id=prod.id,
-            codigo_producto=prod.codigo,
-            nombre_producto=prod.nombre,
-            tipo=tipo_mov,
-            cantidad=cant_ajuste,
-            unidad_medida=unidad,
-            ubicacion_origen=ubicacion if delta < 0 else "NINGUNA",
-            ubicacion_destino=ubicacion if delta > 0 else "NINGUNA",
-            stock_anterior=sb_ant + sv_ant,
-            stock_nuevo=st_nuevo,
-            stock_origen_ant=stock_actual_ub,
-            stock_origen_des=conteo_flt,
-            stock_destino_ant=stock_actual_ub,
-            stock_destino_des=conteo_flt,
-            costo_unitario=costo_u,
-            valor_total=round(cant_ajuste * costo_u, 2),
-            referencia="AJUSTE-FISICO",
-            usuario_id=current_user.id,
-            usuario_nombre=usuario_nom,
-            observacion=req.motivo or f"Ajuste en {ubicacion}: {stock_actual_ub:g} -> {conteo_flt:g} {unidad}",
-            estado="Completado",
-        )
-    )
-    await db.commit()
-    return {
-        "producto": prod.nombre,
-        "ubicacion": ubicacion,
-        "stock_anterior": stock_actual_ub,
-        "stock_nuevo": conteo_flt,
-        "diferencia": delta,
-        "tipo_ajuste": tipo_mov,
-    }
+        await db.commit()
+        return {
+            "producto": prod.nombre,
+            "ubicacion": ubicacion,
+            "stock_anterior": stock_actual_ub,
+            "stock_nuevo": conteo_flt,
+            "diferencia": delta,
+            "tipo_ajuste": tipo_mov,
+        }
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Fallo al aplicar ajuste de inventario: {str(e)}")
 
 
 async def _generar_numero_compra_central(db: AsyncSession) -> str:
@@ -1094,6 +1142,7 @@ async def _aplicar_items_compra_central(
         prod.stock = nuevo_total
         prod.precio_costo = costo_pond
 
+        obs_entrada = f"{etiqueta} {num_compra} ({cant_comprada:g} {unidad_compra} x {factor:g} = {unidades_reales:g} {unidad_base})"
         db.add(
             MovimientoInventario(
                 fecha=f_str,
@@ -1102,6 +1151,7 @@ async def _aplicar_items_compra_central(
                 codigo_producto=prod.codigo,
                 nombre_producto=prod.nombre,
                 tipo="ENTRADA_COMPRA",
+                tipo_movimiento="ENTRADA_COMPRA",
                 cantidad=unidades_reales,
                 unidad_medida=unidad_base,
                 ubicacion_origen="PROVEEDOR",
@@ -1117,7 +1167,9 @@ async def _aplicar_items_compra_central(
                 referencia=num_compra,
                 usuario_id=usuario_id,
                 usuario_nombre=usuario_nom,
-                observacion=f"{etiqueta} {num_compra} ({cant_comprada:g} {unidad_compra} x {factor:g} = {unidades_reales:g} {unidad_base})",
+                usuario=usuario_nom,
+                observacion=obs_entrada,
+                observaciones=obs_entrada,
                 estado="Completado",
             )
         )
@@ -1181,6 +1233,7 @@ async def _revertir_items_compra_central(
         prod.stock = nuevo_total
         prod.precio_costo = costo_rev
 
+        obs_rev = f"{motivo} {num_compra} (-{unidades:g} {unidad_base} de {ubicacion_destino})"
         db.add(
             MovimientoInventario(
                 fecha=f_str,
@@ -1189,6 +1242,7 @@ async def _revertir_items_compra_central(
                 codigo_producto=prod.codigo,
                 nombre_producto=prod.nombre,
                 tipo="REVERSION_COMPRA",
+                tipo_movimiento="REVERSION_COMPRA",
                 cantidad=unidades,
                 unidad_medida=unidad_base,
                 ubicacion_origen=ubicacion_destino,
@@ -1204,7 +1258,9 @@ async def _revertir_items_compra_central(
                 referencia=num_compra,
                 usuario_id=usuario_id,
                 usuario_nombre=usuario_nom,
-                observacion=f"{motivo} {num_compra} (-{unidades:g} {unidad_base} de {ubicacion_destino})",
+                usuario=usuario_nom,
+                observacion=obs_rev,
+                observaciones=obs_rev,
                 estado="Completado",
             )
         )
@@ -1216,40 +1272,59 @@ async def registrar_compra_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ):
-    if not req.items:
-        raise HTTPException(status_code=400, detail="Debe incluir al menos un artículo en la entrada de mercancía.")
-    ubic = (req.ubicacion_destino or "BODEGA").strip().upper()
-    if ubic not in ("BODEGA", "VITRINA"):
-        ubic = "BODEGA"
+    try:
+        if not req.items:
+            raise HTTPException(status_code=400, detail="Debe incluir al menos un artículo en la entrada de mercancía.")
+        ubic = (req.ubicacion_destino or "BODEGA").strip().upper()
+        if ubic not in ("BODEGA", "VITRINA"):
+            ubic = "BODEGA"
 
-    ahora = datetime.now()
-    f_str = ahora.strftime("%Y-%m-%d")
-    h_str = ahora.strftime("%H:%M:%S")
-    usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
-    num_compra = await _generar_numero_compra_central(db)
+        ahora = datetime.now()
+        f_str = ahora.strftime("%Y-%m-%d")
+        h_str = ahora.strftime("%H:%M:%S")
+        usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+        num_compra = await _generar_numero_compra_central(db)
 
-    compra = CompraInventario(
-        numero_compra=num_compra,
-        fecha=f_str,
-        hora=h_str,
-        proveedor_id=req.proveedor_id,
-        proveedor_nombre=req.proveedor_nombre or "Sin Proveedor",
-        documento_referencia=req.doc_referencia or "",
-        ubicacion_destino=ubic,
-        total_compra=0.0,
-        usuario=usuario_nom,
-        observaciones=req.observaciones or "",
-        estado="Recibida",
-    )
-    db.add(compra)
-    await db.flush()
+        prov_id = req.proveedor_id
+        if prov_id is not None:
+            p_chk = (await db.execute(select(Proveedor.id).where(Proveedor.id == prov_id))).scalar()
+            if not p_chk:
+                prov_id = None
 
-    total_compra = await _aplicar_items_compra_central(
-        db, compra.id, num_compra, req.items, ubic, current_user.id, usuario_nom, f_str, h_str
-    )
-    compra.total_compra = total_compra
-    await db.commit()
-    return {"numero_compra": num_compra, "compra_id": compra.id, "total": total_compra}
+        user_id = current_user.id if current_user and getattr(current_user, "id", None) else None
+        if user_id:
+            u_chk = (await db.execute(select(Usuario.id).where(Usuario.id == user_id))).scalar()
+            if not u_chk:
+                user_id = None
+
+        compra = CompraInventario(
+            numero_compra=num_compra,
+            fecha=f_str,
+            hora=h_str,
+            proveedor_id=prov_id,
+            proveedor_nombre=req.proveedor_nombre or "Sin Proveedor",
+            documento_referencia=req.doc_referencia or "",
+            ubicacion_destino=ubic,
+            total_compra=0.0,
+            usuario=usuario_nom,
+            observaciones=req.observaciones or "",
+            estado="Recibida",
+        )
+        db.add(compra)
+        await db.flush()
+
+        total_compra = await _aplicar_items_compra_central(
+            db, compra.id, num_compra, req.items, ubic, user_id, usuario_nom, f_str, h_str
+        )
+        compra.total_compra = total_compra
+        await db.commit()
+        return {"numero_compra": num_compra, "compra_id": compra.id, "total": total_compra}
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Fallo al registrar entrada de mercancía: {str(e)}")
 
 
 @router.get("/compras")

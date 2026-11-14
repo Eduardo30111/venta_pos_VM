@@ -43,12 +43,13 @@ class TestSistemaMaterialesIntegral(unittest.TestCase):
         inicializar_base_datos()
         conn = conectar_db()
         cur = conn.cursor()
+        cur.execute("PRAGMA foreign_keys = OFF")
 
         # Limpiar datos previos de prueba para materiales
-        cur.execute("DELETE FROM consumos_materiales_venta WHERE numero_factura LIKE 'TEST-MAT-%'")
-        cur.execute("DELETE FROM traslados_inventario WHERE observaciones LIKE '%TEST_MAT%'")
-        cur.execute("DELETE FROM movimientos_inventario WHERE observaciones LIKE '%TEST_MAT%'")
-        cur.execute("DELETE FROM inventario_operarios WHERE usuario_nombre IN ('Operario_Test_1', 'Operario_Test_2', 'Admin_Test')")
+        cur.execute("DELETE FROM consumos_materiales_venta WHERE codigo_producto IN ('MAT-001', 'MAT-002', 'MAT-003') OR numero_factura LIKE 'TEST-MAT-%'")
+        cur.execute("DELETE FROM traslados_inventario WHERE codigo_producto IN ('MAT-001', 'MAT-002', 'MAT-003') OR observaciones LIKE '%TEST_MAT%'")
+        cur.execute("DELETE FROM movimientos_inventario WHERE codigo_producto IN ('MAT-001', 'MAT-002', 'MAT-003') OR observaciones LIKE '%TEST_MAT%'")
+        cur.execute("DELETE FROM inventario_operarios WHERE codigo_producto IN ('MAT-001', 'MAT-002', 'MAT-003') OR usuario_nombre IN ('Operario_Test_1', 'Operario_Test_2', 'Admin_Test')")
         cur.execute("DELETE FROM presentaciones_producto WHERE codigo_producto IN ('MAT-001', 'MAT-002', 'MAT-003')")
         cur.execute("DELETE FROM productos WHERE codigo IN ('MAT-001', 'MAT-002', 'MAT-003')")
 

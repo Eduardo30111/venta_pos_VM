@@ -15,7 +15,7 @@ def _migrar_archivo_sqlite_directo(db_url: str):
     """Aplica migraciones DDL directamente en SQLite antes de inicializar SQLAlchemy."""
     try:
         clean_url = db_url.split("?")[0]
-        db_path = None
+        db_path = clean_url
         for prefix in ("sqlite+aiosqlite:///", "sqlite:///"):
             if clean_url.startswith(prefix):
                 db_path = clean_url[len(prefix):]
@@ -23,11 +23,12 @@ def _migrar_archivo_sqlite_directo(db_url: str):
         if not db_path or not os.path.exists(db_path):
             return
         import sqlite3
-        conn = sqlite3.connect(db_path, timeout=8)
+        conn = sqlite3.connect(db_path, timeout=12)
         cur = conn.cursor()
         try:
+            # 1. Sesiones de Caja
             cur.execute("PRAGMA table_info(sesiones_caja);")
-            cols_caja = [r[1] for r in cur.fetchall()]
+            cols_caja = {r[1] for r in cur.fetchall()}
             if cols_caja:
                 cols_sesion = [
                     ("arqueo_apertura_json", "TEXT"),
@@ -58,8 +59,9 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                 except Exception:
                     pass
 
+            # 2. Proveedores
             cur.execute("PRAGMA table_info(proveedores);")
-            cols_prov = [r[1] for r in cur.fetchall()]
+            cols_prov = {r[1] for r in cur.fetchall()}
             if cols_prov:
                 cols_p = [
                     ("documento_nit", "TEXT DEFAULT ''"),
@@ -78,15 +80,48 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                             cur.execute(f"ALTER TABLE proveedores ADD COLUMN {c_nom} {c_def};")
                         except Exception:
                             pass
+                try:
+                    if "nit_documento" in cols_prov:
+                        cur.execute("UPDATE proveedores SET documento_nit = nit_documento WHERE (documento_nit IS NULL OR documento_nit = '') AND nit_documento IS NOT NULL;")
+                    if "correo" in cols_prov:
+                        cur.execute("UPDATE proveedores SET email = correo WHERE (email IS NULL OR email = '') AND correo IS NOT NULL;")
+                except Exception:
+                    pass
 
+            # 3. Productos (catálogo unificado y tolerante a alias costo/precio)
             cur.execute("PRAGMA table_info(productos);")
-            cols_prod = [r[1] for r in cur.fetchall()]
+            cols_prod = {r[1] for r in cur.fetchall()}
             if cols_prod:
                 cols_pr = [
+                    ("categoria_id", "INTEGER"),
+                    ("categoria", "TEXT DEFAULT 'General'"),
+                    ("marca", "TEXT DEFAULT ''"),
+                    ("unidad_medida", "TEXT DEFAULT 'Unidad'"),
+                    ("precio_costo", "REAL DEFAULT 0.0"),
+                    ("costo", "REAL DEFAULT 0.0"),
+                    ("precio_venta", "REAL DEFAULT 0.0"),
+                    ("precio", "REAL DEFAULT 0.0"),
+                    ("stock", "REAL DEFAULT 0.0"),
+                    ("stock_minimo", "REAL DEFAULT 0.0"),
+                    ("stock_bodega", "REAL DEFAULT 0.0"),
+                    ("stock_vitrina", "REAL DEFAULT 0.0"),
+                    ("stock_minimo_bodega", "REAL DEFAULT 5.0"),
+                    ("stock_minimo_vitrina", "REAL DEFAULT 3.0"),
+                    ("proveedor_id", "INTEGER"),
+                    ("codigo_barras", "TEXT DEFAULT ''"),
+                    ("imagen_url", "TEXT DEFAULT ''"),
+                    ("precio_variable", "INTEGER DEFAULT 0"),
+                    ("porcentaje_comision", "REAL DEFAULT 0.0"),
                     ("es_material", "INTEGER DEFAULT 0"),
                     ("presentacion_defecto", "TEXT DEFAULT 'Paquete'"),
                     ("factor_conversion_defecto", "REAL DEFAULT 1.0"),
                     ("unidad_consumo_defecto", "TEXT DEFAULT 'Unidad'"),
+                    ("tipo_producto", "TEXT DEFAULT 'Producto'"),
+                    ("estado", "TEXT DEFAULT 'Activo'"),
+                    ("fecha_creacion", "TEXT"),
+                    ("fecha_modificacion", "TEXT"),
+                    ("created_at", "TIMESTAMP"),
+                    ("updated_at", "TIMESTAMP"),
                 ]
                 for c_nom, c_def in cols_pr:
                     if c_nom not in cols_prod:
@@ -94,7 +129,206 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                             cur.execute(f"ALTER TABLE productos ADD COLUMN {c_nom} {c_def};")
                         except Exception:
                             pass
+                try:
+                    if "costo" in cols_prod:
+                        cur.execute("UPDATE productos SET precio_costo = costo WHERE (precio_costo IS NULL OR precio_costo = 0.0) AND costo IS NOT NULL AND costo > 0.0;")
+                    if "precio_costo" in cols_prod:
+                        cur.execute("UPDATE productos SET costo = precio_costo WHERE (costo IS NULL OR costo = 0.0) AND precio_costo IS NOT NULL AND precio_costo > 0.0;")
+                    if "precio" in cols_prod:
+                        cur.execute("UPDATE productos SET precio_venta = precio WHERE (precio_venta IS NULL OR precio_venta = 0.0) AND precio IS NOT NULL AND precio > 0.0;")
+                    if "precio_venta" in cols_prod:
+                        cur.execute("UPDATE productos SET precio = precio_venta WHERE (precio IS NULL OR precio = 0.0) AND precio_venta IS NOT NULL AND precio_venta > 0.0;")
+                    if "stock" in cols_prod:
+                        cur.execute("UPDATE productos SET stock_vitrina = stock WHERE (stock_vitrina IS NULL OR stock_vitrina = 0.0) AND (stock_bodega IS NULL OR stock_bodega = 0.0) AND stock > 0.0;")
+                    cur.execute("UPDATE productos SET tipo_producto = 'Producto' WHERE tipo_producto IS NULL OR tipo_producto = '';")
+                    cur.execute("UPDATE productos SET created_at = datetime('now') WHERE created_at IS NULL;")
+                    cur.execute("UPDATE productos SET updated_at = datetime('now') WHERE updated_at IS NULL;")
+                except Exception:
+                    pass
 
+            # 4. Movimientos de Inventario (Kárdex tolerante a tipo y tipo_movimiento)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS movimientos_inventario (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fecha TEXT,
+                    hora TEXT,
+                    producto_id INTEGER NOT NULL,
+                    codigo_producto TEXT,
+                    nombre_producto TEXT,
+                    tipo TEXT,
+                    tipo_movimiento TEXT,
+                    cantidad REAL NOT NULL,
+                    unidad_medida TEXT DEFAULT 'Unidad',
+                    ubicacion_origen TEXT DEFAULT '',
+                    ubicacion_destino TEXT DEFAULT '',
+                    stock_anterior REAL DEFAULT 0.0,
+                    stock_nuevo REAL DEFAULT 0.0,
+                    stock_origen_ant REAL DEFAULT 0.0,
+                    stock_origen_des REAL DEFAULT 0.0,
+                    stock_destino_ant REAL DEFAULT 0.0,
+                    stock_destino_des REAL DEFAULT 0.0,
+                    costo_unitario REAL DEFAULT 0.0,
+                    valor_total REAL DEFAULT 0.0,
+                    referencia TEXT DEFAULT '',
+                    usuario_id INTEGER,
+                    usuario_nombre TEXT DEFAULT '',
+                    usuario TEXT DEFAULT 'Administrador',
+                    terminal_id INTEGER,
+                    observacion TEXT DEFAULT '',
+                    observaciones TEXT DEFAULT '',
+                    estado TEXT DEFAULT 'Completado',
+                    created_at TIMESTAMP
+                );
+            """)
+            cur.execute("PRAGMA table_info(movimientos_inventario);")
+            cols_mov = {r[1] for r in cur.fetchall()}
+            if cols_mov:
+                cols_m = [
+                    ("fecha", "TEXT"),
+                    ("hora", "TEXT"),
+                    ("codigo_producto", "TEXT"),
+                    ("nombre_producto", "TEXT"),
+                    ("tipo", "TEXT"),
+                    ("tipo_movimiento", "TEXT"),
+                    ("cantidad", "REAL DEFAULT 0.0"),
+                    ("unidad_medida", "TEXT DEFAULT 'Unidad'"),
+                    ("ubicacion_origen", "TEXT DEFAULT ''"),
+                    ("ubicacion_destino", "TEXT DEFAULT ''"),
+                    ("stock_anterior", "REAL DEFAULT 0.0"),
+                    ("stock_nuevo", "REAL DEFAULT 0.0"),
+                    ("stock_origen_ant", "REAL DEFAULT 0.0"),
+                    ("stock_origen_des", "REAL DEFAULT 0.0"),
+                    ("stock_destino_ant", "REAL DEFAULT 0.0"),
+                    ("stock_destino_des", "REAL DEFAULT 0.0"),
+                    ("costo_unitario", "REAL DEFAULT 0.0"),
+                    ("valor_total", "REAL DEFAULT 0.0"),
+                    ("referencia", "TEXT DEFAULT ''"),
+                    ("usuario_id", "INTEGER"),
+                    ("usuario_nombre", "TEXT DEFAULT ''"),
+                    ("usuario", "TEXT DEFAULT 'Administrador'"),
+                    ("terminal_id", "INTEGER"),
+                    ("observacion", "TEXT DEFAULT ''"),
+                    ("observaciones", "TEXT DEFAULT ''"),
+                    ("estado", "TEXT DEFAULT 'Completado'"),
+                    ("created_at", "TIMESTAMP"),
+                ]
+                for c_nom, c_def in cols_m:
+                    if c_nom not in cols_mov:
+                        try:
+                            cur.execute(f"ALTER TABLE movimientos_inventario ADD COLUMN {c_nom} {c_def};")
+                        except Exception:
+                            pass
+                try:
+                    if "tipo_movimiento" in cols_mov:
+                        cur.execute("UPDATE movimientos_inventario SET tipo = tipo_movimiento WHERE (tipo IS NULL OR tipo = '') AND tipo_movimiento IS NOT NULL;")
+                    if "tipo" in cols_mov:
+                        cur.execute("UPDATE movimientos_inventario SET tipo_movimiento = tipo WHERE (tipo_movimiento IS NULL OR tipo_movimiento = '') AND tipo IS NOT NULL;")
+                    if "usuario" in cols_mov:
+                        cur.execute("UPDATE movimientos_inventario SET usuario_nombre = usuario WHERE (usuario_nombre IS NULL OR usuario_nombre = '') AND usuario IS NOT NULL;")
+                    if "usuario_nombre" in cols_mov:
+                        cur.execute("UPDATE movimientos_inventario SET usuario = usuario_nombre WHERE (usuario IS NULL OR usuario = '') AND usuario_nombre IS NOT NULL;")
+                    if "observaciones" in cols_mov:
+                        cur.execute("UPDATE movimientos_inventario SET observacion = observaciones WHERE (observacion IS NULL OR observacion = '') AND observaciones IS NOT NULL;")
+                    if "observacion" in cols_mov:
+                        cur.execute("UPDATE movimientos_inventario SET observaciones = observacion WHERE (observaciones IS NULL OR observaciones = '') AND observacion IS NOT NULL;")
+                    cur.execute("UPDATE movimientos_inventario SET created_at = datetime('now') WHERE created_at IS NULL;")
+                except Exception:
+                    pass
+
+            # 5. Compras de Inventario
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS compras_inventario (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    numero_compra TEXT UNIQUE NOT NULL,
+                    fecha TEXT NOT NULL,
+                    hora TEXT NOT NULL,
+                    proveedor_id INTEGER,
+                    proveedor_nombre TEXT,
+                    documento_referencia TEXT,
+                    ubicacion_destino TEXT DEFAULT 'BODEGA',
+                    total_compra REAL DEFAULT 0.0,
+                    usuario TEXT DEFAULT 'Administrador',
+                    observaciones TEXT DEFAULT '',
+                    estado TEXT DEFAULT 'Recibida',
+                    created_at TIMESTAMP
+                );
+            """)
+            cur.execute("PRAGMA table_info(compras_inventario);")
+            cols_ci = {r[1] for r in cur.fetchall()}
+            if "created_at" not in cols_ci:
+                try:
+                    cur.execute("ALTER TABLE compras_inventario ADD COLUMN created_at TIMESTAMP;")
+                    cur.execute("UPDATE compras_inventario SET created_at = datetime('now') WHERE created_at IS NULL;")
+                except Exception:
+                    pass
+
+            # 6. Detalle Compras
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS detalle_compras (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    compra_id INTEGER NOT NULL,
+                    producto_id INTEGER NOT NULL,
+                    codigo_producto TEXT NOT NULL,
+                    nombre_producto TEXT NOT NULL,
+                    unidad_compra TEXT DEFAULT 'Unidad',
+                    factor_conversion REAL DEFAULT 1.0,
+                    cantidad_comprada REAL DEFAULT 1.0,
+                    cantidad_unidades REAL DEFAULT 1.0,
+                    costo_unidad_compra REAL DEFAULT 0.0,
+                    costo_unitario_convertido REAL DEFAULT 0.0,
+                    subtotal REAL DEFAULT 0.0
+                );
+            """)
+
+            # 7. Traslados de Inventario
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS traslados_inventario (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    numero_traslado TEXT UNIQUE NOT NULL,
+                    fecha TEXT NOT NULL,
+                    hora TEXT NOT NULL,
+                    producto_id INTEGER NOT NULL,
+                    codigo_producto TEXT NOT NULL,
+                    nombre_producto TEXT NOT NULL,
+                    ubicacion_origen TEXT NOT NULL,
+                    ubicacion_destino TEXT NOT NULL,
+                    cantidad REAL NOT NULL,
+                    usuario TEXT NOT NULL DEFAULT 'Administrador',
+                    estado TEXT NOT NULL DEFAULT 'Completado',
+                    observaciones TEXT DEFAULT '',
+                    created_at TIMESTAMP
+                );
+            """)
+            cur.execute("PRAGMA table_info(traslados_inventario);")
+            cols_ti = {r[1] for r in cur.fetchall()}
+            if "created_at" not in cols_ti:
+                try:
+                    cur.execute("ALTER TABLE traslados_inventario ADD COLUMN created_at TIMESTAMP;")
+                    cur.execute("UPDATE traslados_inventario SET created_at = datetime('now') WHERE created_at IS NULL;")
+                except Exception:
+                    pass
+
+            # 8. Servicios
+            cur.execute("PRAGMA table_info(servicios);")
+            cols_srv = {r[1] for r in cur.fetchall()}
+            if cols_srv:
+                cols_s_defs = [
+                    ("categoria", "TEXT DEFAULT 'Servicios'"),
+                    ("marca", "TEXT DEFAULT ''"),
+                    ("codigo_barras", "TEXT DEFAULT ''"),
+                    ("unidad_medida", "TEXT DEFAULT 'Servicio'"),
+                    ("precio_variable", "INTEGER DEFAULT 0"),
+                    ("solo_operarios", "INTEGER DEFAULT 0"),
+                    ("creado_por_operario_id", "INTEGER"),
+                ]
+                for c_nom, c_def in cols_s_defs:
+                    if c_nom not in cols_srv:
+                        try:
+                            cur.execute(f"ALTER TABLE servicios ADD COLUMN {c_nom} {c_def};")
+                        except Exception:
+                            pass
+
+            # 9. Tablas de Materiales, Operarios y Consumos
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS inventario_operarios (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,14 +385,21 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                     hora TEXT NOT NULL,
                     estado TEXT NOT NULL DEFAULT 'Aplicado',
                     observaciones TEXT DEFAULT '',
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP
                 );
             """)
             conn.commit()
         finally:
             conn.close()
-    except Exception:
-        pass
+    except Exception as e_mig:
+        print(f"Aviso en migración SQLite directa: {e_mig}")
+
+
+def asegurar_migraciones_sqlite(db_url_or_path: str = None):
+    """Garantiza de forma inmediata y tolerante que todas las tablas y columnas SQLite existan."""
+    if not db_url_or_path:
+        db_url_or_path = settings.DATABASE_URL
+    _migrar_archivo_sqlite_directo(db_url_or_path)
 
 
 def _crear_engine(db_url: str):

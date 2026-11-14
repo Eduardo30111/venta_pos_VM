@@ -153,6 +153,16 @@ async def startup():
     from . import models  # noqa: F401
 
     try:
+        from .database import asegurar_migraciones_sqlite
+        asegurar_migraciones_sqlite(settings.DATABASE_URL)
+        _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        _v_db = os.path.join(_root, "database", "ventas.db")
+        if os.path.exists(_v_db):
+            asegurar_migraciones_sqlite(f"sqlite:///{_v_db}")
+    except Exception as e_mig:
+        print(f"Aviso asegurando migraciones iniciales SQLite: {e_mig}")
+
+    try:
         async with db_mod.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
     except Exception as pg_err:
@@ -176,15 +186,27 @@ async def startup():
         "ALTER TABLE cola_turno ADD COLUMN turno_retorno_posicion INTEGER;",
         "ALTER TABLE cola_turno ADD COLUMN turnos_pendientes INTEGER NOT NULL DEFAULT 0;",
         # Productos
+        "ALTER TABLE productos ADD COLUMN categoria_id INTEGER;",
         "ALTER TABLE productos ADD COLUMN categoria VARCHAR DEFAULT 'General';",
         "ALTER TABLE productos ADD COLUMN marca VARCHAR DEFAULT '';",
         "ALTER TABLE productos ADD COLUMN unidad_medida VARCHAR DEFAULT 'Unidad';",
+        "ALTER TABLE productos ADD COLUMN precio_costo FLOAT DEFAULT 0.0;",
+        "ALTER TABLE productos ADD COLUMN costo FLOAT DEFAULT 0.0;",
+        "ALTER TABLE productos ADD COLUMN precio_venta FLOAT DEFAULT 0.0;",
+        "ALTER TABLE productos ADD COLUMN precio FLOAT DEFAULT 0.0;",
+        "ALTER TABLE productos ADD COLUMN tipo_producto VARCHAR DEFAULT 'Producto';",
         "ALTER TABLE productos ADD COLUMN stock_bodega FLOAT DEFAULT 0.0;",
         "ALTER TABLE productos ADD COLUMN stock_vitrina FLOAT DEFAULT 0.0;",
         "ALTER TABLE productos ADD COLUMN stock_minimo_bodega FLOAT DEFAULT 5.0;",
         "ALTER TABLE productos ADD COLUMN stock_minimo_vitrina FLOAT DEFAULT 2.0;",
+        "ALTER TABLE productos ADD COLUMN stock_minimo FLOAT DEFAULT 0.0;",
+        "ALTER TABLE productos ADD COLUMN imagen_url VARCHAR DEFAULT '';",
         "ALTER TABLE productos ADD COLUMN precio_variable BOOLEAN DEFAULT 0;",
         "ALTER TABLE productos ADD COLUMN porcentaje_comision FLOAT DEFAULT 0.0;",
+        "ALTER TABLE productos ADD COLUMN fecha_creacion VARCHAR;",
+        "ALTER TABLE productos ADD COLUMN fecha_modificacion VARCHAR;",
+        "ALTER TABLE productos ADD COLUMN created_at TIMESTAMP;",
+        "ALTER TABLE productos ADD COLUMN updated_at TIMESTAMP;",
         # Servicios
         "ALTER TABLE servicios ADD COLUMN precio_variable BOOLEAN DEFAULT 0;",
         "ALTER TABLE servicios ADD COLUMN solo_operarios BOOLEAN NOT NULL DEFAULT 0;",
@@ -198,17 +220,33 @@ async def startup():
         "ALTER TABLE movimientos_inventario ADD COLUMN hora VARCHAR;",
         "ALTER TABLE movimientos_inventario ADD COLUMN codigo_producto VARCHAR;",
         "ALTER TABLE movimientos_inventario ADD COLUMN nombre_producto VARCHAR;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN tipo VARCHAR;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN tipo_movimiento VARCHAR;",
         "ALTER TABLE movimientos_inventario ADD COLUMN unidad_medida VARCHAR DEFAULT 'Unidad';",
         "ALTER TABLE movimientos_inventario ADD COLUMN ubicacion_origen VARCHAR DEFAULT '';",
         "ALTER TABLE movimientos_inventario ADD COLUMN ubicacion_destino VARCHAR DEFAULT '';",
+        "ALTER TABLE movimientos_inventario ADD COLUMN stock_anterior FLOAT DEFAULT 0.0;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN stock_nuevo FLOAT DEFAULT 0.0;",
         "ALTER TABLE movimientos_inventario ADD COLUMN stock_origen_ant FLOAT DEFAULT 0.0;",
         "ALTER TABLE movimientos_inventario ADD COLUMN stock_origen_des FLOAT DEFAULT 0.0;",
         "ALTER TABLE movimientos_inventario ADD COLUMN stock_destino_ant FLOAT DEFAULT 0.0;",
         "ALTER TABLE movimientos_inventario ADD COLUMN stock_destino_des FLOAT DEFAULT 0.0;",
         "ALTER TABLE movimientos_inventario ADD COLUMN costo_unitario FLOAT DEFAULT 0.0;",
         "ALTER TABLE movimientos_inventario ADD COLUMN valor_total FLOAT DEFAULT 0.0;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN referencia VARCHAR;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN usuario_id INTEGER;",
         "ALTER TABLE movimientos_inventario ADD COLUMN usuario_nombre VARCHAR DEFAULT '';",
+        "ALTER TABLE movimientos_inventario ADD COLUMN usuario VARCHAR DEFAULT 'Administrador';",
+        "ALTER TABLE movimientos_inventario ADD COLUMN terminal_id INTEGER;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN observacion VARCHAR;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN observaciones VARCHAR;",
         "ALTER TABLE movimientos_inventario ADD COLUMN estado VARCHAR DEFAULT 'Completado';",
+        "ALTER TABLE movimientos_inventario ADD COLUMN created_at TIMESTAMP;",
+        # Compras y Traslados
+        "ALTER TABLE compras_inventario ADD COLUMN created_at TIMESTAMP;",
+        "ALTER TABLE compras_inventario ADD COLUMN observaciones VARCHAR;",
+        "ALTER TABLE traslados_inventario ADD COLUMN created_at TIMESTAMP;",
+        "ALTER TABLE traslados_inventario ADD COLUMN observaciones VARCHAR;",
         # Ventas y Detalles
         "ALTER TABLE ventas ADD COLUMN idempotency_key VARCHAR;",
         "ALTER TABLE ventas ADD COLUMN fecha VARCHAR;",

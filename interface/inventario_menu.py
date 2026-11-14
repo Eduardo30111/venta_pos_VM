@@ -59,6 +59,17 @@ try:
     )
     from interface.database_manager import conectar_db
 except ImportError:
+    pass
+
+try:
+    from table_filter_sorter import (
+        TreeviewSortManager, normalizar_texto, coincide_busqueda, insertar_estado_vacio
+    )
+except ImportError:
+    from interface.table_filter_sorter import (
+        TreeviewSortManager, normalizar_texto, coincide_busqueda, insertar_estado_vacio
+    )
+except ImportError:
     from inventario_manager import (
         obtener_catalogo, obtener_articulo_por_codigo, sugerir_proximo_codigo,
         crear_articulo, actualizar_articulo, cambiar_estado_articulo,
@@ -113,6 +124,53 @@ def obtener_proveedores_locales():
     except Exception:
         pass
     return []
+
+def obtener_categorias_locales():
+    """Consulta categorías registradas desde el servidor central y SQLite local."""
+    cats = set()
+    try:
+        from client.api_client import api
+        resp = api.get("/categorias")
+        if resp.status_code == 200:
+            items = resp.json()
+            if isinstance(items, list):
+                for c in items:
+                    nom = c.get("nombre") if isinstance(c, dict) else str(c)
+                    if nom and str(nom).strip():
+                        cats.add(str(nom).strip())
+    except Exception:
+        pass
+
+    try:
+        from interface.database_manager import conectar_db
+        conn = conectar_db()
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT DISTINCT categoria FROM productos WHERE categoria IS NOT NULL AND TRIM(categoria) != ''")
+            for r in cur.fetchall():
+                if r[0]:
+                    cats.add(str(r[0]).strip())
+        except Exception:
+            pass
+        try:
+            cur.execute("SELECT DISTINCT categoria FROM servicios WHERE categoria IS NOT NULL AND TRIM(categoria) != ''")
+            for r in cur.fetchall():
+                if r[0]:
+                    cats.add(str(r[0]).strip())
+        except Exception:
+            pass
+        try:
+            cur.execute("SELECT nombre FROM categorias WHERE estado != 'Inactivo'")
+            for r in cur.fetchall():
+                if r[0]:
+                    cats.add(str(r[0]).strip())
+        except Exception:
+            pass
+        conn.close()
+    except Exception:
+        pass
+
+    return sorted(list(cats), key=lambda x: normalizar_texto(x))
 
 def modal_crear_proveedor_rapido(parent_win, combo_widget=None, var_widget=None):
     """Crea un proveedor rápidamente desde un modal."""
@@ -818,49 +876,115 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     # ==========================================================================
     # SECCIÓN 1: CATÁLOGO DE ARTÍCULOS
     # ==========================================================================
-    bar_cat = tk.Frame(tab_catalogo, bg=t["bg_surface"], padx=15, pady=10)
+    bar_cat = tk.Frame(tab_catalogo, bg=t["bg_surface"], padx=15, pady=8)
     bar_cat.pack(fill="x")
 
-    tk.Label(bar_cat, text="Buscar:", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 5))
-    var_filtro_cat = tk.StringVar()
-    e_filtro_cat = tk.Entry(bar_cat, textvariable=var_filtro_cat, width=25, font=("Segoe UI", 10),
-                            bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"])
-    e_filtro_cat.pack(side="left", padx=(0, 15))
+    bar_cat_row1 = tk.Frame(bar_cat, bg=t["bg_surface"])
+    bar_cat_row1.pack(fill="x", pady=(0, 6))
 
-    tk.Label(bar_cat, text="Tipo:", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 5))
+    tk.Label(bar_cat_row1, text="Buscar:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_filtro_cat = tk.StringVar()
+    e_filtro_cat = tk.Entry(bar_cat_row1, textvariable=var_filtro_cat, width=22, font=("Segoe UI", 9),
+                            bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"])
+    e_filtro_cat.pack(side="left", padx=(0, 10))
+
+    tk.Label(bar_cat_row1, text="Tipo:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
     var_tipo_cat = tk.StringVar(value="Todos")
-    cb_tipo_cat = ttk.Combobox(bar_cat, textvariable=var_tipo_cat, values=["Todos", "Fisico", "Servicio"], state="readonly", width=12)
-    cb_tipo_cat.pack(side="left", padx=(0, 15))
+    cb_tipo_cat = ttk.Combobox(bar_cat_row1, textvariable=var_tipo_cat, values=["Todos", "Fisico", "Servicio"], state="readonly", width=10)
+    cb_tipo_cat.pack(side="left", padx=(0, 10))
+
+    bar_cat_row2 = tk.Frame(bar_cat, bg=t["bg_surface"])
+    bar_cat_row2.pack(fill="x")
+
+    tk.Label(bar_cat_row2, text="Categoría:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_cat_filtro = tk.StringVar(value="Todas")
+    cb_cat_filtro = ttk.Combobox(bar_cat_row2, textvariable=var_cat_filtro, state="readonly", width=14)
+    cb_cat_filtro.pack(side="left", padx=(0, 8))
+
+    tk.Label(bar_cat_row2, text="Proveedor:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_prov_filtro = tk.StringVar(value="Todos")
+    cb_prov_filtro = ttk.Combobox(bar_cat_row2, textvariable=var_prov_filtro, state="readonly", width=14)
+    cb_prov_filtro.pack(side="left", padx=(0, 8))
+
+    tk.Label(bar_cat_row2, text="Estado:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_est_filtro = tk.StringVar(value="Todos")
+    cb_est_filtro = ttk.Combobox(bar_cat_row2, textvariable=var_est_filtro, values=["Todos", "Activo", "Inactivo"], state="readonly", width=9)
+    cb_est_filtro.pack(side="left", padx=(0, 8))
+
+    tk.Label(bar_cat_row2, text="Disponibilidad:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_disp_filtro = tk.StringVar(value="Todos")
+    cb_disp_filtro = ttk.Combobox(bar_cat_row2, textvariable=var_disp_filtro,
+                                  values=["Todos", "En Stock (>0)", "Bajo Stock (≤ Mínimo)", "Agotado (0)"], state="readonly", width=15)
+    cb_disp_filtro.pack(side="left", padx=(0, 8))
+
+    def refrescar_combos_catalogo():
+        cats = ["Todas"] + obtener_categorias_locales()
+        cb_cat_filtro["values"] = cats
+        if var_cat_filtro.get() not in cats:
+            var_cat_filtro.set("Todas")
+
+        provs = ["Todos"] + [p[1] for p in obtener_proveedores_locales()]
+        cb_prov_filtro["values"] = provs
+        if var_prov_filtro.get() not in provs:
+            var_prov_filtro.set("Todos")
+
+    def limpiar_filtros_catalogo():
+        var_filtro_cat.set("")
+        var_tipo_cat.set("Todos")
+        var_cat_filtro.set("Todas")
+        var_prov_filtro.set("Todos")
+        var_est_filtro.set("Todos")
+        var_disp_filtro.set("Todos")
+        cargar_tabla_catalogo()
+
+    crear_boton(bar_cat_row2, "Limpiar Filtros", limpiar_filtros_catalogo, tipo="secondary", icono="🧹", tam_fuente=8, padx=6, pady=2).pack(side="left", padx=(0, 8))
+
+    lbl_cat_contador = tk.Label(bar_cat_row2, text="", font=("Segoe UI", 8, "italic"), bg=t["bg_surface"], fg=t["text_muted"])
+    lbl_cat_contador.pack(side="right", padx=5)
+
+    sort_mgr_cat_holder = [None]
 
     def cargar_tabla_catalogo():
         for r in tree_cat.get_children():
             tree_cat.delete(r)
+        refrescar_combos_catalogo()
         items = obtener_catalogo(
             filtro=var_filtro_cat.get().strip(),
-            tipo=var_tipo_cat.get()
+            categoria=var_cat_filtro.get(),
+            tipo=var_tipo_cat.get(),
+            estado=var_est_filtro.get(),
+            proveedor=var_prov_filtro.get(),
+            disponibilidad=var_disp_filtro.get()
         )
-        for it in items:
-            p_id = it["id"]
-            cod = it["codigo"]
-            nom = it["nombre"]
-            tipo_p = it["tipo_producto"]
-            cat = it["categoria"] or "General"
-            u_med = it["unidad_medida"] or "Unidad"
-            precio_v = formato_peso(it["precio"])
-            costo_u = formato_peso(it["costo"])
-            if tipo_p == "Servicio":
-                st_b = "—"
-                st_v = "—"
-                st_tot = "— (Servicio)"
-            else:
-                st_b = formato_cant(it["stock_bodega"])
-                st_v = formato_cant(it["stock_vitrina"])
-                st_tot = formato_cant(it["stock"], u_med)
-            est = it["estado"] or "Activo"
+        if not items:
+            insertar_estado_vacio(tree_cat, "🔍 No se encontraron artículos que coincidan con la búsqueda o filtros.", col_mensaje_idx=2)
+            lbl_cat_contador.config(text="0 artículos encontrados")
+        else:
+            for it in items:
+                p_id = it["id"]
+                cod = it["codigo"]
+                nom = it["nombre"]
+                tipo_p = it["tipo_producto"]
+                cat = it["categoria"] or "General"
+                u_med = it["unidad_medida"] or "Unidad"
+                precio_v = formato_peso(it["precio"])
+                costo_u = formato_peso(it["costo"])
+                if tipo_p == "Servicio":
+                    st_b = "—"
+                    st_v = "—"
+                    st_tot = "— (Servicio)"
+                else:
+                    st_b = formato_cant(it["stock_bodega"])
+                    st_v = formato_cant(it["stock_vitrina"])
+                    st_tot = formato_cant(it["stock"], u_med)
+                est = it["estado"] or "Activo"
 
-            tree_cat.insert("", "end", values=(
-                p_id, cod, nom, tipo_p, cat, u_med, precio_v, costo_u, st_b, st_v, st_tot, est
-            ))
+                tree_cat.insert("", "end", values=(
+                    p_id, cod, nom, tipo_p, cat, u_med, precio_v, costo_u, st_b, st_v, st_tot, est
+                ))
+            lbl_cat_contador.config(text=f"{len(items)} artículos encontrados")
+            if sort_mgr_cat_holder[0]:
+                sort_mgr_cat_holder[0].registrar_datos_cargados()
         refrescar_kpis()
 
     _debounce_cat = [None]
@@ -874,6 +998,10 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
 
     var_filtro_cat.trace_add("write", _on_filtro_cat_change)
     cb_tipo_cat.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_catalogo())
+    cb_cat_filtro.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_catalogo())
+    cb_prov_filtro.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_catalogo())
+    cb_est_filtro.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_catalogo())
+    cb_disp_filtro.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_catalogo())
 
     # Botones Catálogo
     def abrir_modal_articulo(articulo_existente=None, on_creado_callback=None, ubicacion_destino=None, proveedor_preseleccionado=None, parent_modal=None):
@@ -1239,10 +1367,10 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
             cargar_tabla_bodega()
             cargar_tabla_vitrina()
 
-    crear_boton(bar_cat, "Actualizar", cargar_tabla_catalogo, tipo="secondary", icono="🔄", tam_fuente=9).pack(side="right", padx=4)
-    crear_boton(bar_cat, "Activar/Inactivar", alternar_estado_seleccionado, tipo="secondary", icono="⚡", tam_fuente=9).pack(side="right", padx=4)
-    crear_boton(bar_cat, "Editar", editar_articulo_seleccionado, tipo="primary", icono="✏️", tam_fuente=9).pack(side="right", padx=4)
-    crear_boton(bar_cat, "Nuevo Artículo", lambda: abrir_modal_articulo(None), tipo="success", icono="➕", tam_fuente=9).pack(side="right", padx=4)
+    crear_boton(bar_cat_row1, "Actualizar", cargar_tabla_catalogo, tipo="secondary", icono="🔄", tam_fuente=9).pack(side="right", padx=3)
+    crear_boton(bar_cat_row1, "Activar/Inactivar", alternar_estado_seleccionado, tipo="secondary", icono="⚡", tam_fuente=9).pack(side="right", padx=3)
+    crear_boton(bar_cat_row1, "Editar", editar_articulo_seleccionado, tipo="primary", icono="✏️", tam_fuente=9).pack(side="right", padx=3)
+    crear_boton(bar_cat_row1, "Nuevo Artículo", lambda: abrir_modal_articulo(None), tipo="success", icono="➕", tam_fuente=9).pack(side="right", padx=3)
 
     # Tabla Catálogo
     frame_tree_cat = tk.Frame(tab_catalogo, bg=t["bg_surface"])
@@ -1265,6 +1393,9 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     tree_cat.column("Stock Total", width=100, anchor="center")
     tree_cat.column("Estado", width=75, anchor="center")
 
+    sort_mgr_cat = TreeviewSortManager(tree_cat)
+    sort_mgr_cat_holder[0] = sort_mgr_cat
+
     sc_cat_y = ttk.Scrollbar(frame_tree_cat, orient="vertical", command=tree_cat.yview)
     sc_cat_x = ttk.Scrollbar(frame_tree_cat, orient="horizontal", command=tree_cat.xview)
     tree_cat.configure(yscrollcommand=sc_cat_y.set, xscrollcommand=sc_cat_x.set)
@@ -1277,31 +1408,89 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     # ==========================================================================
     # SECCIÓN 2: BODEGA (DEPÓSITO)
     # ==========================================================================
-    bar_bod = tk.Frame(tab_bodega, bg=t["bg_surface"], padx=15, pady=10)
+    bar_bod = tk.Frame(tab_bodega, bg=t["bg_surface"], padx=15, pady=8)
     bar_bod.pack(fill="x")
 
-    tk.Label(bar_bod, text="Buscar en Bodega:", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 5))
+    bar_bod_row1 = tk.Frame(bar_bod, bg=t["bg_surface"])
+    bar_bod_row1.pack(fill="x", pady=(0, 6))
+
+    tk.Label(bar_bod_row1, text="Buscar en Bodega:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
     var_filtro_bod = tk.StringVar()
-    e_filtro_bod = tk.Entry(bar_bod, textvariable=var_filtro_bod, width=25, font=("Segoe UI", 10),
+    e_filtro_bod = tk.Entry(bar_bod_row1, textvariable=var_filtro_bod, width=22, font=("Segoe UI", 9),
                             bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"])
-    e_filtro_bod.pack(side="left", padx=(0, 15))
+    e_filtro_bod.pack(side="left", padx=(0, 10))
+
+    bar_bod_row2 = tk.Frame(bar_bod, bg=t["bg_surface"])
+    bar_bod_row2.pack(fill="x")
+
+    tk.Label(bar_bod_row2, text="Categoría:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_cat_bod = tk.StringVar(value="Todas")
+    cb_cat_bod = ttk.Combobox(bar_bod_row2, textvariable=var_cat_bod, state="readonly", width=14)
+    cb_cat_bod.pack(side="left", padx=(0, 8))
+
+    tk.Label(bar_bod_row2, text="Alerta / Stock:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_alerta_bod = tk.StringVar(value="Todos")
+    cb_alerta_bod = ttk.Combobox(bar_bod_row2, textvariable=var_alerta_bod, values=["Todos", "Normal", "Bajo Stock (Alerta)", "Agotado (0)"], state="readonly", width=16)
+    cb_alerta_bod.pack(side="left", padx=(0, 8))
+
+    def refrescar_combos_bodega():
+        cats = ["Todas"] + obtener_categorias_locales()
+        cb_cat_bod["values"] = cats
+        if var_cat_bod.get() not in cats:
+            var_cat_bod.set("Todas")
+
+    def limpiar_filtros_bodega():
+        var_filtro_bod.set("")
+        var_cat_bod.set("Todas")
+        var_alerta_bod.set("Todos")
+        cargar_tabla_bodega()
+
+    crear_boton(bar_bod_row2, "Limpiar Filtros", limpiar_filtros_bodega, tipo="secondary", icono="🧹", tam_fuente=8, padx=6, pady=2).pack(side="left", padx=(0, 8))
+
+    lbl_bod_contador = tk.Label(bar_bod_row2, text="", font=("Segoe UI", 8, "italic"), bg=t["bg_surface"], fg=t["text_muted"])
+    lbl_bod_contador.pack(side="right", padx=5)
+
+    sort_mgr_bod_holder = [None]
 
     def cargar_tabla_bodega():
         for r in tree_bod.get_children():
             tree_bod.delete(r)
-        items = obtener_existencias_bodega(filtro=var_filtro_bod.get().strip())
-        for it in items:
-            tree_bod.insert("", "end", values=(
-                it["codigo"], it["nombre"], it["categoria"], it["unidad_medida"],
-                formato_cant(it["stock_bodega"]),
-                formato_cant(it["stock_minimo_bodega"]),
-                formato_peso(it["costo"]),
-                formato_peso(it["valor_total_bodega"]),
-                it["alerta_bodega"]
-            ))
+        refrescar_combos_bodega()
+        items = obtener_existencias_bodega(
+            filtro=var_filtro_bod.get().strip(),
+            categoria=var_cat_bod.get(),
+            alerta=var_alerta_bod.get()
+        )
+        if not items:
+            insertar_estado_vacio(tree_bod, "🔍 No hay existencias en bodega con los criterios seleccionados.", col_mensaje_idx=1)
+            lbl_bod_contador.config(text="0 artículos encontrados")
+        else:
+            for it in items:
+                tree_bod.insert("", "end", values=(
+                    it["codigo"], it["nombre"], it["categoria"], it["unidad_medida"],
+                    formato_cant(it["stock_bodega"]),
+                    formato_cant(it["stock_minimo_bodega"]),
+                    formato_peso(it["costo"]),
+                    formato_peso(it["valor_total_bodega"]),
+                    it["alerta_bodega"]
+                ))
+            lbl_bod_contador.config(text=f"{len(items)} artículos en bodega")
+            if sort_mgr_bod_holder[0]:
+                sort_mgr_bod_holder[0].registrar_datos_cargados()
         refrescar_kpis()
 
-    var_filtro_bod.trace_add("write", lambda *a: cargar_tabla_bodega())
+    _debounce_bod = [None]
+    def _on_filtro_bod_change(*a):
+        if _debounce_bod[0]:
+            try:
+                ventana.after_cancel(_debounce_bod[0])
+            except Exception:
+                pass
+        _debounce_bod[0] = ventana.after(200, cargar_tabla_bodega)
+
+    var_filtro_bod.trace_add("write", _on_filtro_bod_change)
+    cb_cat_bod.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_bodega())
+    cb_alerta_bod.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_bodega())
 
     def abrir_traslado_desde_bodega():
         sel = tree_bod.selection()
@@ -1431,11 +1620,11 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
             except Exception as ex:
                 messagebox.showerror("Error", f"Fallo al aplicar ajuste:\n{ex}", parent=modal)
 
-    crear_boton(bar_bod, "Actualizar", cargar_tabla_bodega, tipo="secondary", icono="🔄", tam_fuente=9).pack(side="right", padx=4)
-    crear_boton(bar_bod, "Ajuste Conteo Físico", lambda: abrir_modal_ajuste("BODEGA"), tipo="warning", icono="⚖️", tam_fuente=9).pack(side="right", padx=4)
-    crear_boton(bar_bod, "Trasladar a Vitrina", abrir_traslado_desde_bodega, tipo="secondary", icono="🚚", tam_fuente=9).pack(side="right", padx=4)
-    crear_boton(bar_bod, "Entrada / Compra", lambda: abrir_modal_nueva_compra(), tipo="success", icono="📥", tam_fuente=9).pack(side="right", padx=4)
-    crear_boton(bar_bod, "Nuevo Artículo en Bodega", lambda: abrir_modal_articulo(ubicacion_destino="BODEGA"), tipo="primary", icono="➕", tam_fuente=9).pack(side="right", padx=4)
+    crear_boton(bar_bod_row1, "Actualizar", cargar_tabla_bodega, tipo="secondary", icono="🔄", tam_fuente=9).pack(side="right", padx=3)
+    crear_boton(bar_bod_row1, "Ajuste Conteo Físico", lambda: abrir_modal_ajuste("BODEGA"), tipo="warning", icono="⚖️", tam_fuente=9).pack(side="right", padx=3)
+    crear_boton(bar_bod_row1, "Trasladar a Vitrina", abrir_traslado_desde_bodega, tipo="secondary", icono="🚚", tam_fuente=9).pack(side="right", padx=3)
+    crear_boton(bar_bod_row1, "Entrada / Compra", lambda: abrir_modal_nueva_compra(), tipo="success", icono="📥", tam_fuente=9).pack(side="right", padx=3)
+    crear_boton(bar_bod_row1, "Nuevo Artículo en Bodega", lambda: abrir_modal_articulo(ubicacion_destino="BODEGA"), tipo="primary", icono="➕", tam_fuente=9).pack(side="right", padx=3)
 
     frame_tree_bod = tk.Frame(tab_bodega, bg=t["bg_surface"])
     frame_tree_bod.pack(fill="both", expand=True, padx=15, pady=(0, 15))
@@ -1454,6 +1643,9 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     tree_bod.column("Valor Total a Costo", width=130, anchor="e")
     tree_bod.column("Estado Alerta", width=140, anchor="center")
 
+    sort_mgr_bod = TreeviewSortManager(tree_bod)
+    sort_mgr_bod_holder[0] = sort_mgr_bod
+
     sc_bod_y = ttk.Scrollbar(frame_tree_bod, orient="vertical", command=tree_bod.yview)
     tree_bod.configure(yscrollcommand=sc_bod_y.set)
     tree_bod.grid(row=0, column=0, sticky="nsew")
@@ -1464,32 +1656,90 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     # ==========================================================================
     # SECCIÓN 3: VITRINA (PUNTO DE VENTA)
     # ==========================================================================
-    bar_vit = tk.Frame(tab_vitrina, bg=t["bg_surface"], padx=15, pady=10)
+    bar_vit = tk.Frame(tab_vitrina, bg=t["bg_surface"], padx=15, pady=8)
     bar_vit.pack(fill="x")
 
-    tk.Label(bar_vit, text="Buscar en Vitrina:", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 5))
+    bar_vit_row1 = tk.Frame(bar_vit, bg=t["bg_surface"])
+    bar_vit_row1.pack(fill="x", pady=(0, 6))
+
+    tk.Label(bar_vit_row1, text="Buscar en Vitrina:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
     var_filtro_vit = tk.StringVar()
-    e_filtro_vit = tk.Entry(bar_vit, textvariable=var_filtro_vit, width=25, font=("Segoe UI", 10),
+    e_filtro_vit = tk.Entry(bar_vit_row1, textvariable=var_filtro_vit, width=22, font=("Segoe UI", 9),
                             bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"])
-    e_filtro_vit.pack(side="left", padx=(0, 15))
+    e_filtro_vit.pack(side="left", padx=(0, 10))
+
+    bar_vit_row2 = tk.Frame(bar_vit, bg=t["bg_surface"])
+    bar_vit_row2.pack(fill="x")
+
+    tk.Label(bar_vit_row2, text="Categoría:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_cat_vit = tk.StringVar(value="Todas")
+    cb_cat_vit = ttk.Combobox(bar_vit_row2, textvariable=var_cat_vit, state="readonly", width=14)
+    cb_cat_vit.pack(side="left", padx=(0, 8))
+
+    tk.Label(bar_vit_row2, text="Disponibilidad:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_disp_vit = tk.StringVar(value="Todos")
+    cb_disp_vit = ttk.Combobox(bar_vit_row2, textvariable=var_disp_vit, values=["Todos", "Disponible", "Reponer Vitrina", "Agotado (0)"], state="readonly", width=16)
+    cb_disp_vit.pack(side="left", padx=(0, 8))
+
+    def refrescar_combos_vitrina():
+        cats = ["Todas"] + obtener_categorias_locales()
+        cb_cat_vit["values"] = cats
+        if var_cat_vit.get() not in cats:
+            var_cat_vit.set("Todas")
+
+    def limpiar_filtros_vitrina():
+        var_filtro_vit.set("")
+        var_cat_vit.set("Todas")
+        var_disp_vit.set("Todos")
+        cargar_tabla_vitrina()
+
+    crear_boton(bar_vit_row2, "Limpiar Filtros", limpiar_filtros_vitrina, tipo="secondary", icono="🧹", tam_fuente=8, padx=6, pady=2).pack(side="left", padx=(0, 8))
+
+    lbl_vit_contador = tk.Label(bar_vit_row2, text="", font=("Segoe UI", 8, "italic"), bg=t["bg_surface"], fg=t["text_muted"])
+    lbl_vit_contador.pack(side="right", padx=5)
+
+    sort_mgr_vit_holder = [None]
 
     def cargar_tabla_vitrina():
         for r in tree_vit.get_children():
             tree_vit.delete(r)
-        items = obtener_existencias_vitrina(filtro=var_filtro_vit.get().strip())
-        for it in items:
-            tree_vit.insert("", "end", values=(
-                it["codigo"], it["nombre"], it["categoria"], it["unidad_medida"],
-                formato_cant(it["stock_vitrina"]),
-                formato_cant(it["stock_minimo_vitrina"]),
-                formato_peso(it["precio"]),
-                formato_peso(it["valor_venta_vitrina"]),
-                formato_cant(it["stock_bodega"]),
-                it["alerta_vitrina"]
-            ))
+        refrescar_combos_vitrina()
+        items = obtener_existencias_vitrina(
+            filtro=var_filtro_vit.get().strip(),
+            categoria=var_cat_vit.get(),
+            alerta=var_disp_vit.get()
+        )
+        if not items:
+            insertar_estado_vacio(tree_vit, "🔍 No hay artículos en vitrina con los criterios seleccionados.", col_mensaje_idx=1)
+            lbl_vit_contador.config(text="0 artículos encontrados")
+        else:
+            for it in items:
+                tree_vit.insert("", "end", values=(
+                    it["codigo"], it["nombre"], it["categoria"], it["unidad_medida"],
+                    formato_cant(it["stock_vitrina"]),
+                    formato_cant(it["stock_minimo_vitrina"]),
+                    formato_peso(it["precio"]),
+                    formato_peso(it["valor_venta_vitrina"]),
+                    formato_cant(it["stock_bodega"]),
+                    it["alerta_vitrina"]
+                ))
+            lbl_vit_contador.config(text=f"{len(items)} artículos en vitrina")
+            if sort_mgr_vit_holder[0]:
+                sort_mgr_vit_holder[0].registrar_datos_cargados()
         refrescar_kpis()
 
-    var_filtro_vit.trace_add("write", lambda *a: cargar_tabla_vitrina())
+    _debounce_vit = [None]
+    def _on_filtro_vit_change(*a):
+        if _debounce_vit[0]:
+            try:
+                ventana.after_cancel(_debounce_vit[0])
+            except Exception:
+                pass
+        _debounce_vit[0] = ventana.after(200, cargar_tabla_vitrina)
+
+    var_filtro_vit.trace_add("write", _on_filtro_vit_change)
+    cb_cat_vit.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_vitrina())
+    cb_disp_vit.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_vitrina())
 
     def solicitar_reposicion_vitrina():
         sel = tree_vit.selection()
@@ -1503,9 +1753,9 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
             var_tras_destino.set("VITRINA")
             actualizar_info_traslado()
 
-    crear_boton(bar_vit, "Actualizar", cargar_tabla_vitrina, tipo="secondary", icono="🔄", tam_fuente=9).pack(side="right", padx=4)
-    crear_boton(bar_vit, "Ajuste Conteo Vitrina", lambda: abrir_modal_ajuste("VITRINA"), tipo="warning", icono="⚖️", tam_fuente=9).pack(side="right", padx=4)
-    crear_boton(bar_vit, "Solicitar Reposición (Bodega -> Vitrina)", solicitar_reposicion_vitrina, tipo="primary", icono="📥", tam_fuente=9).pack(side="right", padx=4)
+    crear_boton(bar_vit_row1, "Actualizar", cargar_tabla_vitrina, tipo="secondary", icono="🔄", tam_fuente=9).pack(side="right", padx=3)
+    crear_boton(bar_vit_row1, "Ajuste Conteo Vitrina", lambda: abrir_modal_ajuste("VITRINA"), tipo="warning", icono="⚖️", tam_fuente=9).pack(side="right", padx=3)
+    crear_boton(bar_vit_row1, "Solicitar Reposición (Bodega -> Vitrina)", solicitar_reposicion_vitrina, tipo="primary", icono="📥", tam_fuente=9).pack(side="right", padx=3)
 
     frame_tree_vit = tk.Frame(tab_vitrina, bg=t["bg_surface"])
     frame_tree_vit.pack(fill="both", expand=True, padx=15, pady=(0, 15))
@@ -1524,6 +1774,9 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     tree_vit.column("Valor Total Venta", width=120, anchor="e")
     tree_vit.column("Disponible en Bodega", width=130, anchor="center")
     tree_vit.column("Estado Disponibilidad", width=150, anchor="center")
+
+    sort_mgr_vit = TreeviewSortManager(tree_vit)
+    sort_mgr_vit_holder[0] = sort_mgr_vit
 
     sc_vit_y = ttk.Scrollbar(frame_tree_vit, orient="vertical", command=tree_vit.yview)
     tree_vit.configure(yscrollcommand=sc_vit_y.set)
@@ -1671,6 +1924,28 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
                                 bg=t["bg_surface"], fg=t["text_main"], padx=10, pady=10)
     f_tras_hist.pack(side="right", fill="both", expand=True)
 
+    f_th_ctrl = tk.Frame(f_tras_hist, bg=t["bg_surface"], padx=5, pady=4)
+    f_th_ctrl.pack(fill="x", pady=(0, 6))
+
+    tk.Label(f_th_ctrl, text="Buscar:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_filtro_th = tk.StringVar()
+    e_filtro_th = tk.Entry(f_th_ctrl, textvariable=var_filtro_th, width=16, font=("Segoe UI", 9),
+                           bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"])
+    e_filtro_th.pack(side="left", padx=(0, 8))
+
+    tk.Label(f_th_ctrl, text="Trayectoria:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_tray_th = tk.StringVar(value="Todas")
+    cb_tray_th = ttk.Combobox(f_th_ctrl, textvariable=var_tray_th, values=["Todas", "BODEGA ➔ VITRINA", "VITRINA ➔ BODEGA"], state="readonly", width=16)
+    cb_tray_th.pack(side="left", padx=(0, 8))
+
+    def limpiar_filtros_traslados():
+        var_filtro_th.set("")
+        var_tray_th.set("Todas")
+        cargar_tabla_traslados()
+
+    crear_boton(f_th_ctrl, "Limpiar", limpiar_filtros_traslados, tipo="secondary", icono="🧹", tam_fuente=8, padx=4, pady=1).pack(side="left", padx=(0, 6))
+    crear_boton(f_th_ctrl, "Actualizar", lambda: cargar_tabla_traslados(), tipo="secondary", icono="🔄", tam_fuente=8, padx=4, pady=1).pack(side="right")
+
     cols_th = ("Nº Traslado", "Fecha", "Hora", "SKU", "Artículo", "Origen", "Destino", "Cantidad", "Usuario", "Estado")
     tree_th = ttk.Treeview(f_tras_hist, columns=cols_th, show="headings", selectmode="browse")
     for c in cols_th:
@@ -1686,6 +1961,8 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     tree_th.column("Usuario", width=95, anchor="center")
     tree_th.column("Estado", width=85, anchor="center")
 
+    sort_mgr_th = TreeviewSortManager(tree_th)
+
     sc_th_y = ttk.Scrollbar(f_tras_hist, orient="vertical", command=tree_th.yview)
     tree_th.configure(yscrollcommand=sc_th_y.set)
     tree_th.pack(side="left", fill="both", expand=True)
@@ -1694,17 +1971,54 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     def cargar_tabla_traslados():
         for r in tree_th.get_children():
             tree_th.delete(r)
-        lista = obtener_historial_traslados(limit=100)
+        lista = obtener_historial_traslados(limit=300)
+        f_txt = var_filtro_th.get().strip()
+        tray_sel = var_tray_th.get()
+
+        items_filtrados = []
         for t_item in lista:
-            tree_th.insert("", "end", values=(
-                t_item["numero_traslado"], t_item["fecha"], t_item["hora"],
-                t_item["codigo_producto"], t_item["nombre_producto"],
-                t_item["ubicacion_origen"], t_item["ubicacion_destino"],
-                formato_cant(t_item["cantidad"]), t_item["usuario"], t_item["estado"]
-            ))
+            tray_txt = f"{t_item.get('ubicacion_origen', '')} ➔ {t_item.get('ubicacion_destino', '')}"
+            if tray_sel != "Todas" and tray_sel != tray_txt:
+                continue
+            if f_txt:
+                campos = [
+                    t_item.get("numero_traslado"),
+                    t_item.get("codigo_producto"),
+                    t_item.get("nombre_producto"),
+                    t_item.get("usuario"),
+                    t_item.get("estado"),
+                ]
+                if not coincide_busqueda(campos, f_txt):
+                    continue
+            items_filtrados.append(t_item)
+
+        if not items_filtrados:
+            insertar_estado_vacio(tree_th, "🔍 No hay traslados registrados con estos criterios.", col_mensaje_idx=4)
+        else:
+            for t_item in items_filtrados:
+                tree_th.insert("", "end", values=(
+                    t_item["numero_traslado"], t_item["fecha"], t_item["hora"],
+                    t_item["codigo_producto"], t_item["nombre_producto"],
+                    t_item["ubicacion_origen"], t_item["ubicacion_destino"],
+                    formato_cant(t_item["cantidad"]), t_item["usuario"], t_item["estado"]
+                ))
+            sort_mgr_th.registrar_datos_cargados()
+
         # Actualizar combo de productos de traslado
         prods_f = obtener_catalogo(tipo="Fisico", solo_activos=True)
         cb_tras_prod["values"] = [f"{p['codigo']} - {p['nombre']}" for p in prods_f]
+
+    _debounce_th = [None]
+    def _on_filtro_th_change(*a):
+        if _debounce_th[0]:
+            try:
+                ventana.after_cancel(_debounce_th[0])
+            except Exception:
+                pass
+        _debounce_th[0] = ventana.after(200, cargar_tabla_traslados)
+
+    var_filtro_th.trace_add("write", _on_filtro_th_change)
+    cb_tray_th.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_traslados())
 
     # ==========================================================================
     # SECCIÓN 5: ENTRADAS Y COMPRAS DE MERCANCÍA (CONVERSIÓN DE PRESENTACIONES)
@@ -2215,10 +2529,52 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         except Exception as ex:
             messagebox.showerror("No se pudo eliminar", str(ex), parent=ventana)
 
-    crear_boton(bar_cmp, "Registrar Nueva Entrada / Compra", abrir_modal_nueva_compra, tipo="success", icono="➕", tam_fuente=9).pack(side="right")
-    crear_boton(bar_cmp, "Eliminar", eliminar_compra_seleccionada, tipo="danger", icono="🗑️", tam_fuente=9).pack(side="right", padx=(0, 6))
-    crear_boton(bar_cmp, "Ver / Editar", editar_compra_seleccionada, tipo="primary", icono="✏️", tam_fuente=9).pack(side="right", padx=(0, 6))
+    bar_cmp_row1 = tk.Frame(bar_cmp, bg=t["bg_surface"])
+    bar_cmp_row1.pack(fill="x", pady=(0, 6))
 
+    tk.Label(bar_cmp_row1, text="📥 Recepción de Compras de Mercancía a Proveedores", font=("Segoe UI", 11, "bold"),
+             bg=t["bg_surface"], fg=t["text_main"]).pack(side="left")
+
+    crear_boton(bar_cmp_row1, "Registrar Nueva Entrada / Compra", abrir_modal_nueva_compra, tipo="success", icono="➕", tam_fuente=9).pack(side="right")
+    crear_boton(bar_cmp_row1, "Eliminar", eliminar_compra_seleccionada, tipo="danger", icono="🗑️", tam_fuente=9).pack(side="right", padx=(0, 6))
+    crear_boton(bar_cmp_row1, "Ver / Editar", editar_compra_seleccionada, tipo="primary", icono="✏️", tam_fuente=9).pack(side="right", padx=(0, 6))
+
+    bar_cmp_row2 = tk.Frame(bar_cmp, bg=t["bg_surface"])
+    bar_cmp_row2.pack(fill="x")
+
+    tk.Label(bar_cmp_row2, text="Buscar:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_filtro_cmp = tk.StringVar()
+    e_filtro_cmp = tk.Entry(bar_cmp_row2, textvariable=var_filtro_cmp, width=18, font=("Segoe UI", 9),
+                            bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"])
+    e_filtro_cmp.pack(side="left", padx=(0, 10))
+
+    tk.Label(bar_cmp_row2, text="Proveedor:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_prov_cmp = tk.StringVar(value="Todos")
+    cb_prov_cmp = ttk.Combobox(bar_cmp_row2, textvariable=var_prov_cmp, state="readonly", width=16)
+    cb_prov_cmp.pack(side="left", padx=(0, 10))
+
+    tk.Label(bar_cmp_row2, text="Destino:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_dest_cmp = tk.StringVar(value="Todos")
+    cb_dest_cmp = ttk.Combobox(bar_cmp_row2, textvariable=var_dest_cmp, values=["Todos", "BODEGA", "VITRINA"], state="readonly", width=10)
+    cb_dest_cmp.pack(side="left", padx=(0, 10))
+
+    def refrescar_combos_compras():
+        provs = ["Todos"] + [p[1] for p in obtener_proveedores_locales()]
+        cb_prov_cmp["values"] = provs
+        if var_prov_cmp.get() not in provs:
+            var_prov_cmp.set("Todos")
+
+    def limpiar_filtros_compras():
+        var_filtro_cmp.set("")
+        var_prov_cmp.set("Todos")
+        var_dest_cmp.set("Todos")
+        cargar_tabla_compras()
+
+    crear_boton(bar_cmp_row2, "Limpiar Filtros", limpiar_filtros_compras, tipo="secondary", icono="🧹", tam_fuente=8, padx=6, pady=2).pack(side="left", padx=(0, 8))
+    crear_boton(bar_cmp_row2, "Actualizar", lambda: cargar_tabla_compras(), tipo="secondary", icono="🔄", tam_fuente=8, padx=6, pady=2).pack(side="left", padx=(0, 8))
+
+    lbl_cmp_contador = tk.Label(bar_cmp_row2, text="", font=("Segoe UI", 8, "italic"), bg=t["bg_surface"], fg=t["text_muted"])
+    lbl_cmp_contador.pack(side="right", padx=5)
 
     frame_tree_cmp = tk.Frame(tab_compras, bg=t["bg_surface"])
     frame_tree_cmp.pack(fill="both", expand=True, padx=15, pady=(0, 15))
@@ -2238,6 +2594,8 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     tree_cmp.column("Usuario", width=95, anchor="center")
     tree_cmp.column("Estado", width=85, anchor="center")
 
+    sort_mgr_cmp = TreeviewSortManager(tree_cmp)
+
     sc_cmp_y = ttk.Scrollbar(frame_tree_cmp, orient="vertical", command=tree_cmp.yview)
     tree_cmp.configure(yscrollcommand=sc_cmp_y.set)
     tree_cmp.pack(side="left", fill="both", expand=True)
@@ -2246,14 +2604,56 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     def cargar_tabla_compras():
         for r in tree_cmp.get_children():
             tree_cmp.delete(r)
-        lista = obtener_historial_compras(limit=100)
+        refrescar_combos_compras()
+        lista = obtener_historial_compras(limit=300)
+        prov_sel = normalizar_texto(var_prov_cmp.get())
+        dest_sel = var_dest_cmp.get()
+        f_txt = var_filtro_cmp.get().strip()
+
+        items_filtrados = []
         for c_item in lista:
-            tree_cmp.insert("", "end", iid=str(c_item["id"]), values=(
-                c_item["numero_compra"], c_item["fecha"], c_item["hora"],
-                c_item["proveedor_nombre"], c_item["documento_referencia"] or "—",
-                c_item["ubicacion_destino"], formato_peso(c_item["total_compra"]),
-                c_item["cantidad_items"], c_item["usuario"], c_item["estado"]
-            ))
+            if prov_sel and prov_sel != "todos" and normalizar_texto(c_item.get("proveedor_nombre")) != prov_sel:
+                continue
+            if dest_sel != "Todos" and c_item.get("ubicacion_destino") != dest_sel:
+                continue
+            if f_txt:
+                campos = [
+                    c_item.get("numero_compra"),
+                    c_item.get("proveedor_nombre"),
+                    c_item.get("documento_referencia"),
+                    c_item.get("usuario"),
+                    c_item.get("ubicacion_destino"),
+                ]
+                if not coincide_busqueda(campos, f_txt):
+                    continue
+            items_filtrados.append(c_item)
+
+        if not items_filtrados:
+            insertar_estado_vacio(tree_cmp, "🔍 No hay entradas o compras que coincidan con los filtros.", col_mensaje_idx=3)
+            lbl_cmp_contador.config(text="0 compras encontradas")
+        else:
+            for c_item in items_filtrados:
+                tree_cmp.insert("", "end", iid=str(c_item["id"]), values=(
+                    c_item["numero_compra"], c_item["fecha"], c_item["hora"],
+                    c_item["proveedor_nombre"], c_item["documento_referencia"] or "—",
+                    c_item["ubicacion_destino"], formato_peso(c_item["total_compra"]),
+                    c_item["cantidad_items"], c_item["usuario"], c_item["estado"]
+                ))
+            lbl_cmp_contador.config(text=f"{len(items_filtrados)} compras encontradas")
+            sort_mgr_cmp.registrar_datos_cargados()
+
+    _debounce_cmp = [None]
+    def _on_filtro_cmp_change(*a):
+        if _debounce_cmp[0]:
+            try:
+                ventana.after_cancel(_debounce_cmp[0])
+            except Exception:
+                pass
+        _debounce_cmp[0] = ventana.after(200, cargar_tabla_compras)
+
+    var_filtro_cmp.trace_add("write", _on_filtro_cmp_change)
+    cb_prov_cmp.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_compras())
+    cb_dest_cmp.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_compras())
 
     tree_cmp.bind("<Double-1>", editar_compra_seleccionada)
     tree_cmp.bind("<Delete>", lambda e: eliminar_compra_seleccionada())
@@ -2261,42 +2661,40 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     # ==========================================================================
     # SECCIÓN 6: KÁRDEX E HISTORIAL DE MOVIMIENTOS
     # ==========================================================================
-    bar_kdx = tk.Frame(tab_kardex, bg=t["bg_surface"], padx=15, pady=10)
+    bar_kdx = tk.Frame(tab_kardex, bg=t["bg_surface"], padx=15, pady=8)
     bar_kdx.pack(fill="x")
 
-    tk.Label(bar_kdx, text="Buscar:", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 5))
-    var_filtro_kdx = tk.StringVar()
-    e_filtro_kdx = tk.Entry(bar_kdx, textvariable=var_filtro_kdx, width=22, font=("Segoe UI", 10),
-                            bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"])
-    e_filtro_kdx.pack(side="left", padx=(0, 15))
+    bar_kdx_row1 = tk.Frame(bar_kdx, bg=t["bg_surface"])
+    bar_kdx_row1.pack(fill="x")
 
-    tk.Label(bar_kdx, text="Tipo de Movimiento:", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 5))
+    tk.Label(bar_kdx_row1, text="Buscar:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_filtro_kdx = tk.StringVar()
+    e_filtro_kdx = tk.Entry(bar_kdx_row1, textvariable=var_filtro_kdx, width=18, font=("Segoe UI", 9),
+                            bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"])
+    e_filtro_kdx.pack(side="left", padx=(0, 8))
+
+    tk.Label(bar_kdx_row1, text="Tipo de Movimiento:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
     var_tipo_kdx = tk.StringVar(value="Todos")
     tipos_mov_list = ["Todos", "ENTRADA_COMPRA", "ENTRADA_INICIAL", "TRASLADO_BODEGA_A_VITRINA", "TRASLADO_VITRINA_A_BODEGA", "VENTA", "DEVOLUCION_VENTA", "AJUSTE_POSITIVO", "AJUSTE_NEGATIVO", "REVERSION_COMPRA"]
-    cb_tipo_kdx = ttk.Combobox(bar_kdx, textvariable=var_tipo_kdx, values=tipos_mov_list, state="readonly", width=22)
-    cb_tipo_kdx.pack(side="left", padx=(0, 15))
+    cb_tipo_kdx = ttk.Combobox(bar_kdx_row1, textvariable=var_tipo_kdx, values=tipos_mov_list, state="readonly", width=18)
+    cb_tipo_kdx.pack(side="left", padx=(0, 8))
 
-    def cargar_tabla_kardex():
-        for r in tree_kdx.get_children():
-            tree_kdx.delete(r)
-        items = obtener_kardex(
-            filtro_codigo=var_filtro_kdx.get().strip(),
-            tipo_movimiento=var_tipo_kdx.get()
-        )
-        for m in items:
-            tree_kdx.insert("", "end", values=(
-                m["id"], m["fecha"], m["hora"], m["tipo_movimiento"],
-                m["codigo_producto"], m["nombre_producto"],
-                formato_cant(m["cantidad"], m["unidad_medida"]),
-                f"{m['ubicacion_origen']} ➔ {m['ubicacion_destino']}",
-                formato_peso(m["costo_unitario"]),
-                formato_peso(m["valor_total"]),
-                m["referencia"], m["usuario"], m["observaciones"]
-            ))
+    tk.Label(bar_kdx_row1, text="Ubicación:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_ubic_kdx = tk.StringVar(value="Todas")
+    cb_ubic_kdx = ttk.Combobox(bar_kdx_row1, textvariable=var_ubic_kdx, values=["Todas", "BODEGA", "VITRINA", "OPERARIO"], state="readonly", width=10)
+    cb_ubic_kdx.pack(side="left", padx=(0, 8))
 
-    var_filtro_kdx.trace_add("write", lambda *a: cargar_tabla_kardex())
-    cb_tipo_kdx.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_kardex())
-    crear_boton(bar_kdx, "Actualizar", cargar_tabla_kardex, tipo="secondary", icono="🔄", tam_fuente=9).pack(side="right")
+    def limpiar_filtros_kardex():
+        var_filtro_kdx.set("")
+        var_tipo_kdx.set("Todos")
+        var_ubic_kdx.set("Todas")
+        cargar_tabla_kardex()
+
+    crear_boton(bar_kdx_row1, "Limpiar Filtros", limpiar_filtros_kardex, tipo="secondary", icono="🧹", tam_fuente=8, padx=6, pady=2).pack(side="left", padx=(0, 6))
+    crear_boton(bar_kdx_row1, "Actualizar", lambda: cargar_tabla_kardex(), tipo="secondary", icono="🔄", tam_fuente=8, padx=6, pady=2).pack(side="left", padx=(0, 6))
+
+    lbl_kdx_contador = tk.Label(bar_kdx_row1, text="", font=("Segoe UI", 8, "italic"), bg=t["bg_surface"], fg=t["text_muted"])
+    lbl_kdx_contador.pack(side="right", padx=5)
 
     frame_tree_kdx = tk.Frame(tab_kardex, bg=t["bg_surface"])
     frame_tree_kdx.pack(fill="both", expand=True, padx=15, pady=(0, 15))
@@ -2319,6 +2717,8 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     tree_kdx.column("Usuario", width=95, anchor="center")
     tree_kdx.column("Observaciones", width=220, anchor="w")
 
+    sort_mgr_kdx = TreeviewSortManager(tree_kdx)
+
     sc_kdx_y = ttk.Scrollbar(frame_tree_kdx, orient="vertical", command=tree_kdx.yview)
     sc_kdx_x = ttk.Scrollbar(frame_tree_kdx, orient="horizontal", command=tree_kdx.xview)
     tree_kdx.configure(yscrollcommand=sc_kdx_y.set, xscrollcommand=sc_kdx_x.set)
@@ -2327,6 +2727,63 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     sc_kdx_x.grid(row=1, column=0, sticky="ew")
     frame_tree_kdx.rowconfigure(0, weight=1)
     frame_tree_kdx.columnconfigure(0, weight=1)
+
+    def cargar_tabla_kardex():
+        for r in tree_kdx.get_children():
+            tree_kdx.delete(r)
+        f_txt = var_filtro_kdx.get().strip()
+        u_sel = var_ubic_kdx.get()
+        items = obtener_kardex(
+            filtro_codigo=f_txt if f_txt else None,
+            tipo_movimiento=var_tipo_kdx.get()
+        )
+        items_filtrados = []
+        for m in items:
+            if u_sel != "Todas":
+                tray = f"{m.get('ubicacion_origen', '')} {m.get('ubicacion_destino', '')}".upper()
+                if u_sel not in tray:
+                    continue
+            if f_txt:
+                campos = [
+                    m.get("codigo_producto"),
+                    m.get("nombre_producto"),
+                    m.get("referencia"),
+                    m.get("usuario"),
+                    m.get("observaciones"),
+                ]
+                if not coincide_busqueda(campos, f_txt):
+                    continue
+            items_filtrados.append(m)
+
+        if not items_filtrados:
+            insertar_estado_vacio(tree_kdx, "🔍 No se encontraron movimientos en el kárdex con estos criterios.", col_mensaje_idx=5)
+            lbl_kdx_contador.config(text="0 movimientos encontrados")
+        else:
+            for m in items_filtrados:
+                tree_kdx.insert("", "end", values=(
+                    m["id"], m["fecha"], m["hora"], m["tipo_movimiento"],
+                    m["codigo_producto"], m["nombre_producto"],
+                    formato_cant(m["cantidad"], m["unidad_medida"]),
+                    f"{m['ubicacion_origen']} ➔ {m['ubicacion_destino']}",
+                    formato_peso(m["costo_unitario"]),
+                    formato_peso(m["valor_total"]),
+                    m["referencia"], m["usuario"], m["observaciones"]
+                ))
+            lbl_kdx_contador.config(text=f"{len(items_filtrados)} movimientos")
+            sort_mgr_kdx.registrar_datos_cargados()
+
+    _debounce_kdx = [None]
+    def _on_filtro_kdx_change(*a):
+        if _debounce_kdx[0]:
+            try:
+                ventana.after_cancel(_debounce_kdx[0])
+            except Exception:
+                pass
+        _debounce_kdx[0] = ventana.after(200, cargar_tabla_kardex)
+
+    var_filtro_kdx.trace_add("write", _on_filtro_kdx_change)
+    cb_tipo_kdx.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_kardex())
+    cb_ubic_kdx.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_kardex())
 
     # ==========================================================================
     # SECCIÓN 7: MATERIALES DE OPERARIOS (BODEGA, TRASLADOS, CONSUMOS Y SALDOS)
@@ -2368,14 +2825,31 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
 
     tk.Label(bar_mat_ctrl, text="Trabajador:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
     var_mat_filtro_user = tk.StringVar(value="Todos")
-    cb_mat_filtro_user = ttk.Combobox(bar_mat_ctrl, textvariable=var_mat_filtro_user, state="readonly", width=18)
+    cb_mat_filtro_user = ttk.Combobox(bar_mat_ctrl, textvariable=var_mat_filtro_user, state="readonly", width=16)
     cb_mat_filtro_user.pack(side="left", padx=(0, 10))
 
     tk.Label(bar_mat_ctrl, text="Buscar:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
     var_mat_filtro_txt = tk.StringVar()
-    e_mat_filtro_txt = tk.Entry(bar_mat_ctrl, textvariable=var_mat_filtro_txt, font=("Segoe UI", 9), width=18,
+    e_mat_filtro_txt = tk.Entry(bar_mat_ctrl, textvariable=var_mat_filtro_txt, font=("Segoe UI", 9), width=16,
                                 bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"], relief="solid", bd=1)
     e_mat_filtro_txt.pack(side="left", padx=(0, 10))
+
+    tk.Label(bar_mat_ctrl, text="Disponibilidad:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_disp_saldos = tk.StringVar(value="Todos")
+    cb_disp_saldos = ttk.Combobox(bar_mat_ctrl, textvariable=var_disp_saldos, values=["Todos", "Con Saldo (>0)", "Agotado (0)"], state="readonly", width=14)
+    cb_disp_saldos.pack(side="left", padx=(0, 10))
+
+    def limpiar_filtros_saldos():
+        var_mat_filtro_user.set("Todos")
+        var_mat_filtro_txt.set("")
+        var_disp_saldos.set("Todos")
+        cargar_tabla_materiales()
+
+    crear_boton(bar_mat_ctrl, "Limpiar Filtros", limpiar_filtros_saldos, tipo="secondary", icono="🧹", tam_fuente=8, padx=6, pady=2).pack(side="left", padx=(0, 8))
+    crear_boton(bar_mat_ctrl, "Actualizar", lambda: cargar_tabla_materiales(), tipo="secondary", icono="🔄", tam_fuente=8, padx=6, pady=2).pack(side="left", padx=(0, 8))
+
+    lbl_mat_contador = tk.Label(bar_mat_ctrl, text="", font=("Segoe UI", 8, "italic"), bg=t["bg_surface"], fg=t["text_muted"])
+    lbl_mat_contador.pack(side="right", padx=5)
 
     # 3. Notebook Secundario: Saldos vs Historial
     nb_mat = ttk.Notebook(tab_materiales)
@@ -2407,6 +2881,8 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     tree_saldos.column("Último Movimiento", width=130, anchor="center")
     tree_saldos.column("Fecha Act.", width=110, anchor="center")
 
+    sort_mgr_saldos = TreeviewSortManager(tree_saldos)
+
     sc_sal_y = ttk.Scrollbar(frame_tree_saldos, orient="vertical", command=tree_saldos.yview)
     tree_saldos.configure(yscrollcommand=sc_sal_y.set)
     tree_saldos.pack(side="left", fill="both", expand=True)
@@ -2425,6 +2901,22 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
                                 values=["Todos", "TRASLADO_BODEGA_A_OPERARIO", "DEVOLUCION_OPERARIO_A_BODEGA", "CONSUMO_VENTA", "DESPERDICIO", "ENTRADA_COMPRA"],
                                 state="readonly", width=25)
     cb_hist_tipo.pack(side="left", padx=(0, 10))
+
+    tk.Label(frame_hist_ctrl, text="Buscar:", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_main"]).pack(side="left", padx=(0, 4))
+    var_hist_busqueda = tk.StringVar()
+    e_hist_busqueda = tk.Entry(frame_hist_ctrl, textvariable=var_hist_busqueda, font=("Segoe UI", 9), width=18,
+                               bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"], relief="solid", bd=1)
+    e_hist_busqueda.pack(side="left", padx=(0, 8))
+
+    def limpiar_filtros_hist_mat():
+        var_hist_tipo.set("Todos")
+        var_hist_busqueda.set("")
+        cargar_tabla_materiales()
+
+    crear_boton(frame_hist_ctrl, "Limpiar", limpiar_filtros_hist_mat, tipo="secondary", icono="🧹", tam_fuente=8, padx=4, pady=1).pack(side="left", padx=(0, 8))
+
+    lbl_hist_contador = tk.Label(frame_hist_ctrl, text="", font=("Segoe UI", 8, "italic"), bg=t["bg_surface"], fg=t["text_muted"])
+    lbl_hist_contador.pack(side="right", padx=5)
 
     frame_tree_hist = tk.Frame(subtab_hist, bg=t["bg_surface"])
     frame_tree_hist.pack(fill="both", expand=True, padx=8, pady=(0, 8))
@@ -2446,6 +2938,8 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
     tree_hist_mat.column("Responsable", width=95, anchor="center")
     tree_hist_mat.column("Referencia", width=120, anchor="center")
     tree_hist_mat.column("Observaciones", width=200, anchor="w")
+
+    sort_mgr_hmat = TreeviewSortManager(tree_hist_mat)
 
     sc_hmat_y = ttk.Scrollbar(frame_tree_hist, orient="vertical", command=tree_hist_mat.yview)
     tree_hist_mat.configure(yscrollcommand=sc_hmat_y.set)
@@ -2472,62 +2966,113 @@ def iniciar_inventario(usuario_actual="Administrador", parent_pid="", parent=Non
         # 3. Cargar Saldos
         f_u = var_mat_filtro_user.get()
         f_t = var_mat_filtro_txt.get().strip()
+        disp_filtro = var_disp_saldos.get()
         saldos = obtener_resumen_todos_operarios(filtro_usuario=f_u, filtro_texto=f_t)
 
-        tree_saldos.delete(*tree_saldos.get_children())
+        saldos_filtrados = []
         for s in saldos:
             disp = float(s.get("stock_disponible", 0.0))
-            tag = "disponible" if disp > 0 else "agotado"
-            f_act = s.get("fecha_actualizacion") or ""
-            if " " in f_act:
-                f_act = f_act.split()[0]
-            tree_saldos.insert("", "end", values=(
-                s.get("usuario_nombre"),
-                s.get("rol", "Operario"),
-                s.get("codigo_producto"),
-                s.get("nombre_producto"),
-                s.get("unidad_medida"),
-                f"{disp:,.0f}" if disp.is_integer() else f"{disp:,.2f}",
-                f"{float(s.get('total_recibido', 0)):,.0f}",
-                f"{float(s.get('total_consumido', 0)):,.0f}",
-                f"{float(s.get('total_desperdiciado', 0)):,.0f}",
-                f"{float(s.get('total_devuelto', 0)):,.0f}",
-                s.get("ultimo_movimiento", ""),
-                f_act
-            ), tags=(tag,))
+            if disp_filtro == "Con Saldo (>0)" and disp <= 0:
+                continue
+            if disp_filtro == "Agotado (0)" and disp > 0:
+                continue
+            saldos_filtrados.append(s)
+
+        tree_saldos.delete(*tree_saldos.get_children())
+        if not saldos_filtrados:
+            insertar_estado_vacio(tree_saldos, "🔍 No se encontraron saldos de materiales para este filtro.", col_mensaje_idx=3)
+            lbl_mat_contador.config(text="0 saldos encontrados")
+        else:
+            for s in saldos_filtrados:
+                disp = float(s.get("stock_disponible", 0.0))
+                tag = "disponible" if disp > 0 else "agotado"
+                f_act = s.get("fecha_actualizacion") or ""
+                if " " in f_act:
+                    f_act = f_act.split()[0]
+                tree_saldos.insert("", "end", values=(
+                    s.get("usuario_nombre"),
+                    s.get("rol", "Operario"),
+                    s.get("codigo_producto"),
+                    s.get("nombre_producto"),
+                    s.get("unidad_medida"),
+                    f"{disp:,.0f}" if disp.is_integer() else f"{disp:,.2f}",
+                    f"{float(s.get('total_recibido', 0)):,.0f}",
+                    f"{float(s.get('total_consumido', 0)):,.0f}",
+                    f"{float(s.get('total_desperdiciado', 0)):,.0f}",
+                    f"{float(s.get('total_devuelto', 0)):,.0f}",
+                    s.get("ultimo_movimiento", ""),
+                    f_act
+                ), tags=(tag,))
+            lbl_mat_contador.config(text=f"{len(saldos_filtrados)} saldos registrados")
+            sort_mgr_saldos.registrar_datos_cargados()
 
         # 4. Cargar Historial
         tipo_h = var_hist_tipo.get()
+        f_h_busq = var_hist_busqueda.get().strip()
         historial = obtener_historial_materiales(
             filtro_usuario=f_u if f_u != "Todos" else None,
             filtro_material=f_t if f_t else None,
-            limit=250
+            limit=300
         )
-        tree_hist_mat.delete(*tree_hist_mat.get_children())
+        hist_filtrados = []
         for h in historial:
             t_mov = h.get("tipo_movimiento", "")
             if tipo_h != "Todos" and t_mov != tipo_h:
                 continue
-            cant_flt = float(h.get("cantidad", 0.0))
-            cant_fmt = f"{cant_flt:,.0f}" if cant_flt.is_integer() else f"{cant_flt:,.2f}"
-            tree_hist_mat.insert("", "end", values=(
-                h.get("id"),
-                h.get("fecha"),
-                h.get("hora"),
-                t_mov,
-                h.get("codigo_producto"),
-                h.get("nombre_producto"),
-                cant_fmt,
-                h.get("unidad_medida"),
-                h.get("ubicacion_origen"),
-                h.get("ubicacion_destino"),
-                h.get("usuario"),
-                h.get("referencia"),
-                h.get("observaciones", "")
-            ))
+            if f_h_busq:
+                campos_h = [
+                    h.get("codigo_producto"),
+                    h.get("nombre_producto"),
+                    h.get("usuario"),
+                    h.get("referencia"),
+                    h.get("observaciones"),
+                ]
+                if not coincide_busqueda(campos_h, f_h_busq):
+                    continue
+            hist_filtrados.append(h)
+
+        tree_hist_mat.delete(*tree_hist_mat.get_children())
+        if not hist_filtrados:
+            insertar_estado_vacio(tree_hist_mat, "🔍 No hay movimientos de material registrados con estos filtros.", col_mensaje_idx=5)
+            lbl_hist_contador.config(text="0 movimientos encontrados")
+        else:
+            for h in hist_filtrados:
+                t_mov = h.get("tipo_movimiento", "")
+                cant_flt = float(h.get("cantidad", 0.0))
+                cant_fmt = f"{cant_flt:,.0f}" if cant_flt.is_integer() else f"{cant_flt:,.2f}"
+                tree_hist_mat.insert("", "end", values=(
+                    h.get("id"),
+                    h.get("fecha"),
+                    h.get("hora"),
+                    t_mov,
+                    h.get("codigo_producto"),
+                    h.get("nombre_producto"),
+                    cant_fmt,
+                    h.get("unidad_medida"),
+                    h.get("ubicacion_origen"),
+                    h.get("ubicacion_destino"),
+                    h.get("usuario"),
+                    h.get("referencia"),
+                    h.get("observaciones", "")
+                ))
+            lbl_hist_contador.config(text=f"{len(hist_filtrados)} movimientos")
+            sort_mgr_hmat.registrar_datos_cargados()
 
     cb_mat_filtro_user.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_materiales())
-    e_mat_filtro_txt.bind("<KeyRelease>", lambda e: cargar_tabla_materiales())
+    cb_disp_saldos.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_materiales())
+    cb_hist_tipo.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_materiales())
+
+    _debounce_mat = [None]
+    def _on_mat_txt_change(*a):
+        if _debounce_mat[0]:
+            try:
+                ventana.after_cancel(_debounce_mat[0])
+            except Exception:
+                pass
+        _debounce_mat[0] = ventana.after(200, cargar_tabla_materiales)
+
+    var_mat_filtro_txt.trace_add("write", _on_mat_txt_change)
+    var_hist_busqueda.trace_add("write", _on_mat_txt_change)
     cb_hist_tipo.bind("<<ComboboxSelected>>", lambda e: cargar_tabla_materiales())
 
     # ==========================================================================

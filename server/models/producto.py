@@ -14,7 +14,10 @@ class Producto(Base):
     marca = Column(String, default="", nullable=True)
     unidad_medida = Column(String, default="Unidad", nullable=True)
     precio_costo = Column(Float, default=0.0, nullable=True)
+    costo = Column(Float, default=0.0, nullable=True)
     precio_venta = Column(Float, default=0.0, nullable=True)
+    precio = Column(Float, default=0.0, nullable=True)
+    tipo_producto = Column(String, default="Producto", nullable=True)
     stock = Column(Float, default=0.0)
     stock_minimo = Column(Float, default=0.0)
     stock_bodega = Column(Float, default=0.0)
@@ -31,5 +34,29 @@ class Producto(Base):
     factor_conversion_defecto = Column(Float, default=1.0)
     unidad_consumo_defecto = Column(String, default="Unidad")
     estado = Column(String, default="Activo")
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=True)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+    def __init__(self, **kwargs):
+        # Sincronización automática de alias heredados de columnas
+        pc = kwargs.get("precio_costo") if "precio_costo" in kwargs else kwargs.get("costo")
+        if pc is not None:
+            kwargs["precio_costo"] = float(pc or 0.0)
+            kwargs["costo"] = float(pc or 0.0)
+        pv = kwargs.get("precio_venta") if "precio_venta" in kwargs else kwargs.get("precio")
+        if pv is not None:
+            kwargs["precio_venta"] = float(pv or 0.0)
+            kwargs["precio"] = float(pv or 0.0)
+        super().__init__(**kwargs)
+
+    def __setattr__(self, key, value):
+        super().__setattr__(key, value)
+        if key == "precio_costo" and getattr(self, "costo", None) != value:
+            super().__setattr__("costo", value)
+        elif key == "costo" and getattr(self, "precio_costo", None) != value:
+            super().__setattr__("precio_costo", value)
+        elif key == "precio_venta" and getattr(self, "precio", None) != value:
+            super().__setattr__("precio", value)
+        elif key == "precio" and getattr(self, "precio_venta", None) != value:
+            super().__setattr__("precio_venta", value)
+

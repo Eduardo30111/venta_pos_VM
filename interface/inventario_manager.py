@@ -95,7 +95,128 @@ def _asegurar_respuesta_ok(resp) -> Any:
 # 2. CATÁLOGO UNIFICADO DE ARTÍCULOS (PRODUCTOS FÍSICOS Y SERVICIOS)
 # ==============================================================================
 
-def obtener_catalogo(filtro=None, categoria=None, tipo=None, solo_activos=False, proveedor_id=None, conn=None) -> List[Dict[str, Any]]:
+def _obtener_catalogo_sqlite_fallback(
+    tipo=None,
+    conn=None
+) -> List[Dict[str, Any]]:
+    cerrar = False
+    if conn is None:
+        try:
+            from interface.database_manager import conectar_db
+        except ImportError:
+            from database_manager import conectar_db
+        conn = conectar_db()
+        cerrar = True
+    items = []
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(productos)")
+        col_names = {r[1] for r in cur.fetchall()}
+        col_precio = "p.precio" if "precio" in col_names else ("p.precio_venta" if "precio_venta" in col_names else "0.0")
+        col_costo = "p.costo" if "costo" in col_names else ("p.precio_costo" if "precio_costo" in col_names else "0.0")
+
+        if not tipo or tipo in ("Todos", "Fisico", "Producto"):
+            sql_p = f"""
+                SELECT p.id, p.codigo, p.nombre, p.categoria, p.unidad_medida,
+                       {col_precio}, {col_costo}, p.stock, p.stock_bodega, p.stock_vitrina,
+                       p.stock_minimo_bodega, p.stock_minimo_vitrina, p.proveedor_id,
+                       p.estado, p.codigo_barras, p.descripcion, prov.nombre as prov_nombre
+                FROM productos p
+                LEFT JOIN proveedores prov ON p.proveedor_id = prov.id
+            """
+            cur.execute(sql_p)
+            for r in cur.fetchall():
+                sb = float(r[8] or 0.0)
+                sv = float(r[9] or 0.0)
+                st = float(r[7] or 0.0)
+                if sb == 0.0 and sv == 0.0 and st > 0.0:
+                    sv = st
+                else:
+                    st = round(sb + sv, 4)
+                items.append({
+                    "id": r[0],
+                    "codigo": r[1] or "",
+                    "nombre": r[2] or "",
+                    "tipo_producto": "Fisico",
+                    "categoria": r[3] or "General",
+                    "unidad_medida": r[4] or "Unidad",
+                    "precio": float(r[5] or 0.0),
+                    "precio_venta": float(r[5] or 0.0),
+                    "costo": float(r[6] or 0.0),
+                    "precio_costo": float(r[6] or 0.0),
+                    "stock": st,
+                    "stock_total": st,
+                    "stock_bodega": sb,
+                    "stock_vitrina": sv,
+                    "stock_minimo_bodega": float(r[10] if r[10] is not None else 5.0),
+                    "stock_minimo_vitrina": float(r[11] if r[11] is not None else 3.0),
+                    "proveedor_id": r[12],
+                    "proveedor_nombre": r[16] or None,
+                    "estado": r[13] or "Activo",
+                    "codigo_barras": r[14] or "",
+                    "descripcion": r[15] or "",
+                })
+
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='servicios'")
+        if cur.fetchone() and (not tipo or tipo in ("Todos", "Servicio")):
+            cur.execute("PRAGMA table_info(servicios)")
+            s_cols = {r[1] for r in cur.fetchall()}
+            s_precio = "s.precio" if "precio" in s_cols else ("s.precio_venta" if "precio_venta" in s_cols else "0.0")
+            s_costo = "s.costo" if "costo" in s_cols else ("s.costo_proveedor" if "costo_proveedor" in s_cols else "0.0")
+
+            sql_s = f"""
+                SELECT s.id, s.codigo, s.nombre, s.categoria, s.unidad_medida,
+                       {s_precio}, {s_costo}, s.proveedor_id,
+                       s.estado, s.codigo_barras, s.descripcion, prov.nombre as prov_nombre
+                FROM servicios s
+                LEFT JOIN proveedores prov ON s.proveedor_id = prov.id
+            """
+            cur.execute(sql_s)
+            for r in cur.fetchall():
+                items.append({
+                    "id": r[0],
+                    "codigo": r[1] or "",
+                    "nombre": r[2] or "",
+                    "tipo_producto": "Servicio",
+                    "categoria": r[3] or "Servicios",
+                    "unidad_medida": r[4] or "Servicio",
+                    "precio": float(r[5] or 0.0),
+                    "precio_venta": float(r[5] or 0.0),
+                    "costo": float(r[6] or 0.0),
+                    "precio_costo": float(r[6] or 0.0),
+                    "stock": 0.0,
+                    "stock_total": 0.0,
+                    "stock_bodega": 0.0,
+                    "stock_vitrina": 0.0,
+                    "stock_minimo_bodega": 0.0,
+                    "stock_minimo_vitrina": 0.0,
+                    "proveedor_id": r[7],
+                    "proveedor_nombre": r[11] or None,
+                    "estado": r[8] or "Activo",
+                    "codigo_barras": r[9] or "",
+                    "descripcion": r[10] or "",
+                })
+    except Exception as ex:
+        print(f"Advertencia en catálogo SQLite local: {ex}")
+    finally:
+        if cerrar and conn:
+            conn.close()
+    return items
+
+
+def obtener_catalogo(
+    filtro=None,
+    categoria=None,
+    tipo=None,
+    solo_activos=False,
+    estado=None,
+    proveedor_id=None,
+    proveedor=None,
+    disponibilidad=None,
+    conn=None
+) -> List[Dict[str, Any]]:
+    from interface.table_filter_sorter import normalizar_texto, coincide_busqueda
+
     params: Dict[str, Any] = {"solo_activos": bool(solo_activos)}
     if filtro:
         params["filtro"] = str(filtro).strip()
@@ -103,14 +224,89 @@ def obtener_catalogo(filtro=None, categoria=None, tipo=None, solo_activos=False,
         params["categoria"] = str(categoria).strip()
     if tipo and tipo != "Todos":
         params["tipo"] = str(tipo).strip()
+    if estado and estado != "Todos":
+        params["estado"] = str(estado).strip()
     if proveedor_id is not None:
         params["proveedor_id"] = int(proveedor_id)
+    if proveedor and proveedor != "Todos":
+        params["proveedor"] = str(proveedor).strip()
 
-    resp = api.get("/inventario/catalogo", params=params)
-    if resp.status_code == 200:
-        data = resp.json()
-        return data if isinstance(data, list) else []
-    return []
+    data = None
+    try:
+        resp = api.get("/inventario/catalogo", params=params, timeout=3.5)
+        if resp.status_code == 200:
+            res_json = resp.json()
+            if isinstance(res_json, list):
+                data = res_json
+    except Exception:
+        pass
+
+    if data is None:
+        data = _obtener_catalogo_sqlite_fallback(tipo=tipo, conn=conn)
+
+    # Filtrado minucioso en memoria para asegurar consistencia multi-criterio y búsqueda con tildes
+    resultado = []
+    cat_q = normalizar_texto(categoria) if (categoria and categoria != "Todas") else None
+    prov_q = normalizar_texto(proveedor) if (proveedor and proveedor != "Todos") else None
+    est_q = normalizar_texto(estado) if (estado and estado != "Todos") else None
+
+    for it in data:
+        # 1. Filtro Tipo
+        t_it = it.get("tipo_producto", "Fisico")
+        if tipo and tipo != "Todos" and t_it != tipo:
+            continue
+
+        # 2. Filtro Categoría
+        if cat_q and normalizar_texto(it.get("categoria")) != cat_q:
+            continue
+
+        # 3. Filtro Proveedor
+        if proveedor_id is not None and it.get("proveedor_id") != int(proveedor_id):
+            continue
+        if prov_q and normalizar_texto(it.get("proveedor_nombre")) != prov_q:
+            continue
+
+        # 4. Filtro Estado
+        it_est = str(it.get("estado", "Activo") or "Activo")
+        if solo_activos and it_est != "Activo":
+            continue
+        if est_q and normalizar_texto(it_est) != est_q:
+            continue
+
+        # 5. Filtro Disponibilidad
+        if disponibilidad and disponibilidad != "Todos":
+            st_val = float(it.get("stock", 0.0) or 0.0)
+            es_serv = (t_it == "Servicio")
+            if disponibilidad in ("En Stock (>0)", "En Stock", "Con Saldo (>0)"):
+                if es_serv or st_val <= 0:
+                    continue
+            elif disponibilidad in ("Agotado (0)", "Agotado"):
+                if es_serv or st_val > 0:
+                    continue
+            elif disponibilidad in ("Bajo Stock (≤ Mínimo)", "Bajo Stock"):
+                sm_b = float(it.get("stock_minimo_bodega") or 5.0)
+                sm_v = float(it.get("stock_minimo_vitrina") or 3.0)
+                sm_tot = max(sm_b, sm_v)
+                if es_serv or st_val <= 0 or st_val > sm_tot:
+                    continue
+
+        # 6. Búsqueda por texto (Nombre, SKU, Código de barras, Categoría, Proveedor, Descripción)
+        if filtro and str(filtro).strip():
+            campos_busqueda = [
+                it.get("codigo"),
+                it.get("nombre"),
+                it.get("codigo_barras"),
+                it.get("categoria"),
+                it.get("proveedor_nombre"),
+                it.get("descripcion"),
+                it.get("marca"),
+            ]
+            if not coincide_busqueda(campos_busqueda, str(filtro)):
+                continue
+
+        resultado.append(it)
+
+    return resultado
 
 
 def obtener_articulo_por_codigo(codigo, conn=None) -> Optional[Dict[str, Any]]:
@@ -299,30 +495,149 @@ def cambiar_estado_articulo(id_o_codigo, nuevo_estado, conn=None, tipo_producto:
 # 3. GESTIÓN DE EXISTENCIAS POR UBICACIÓN (BODEGA Y VITRINA)
 # ==============================================================================
 
-def obtener_existencias_bodega(filtro=None, categoria=None, conn=None) -> List[Dict[str, Any]]:
+def obtener_existencias_bodega(filtro=None, categoria=None, alerta=None, conn=None) -> List[Dict[str, Any]]:
+    from interface.table_filter_sorter import normalizar_texto, coincide_busqueda
     params: Dict[str, Any] = {}
     if filtro:
         params["filtro"] = str(filtro).strip()
     if categoria and categoria != "Todas":
         params["categoria"] = str(categoria).strip()
-    resp = api.get("/inventario/bodega", params=params)
-    if resp.status_code == 200:
-        data = resp.json()
-        return data if isinstance(data, list) else []
-    return []
+    data = None
+    try:
+        resp = api.get("/inventario/bodega", params=params, timeout=3.5)
+        if resp.status_code == 200:
+            res_json = resp.json()
+            if isinstance(res_json, list):
+                data = res_json
+    except Exception:
+        pass
+
+    if data is None:
+        cat_items = _obtener_catalogo_sqlite_fallback(tipo="Fisico", conn=conn)
+        data = []
+        for d in cat_items:
+            sb = float(d["stock_bodega"])
+            sm = float(d["stock_minimo_bodega"])
+            costo = float(d["costo"])
+            item = {
+                "id": d["id"],
+                "codigo": d["codigo"],
+                "nombre": d["nombre"],
+                "categoria": d["categoria"],
+                "unidad_medida": d["unidad_medida"],
+                "stock_bodega": sb,
+                "stock_minimo_bodega": sm,
+                "costo": costo,
+                "valor_total_bodega": round(sb * costo, 2),
+                "proveedor_nombre": d["proveedor_nombre"],
+                "estado": d["estado"],
+            }
+            if sb <= 0:
+                item["alerta_bodega"] = "Agotado en Bodega"
+                item["badge_color"] = "#EF4444"
+            elif sb <= sm:
+                item["alerta_bodega"] = "Stock Bajo Bodega"
+                item["badge_color"] = "#F59E0B"
+            else:
+                item["alerta_bodega"] = "Normal"
+                item["badge_color"] = "#10B981"
+            data.append(item)
+
+    resultado = []
+    cat_q = normalizar_texto(categoria) if (categoria and categoria != "Todas") else None
+    for it in data:
+        if cat_q and normalizar_texto(it.get("categoria")) != cat_q:
+            continue
+        if alerta and alerta != "Todos":
+            alt_it = it.get("alerta_bodega", "")
+            if alerta == "Normal" and alt_it != "Normal":
+                continue
+            elif alerta in ("Bajo Stock (Alerta)", "Bajo Stock") and "Bajo" not in alt_it:
+                continue
+            elif alerta in ("Agotado (0)", "Agotado") and "Agotado" not in alt_it:
+                continue
+        if filtro and str(filtro).strip():
+            campos = [it.get("codigo"), it.get("nombre"), it.get("categoria"), it.get("proveedor_nombre")]
+            if not coincide_busqueda(campos, str(filtro)):
+                continue
+        resultado.append(it)
+    return resultado
 
 
-def obtener_existencias_vitrina(filtro=None, categoria=None, conn=None) -> List[Dict[str, Any]]:
+def obtener_existencias_vitrina(filtro=None, categoria=None, alerta=None, conn=None) -> List[Dict[str, Any]]:
+    from interface.table_filter_sorter import normalizar_texto, coincide_busqueda
     params: Dict[str, Any] = {}
     if filtro:
         params["filtro"] = str(filtro).strip()
     if categoria and categoria != "Todas":
         params["categoria"] = str(categoria).strip()
-    resp = api.get("/inventario/vitrina", params=params)
-    if resp.status_code == 200:
-        data = resp.json()
-        return data if isinstance(data, list) else []
-    return []
+    data = None
+    try:
+        resp = api.get("/inventario/vitrina", params=params, timeout=3.5)
+        if resp.status_code == 200:
+            res_json = resp.json()
+            if isinstance(res_json, list):
+                data = res_json
+    except Exception:
+        pass
+
+    if data is None:
+        cat_items = _obtener_catalogo_sqlite_fallback(tipo="Fisico", conn=conn)
+        data = []
+        for d in cat_items:
+            sv = float(d["stock_vitrina"])
+            sm = float(d["stock_minimo_vitrina"])
+            sb = float(d["stock_bodega"])
+            precio = float(d["precio"])
+            costo = float(d["costo"])
+            item = {
+                "id": d["id"],
+                "codigo": d["codigo"],
+                "nombre": d["nombre"],
+                "categoria": d["categoria"],
+                "unidad_medida": d["unidad_medida"],
+                "stock_vitrina": sv,
+                "stock_minimo_vitrina": sm,
+                "stock_bodega": sb,
+                "precio": precio,
+                "costo": costo,
+                "valor_venta_vitrina": round(sv * precio, 2),
+                "estado": d["estado"],
+            }
+            if sv <= 0:
+                if sb > 0:
+                    item["alerta_vitrina"] = "Agotado (Hay en Bodega)"
+                    item["badge_color"] = "#3B82F6"
+                else:
+                    item["alerta_vitrina"] = "Agotado Global"
+                    item["badge_color"] = "#EF4444"
+            elif sv <= sm:
+                item["alerta_vitrina"] = "Reponer Vitrina"
+                item["badge_color"] = "#F59E0B"
+            else:
+                item["alerta_vitrina"] = "Disponible"
+                item["badge_color"] = "#10B981"
+            data.append(item)
+
+    resultado = []
+    cat_q = normalizar_texto(categoria) if (categoria and categoria != "Todas") else None
+    for it in data:
+        if cat_q and normalizar_texto(it.get("categoria")) != cat_q:
+            continue
+        if alerta and alerta != "Todos":
+            alt_it = it.get("alerta_vitrina", "")
+            if alerta == "Disponible" and alt_it != "Disponible":
+                continue
+            elif alerta in ("Reponer Vitrina", "Bajo Stock (Alerta)", "Bajo Stock") and "Reponer" not in alt_it:
+                continue
+            elif alerta in ("Agotado (0)", "Agotado") and "Agotado" not in alt_it:
+                continue
+        if filtro and str(filtro).strip():
+            campos = [it.get("codigo"), it.get("nombre"), it.get("categoria")]
+            if not coincide_busqueda(campos, str(filtro)):
+                continue
+        resultado.append(it)
+    return resultado
 
 
 # ==============================================================================
