@@ -1,9 +1,12 @@
 import os
+import logging
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
 from .config import settings, DEFAULT_SQLITE_URL
 from .aiosqlite_compat import asegurar_aiosqlite
+
+logger = logging.getLogger("vmpos.database")
 
 if "aiosqlite" in settings.DATABASE_URL:
     asegurar_aiosqlite()
@@ -398,6 +401,8 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                 "liquidaciones",
                 "ventas",
                 "abonos",
+                "movimientos_caja",
+                "movimientos_financieros",
             ]
             for t_nom in idem_tablas:
                 try:
@@ -409,19 +414,21 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                         cur.execute(f"ALTER TABLE {t_nom} ADD COLUMN observaciones TEXT DEFAULT '';")
                     if t_cols and "created_at" not in t_cols:
                         cur.execute(f"ALTER TABLE {t_nom} ADD COLUMN created_at TIMESTAMP;")
-                except Exception:
-                    pass
+                except Exception as e_mig_col:
+                    if "duplicate column" not in str(e_mig_col).lower():
+                        logger.debug("Aviso columna en %s: %s", t_nom, e_mig_col)
             for t_nom in idem_tablas:
                 try:
                     cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{t_nom}_idempotency_key ON {t_nom}(idempotency_key);")
-                except Exception:
-                    pass
+                except Exception as e_mig_idx:
+                    if "already exists" not in str(e_mig_idx).lower():
+                        logger.debug("Aviso índice en %s: %s", t_nom, e_mig_idx)
 
             conn.commit()
         finally:
             conn.close()
     except Exception as e_mig:
-        print(f"Aviso en migración SQLite directa: {e_mig}")
+        logger.warning("Aviso en migración SQLite directa: %s", e_mig)
 
 
 def asegurar_migraciones_sqlite(db_url_or_path: str = None):
@@ -503,15 +510,16 @@ def _crear_engine(db_url: str):
                                     cursor.execute(f"ALTER TABLE proveedores ADD COLUMN {c_nom} {c_def};")
                                 except Exception:
                                     pass
-                    for t_nom in ("compras_inventario", "movimientos_inventario", "traslados_inventario", "gastos", "liquidaciones_proveedores", "liquidaciones", "ventas", "abonos"):
+                    for t_nom in ("compras_inventario", "movimientos_inventario", "traslados_inventario", "gastos", "liquidaciones_proveedores", "liquidaciones", "ventas", "abonos", "movimientos_caja", "movimientos_financieros"):
                         try:
                             cursor.execute(f"PRAGMA table_info({t_nom});")
                             t_cols = {r[1] for r in cursor.fetchall()}
                             if t_cols and "idempotency_key" not in t_cols:
                                 cursor.execute(f"ALTER TABLE {t_nom} ADD COLUMN idempotency_key TEXT;")
                                 cursor.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{t_nom}_idempotency_key ON {t_nom}(idempotency_key);")
-                        except Exception:
-                            pass
+                        except Exception as e_prg:
+                            if "duplicate column" not in str(e_prg).lower() and "already exists" not in str(e_prg).lower():
+                                logger.debug("Aviso pragma idempotencia %s: %s", t_nom, e_prg)
                     dbapi_connection.commit()
                 except Exception:
                     pass

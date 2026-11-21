@@ -635,7 +635,8 @@ def inicializar_base_datos(db_path=None):
         # 22.B Idempotencia Global en SQLite Local (Deduplicación atómica garantizada)
         for tabla_idem in [
             "ventas", "compras_inventario", "gastos", "liquidaciones_proveedores",
-            "movimientos_inventario", "traslados_inventario", "pagos_venta", "historial_liquidaciones"
+            "movimientos_inventario", "traslados_inventario", "pagos_venta", "historial_liquidaciones",
+            "movimientos_caja", "movimientos_financieros"
         ]:
             try:
                 cursor.execute(f"ALTER TABLE {tabla_idem} ADD COLUMN idempotency_key TEXT")

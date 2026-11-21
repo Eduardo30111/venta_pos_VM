@@ -1,9 +1,11 @@
+import asyncio
 from datetime import datetime
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, cast, String, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
 
 from ..database import get_db
@@ -14,8 +16,11 @@ from ..services.caja_service import CajaService
 from ..services.venta_service import VentaService
 from ..middleware.auth import get_current_user
 from ..models.usuario import Usuario
+from ..async_lock import LazyAsyncLock
 
 router = APIRouter(prefix="/proveedores", tags=["proveedores"])
+
+_LIQUIDACION_PROV_LOCK = LazyAsyncLock()
 
 
 class LiquidarProveedorRequest(BaseModel):
@@ -392,161 +397,181 @@ async def liquidar_proveedor(
 ) -> Dict[str, Any]:
     # Idempotencia estricta para pagos de liquidaciones a proveedores
     idem_clean = (getattr(req, "idempotency_key", None) or "").strip() or None
-    if idem_clean:
-        res_liq = await db.execute(select(LiquidacionProveedor).where(LiquidacionProveedor.idempotency_key == idem_clean))
-        liq_existente = res_liq.scalars().first()
-        if liq_existente:
+    async with _LIQUIDACION_PROV_LOCK:
+        try:
+            if idem_clean:
+                res_liq = await db.execute(select(LiquidacionProveedor).where(LiquidacionProveedor.idempotency_key == idem_clean))
+                liq_existente = res_liq.scalars().first()
+                if liq_existente:
+                    return {
+                        "ok": True,
+                        "exito": True,
+                        "liquidacion_id": liq_existente.id,
+                        "numero_recibo": f"LQ-{liq_existente.id:05d}",
+                        "monto_pagado": float(liq_existente.monto_pagado or 0.0),
+                        "saldo_restante": float(liq_existente.saldo_restante or 0.0),
+                        "metodo_pago": liq_existente.metodo_pago or "Efectivo",
+                        "cuentas_afectadas": 0,
+                        "repetido": True,
+                    }
+
+            res_p = await db.execute(select(Proveedor).with_for_update().where(Proveedor.id == id))
+            prov = res_p.scalars().first()
+            if not prov and req.proveedor_nombre:
+                res_p_nom = await db.execute(
+                    select(Proveedor).with_for_update().where(func.lower(Proveedor.nombre) == func.lower(req.proveedor_nombre.strip()))
+                )
+                prov = res_p_nom.scalars().first()
+
+            if not prov:
+                prov = Proveedor(
+                    id=id,
+                    nombre=req.proveedor_nombre.strip() if req.proveedor_nombre else f"Proveedor #{id}",
+                    documento_nit=req.documento_nit or "",
+                    saldo_acumulado=float(req.monto or 0.0),
+                    estado="Activo"
+                )
+                db.add(prov)
+                await db.flush()
+
+            await _sincronizar_cxp_retroactivas_server(db, id)
+
+            p_str = str(id)
+            res_cxp = await db.execute(
+                select(CuentaPorPagar)
+                .with_for_update()
+                .where(
+                    (CuentaPorPagar.proveedor_id == id) |
+                    (cast(CuentaPorPagar.proveedor_id, String) == p_str) |
+                    (cast(CuentaPorPagar.proveedor_id, String).like(f"{p_str} - %")),
+                    CuentaPorPagar.estado.in_(["Pendiente", "Parcial"]),
+                    CuentaPorPagar.saldo_pendiente > 0,
+                )
+                .order_by(CuentaPorPagar.id.asc())
+            )
+            pendientes = res_cxp.scalars().all()
+            saldo_total = round(sum(float(c.saldo_pendiente or 0.0) for c in pendientes), 2)
+            if saldo_total <= 0.009:
+                if float(prov.saldo_acumulado or 0.0) > 0.009:
+                    saldo_total = round(float(prov.saldo_acumulado), 2)
+                else:
+                    raise HTTPException(status_code=400, detail="El proveedor no tiene saldo pendiente por liquidar.")
+
+            monto_pagar = round(float(req.monto if req.monto is not None else saldo_total), 2)
+            if monto_pagar <= 0:
+                raise HTTPException(status_code=400, detail="El monto a liquidar debe ser mayor a cero.")
+            if monto_pagar > saldo_total + 0.01:
+                raise HTTPException(status_code=400, detail=f"El monto excede el saldo pendiente (${saldo_total:,.0f}).")
+
+            metodo = "Efectivo" if (req.metodo_pago or "").strip().lower() == "efectivo" else "Transferencia"
+            ahora = datetime.now()
+            f_str = ahora.strftime("%Y-%m-%d")
+            h_str = ahora.strftime("%H:%M:%S")
+            u_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
+
+            remanente = monto_pagar
+            cuentas_afectadas = 0
+            for c in pendientes:
+                if remanente <= 0.001:
+                    break
+                ab = min(remanente, float(c.saldo_pendiente or 0.0))
+                c.monto_pagado = round(float(c.monto_pagado or 0.0) + ab, 2)
+                c.saldo_pendiente = round(max(0.0, float(c.saldo_pendiente or 0.0) - ab), 2)
+                c.estado = "Pagada" if c.saldo_pendiente <= 0.009 else "Parcial"
+                remanente = round(remanente - ab, 2)
+                cuentas_afectadas += 1
+
+            if not pendientes:
+                prov.saldo_acumulado = max(0.0, round(float(prov.saldo_acumulado or 0.0) - monto_pagar, 2))
+                prov.total_pagado = round(float(prov.total_pagado or 0.0) + monto_pagar, 2)
+
+            ref_val = (req.comprobante or req.referencia or "").strip()
+
+            gasto = Gasto(
+                concepto=f"Liquidación proveedor: {prov.nombre}",
+                categoria="Operativo diario",
+                clasificacion="Operativo diario",
+                descripcion=req.observaciones or f"Liquidación servicios proveedor {prov.nombre}",
+                valor=monto_pagar,
+                fecha=f_str,
+                hora=h_str,
+                fecha_pago=f"{f_str} {h_str}",
+                estado="Pagado",
+                metodo_pago=metodo,
+                tipo="Proveedor",
+                proveedor=prov.nombre,
+                comprobante=ref_val,
+                usuario_id=current_user.id,
+                usuario_nombre=u_nom,
+                observacion=req.observaciones or "",
+            )
+            db.add(gasto)
+            await db.flush()
+
+            cuenta_af = "CAJA_FISICA" if metodo == "Efectivo" else "BANCO_TRANSFERENCIA"
+            mf = await CajaService.registrar_movimiento_financiero(
+                db=db,
+                tipo="PAGO_PROVEEDOR",
+                concepto=f"Liquidación proveedor {prov.nombre}",
+                monto=monto_pagar,
+                metodo_pago=metodo,
+                cuenta_afectada=cuenta_af,
+                usuario=u_nom,
+                referencia_origen=f"PROVEEDOR-{prov.id}",
+                observaciones=req.observaciones or "",
+                sincronizar_caja=(metodo == "Efectivo"),
+                fecha_str=f_str,
+                hora_str=h_str,
+            )
+
+            num_liq = f"LIQ-PROV-{ahora.strftime('%Y%m%d%H%M%S')}-{prov.id}"
+            saldo_restante_final = max(0.0, round(saldo_total - monto_pagar, 2))
+            liq = LiquidacionProveedor(
+                numero_liquidacion=num_liq,
+                proveedor_id=prov.id,
+                proveedor_nombre=prov.nombre,
+                fecha=f_str,
+                hora=h_str,
+                monto_pagado=monto_pagar,
+                metodo_pago=metodo,
+                referencia=ref_val,
+                saldo_anterior=saldo_total,
+                saldo_restante=saldo_restante_final,
+                usuario=u_nom,
+                observaciones=req.observaciones or "",
+                estado="Completada",
+                idempotency_key=idem_clean,
+            )
+            db.add(liq)
+            await db.flush()
+            await VentaService._recalcular_acumulados_proveedor(db, prov.id)
+            await db.commit()
+
             return {
                 "ok": True,
                 "exito": True,
-                "liquidacion_id": liq_existente.id,
-                "numero_recibo": f"LQ-{liq_existente.id:05d}",
-                "monto_pagado": float(liq_existente.monto_pagado or 0.0),
-                "saldo_restante": float(liq_existente.saldo_restante or 0.0),
-                "metodo_pago": liq_existente.metodo_pago or "Efectivo",
-                "cuentas_afectadas": 0,
-                "repetido": True,
+                "liquidacion_id": liq.id,
+                "numero_recibo": f"LQ-{liq.id:05d}",
+                "monto_pagado": monto_pagar,
+                "saldo_restante": float(prov.saldo_acumulado or 0.0),
+                "metodo_pago": metodo,
+                "cuentas_afectadas": len([c for c in pendientes if (float(c.monto_pagado or 0.0) > 0)]),
             }
-
-    res_p = await db.execute(select(Proveedor).with_for_update().where(Proveedor.id == id))
-    prov = res_p.scalars().first()
-    if not prov and req.proveedor_nombre:
-        res_p_nom = await db.execute(
-            select(Proveedor).with_for_update().where(func.lower(Proveedor.nombre) == func.lower(req.proveedor_nombre.strip()))
-        )
-        prov = res_p_nom.scalars().first()
-
-    if not prov:
-        prov = Proveedor(
-            id=id,
-            nombre=req.proveedor_nombre.strip() if req.proveedor_nombre else f"Proveedor #{id}",
-            documento_nit=req.documento_nit or "",
-            saldo_acumulado=float(req.monto or 0.0),
-            estado="Activo"
-        )
-        db.add(prov)
-        await db.flush()
-
-    await _sincronizar_cxp_retroactivas_server(db, id)
-
-    p_str = str(id)
-    res_cxp = await db.execute(
-        select(CuentaPorPagar)
-        .with_for_update()
-        .where(
-            (CuentaPorPagar.proveedor_id == id) |
-            (cast(CuentaPorPagar.proveedor_id, String) == p_str) |
-            (cast(CuentaPorPagar.proveedor_id, String).like(f"{p_str} - %")),
-            CuentaPorPagar.estado.in_(["Pendiente", "Parcial"]),
-            CuentaPorPagar.saldo_pendiente > 0,
-        )
-        .order_by(CuentaPorPagar.id.asc())
-    )
-    pendientes = res_cxp.scalars().all()
-    saldo_total = round(sum(float(c.saldo_pendiente or 0.0) for c in pendientes), 2)
-    if saldo_total <= 0.009:
-        if float(prov.saldo_acumulado or 0.0) > 0.009:
-            saldo_total = round(float(prov.saldo_acumulado), 2)
-        else:
-            raise HTTPException(status_code=400, detail="El proveedor no tiene saldo pendiente por liquidar.")
-
-    monto_pagar = round(float(req.monto if req.monto is not None else saldo_total), 2)
-    if monto_pagar <= 0:
-        raise HTTPException(status_code=400, detail="El monto a liquidar debe ser mayor a cero.")
-    if monto_pagar > saldo_total + 0.01:
-        raise HTTPException(status_code=400, detail=f"El monto excede el saldo pendiente (${saldo_total:,.0f}).")
-
-    metodo = "Efectivo" if (req.metodo_pago or "").strip().lower() == "efectivo" else "Transferencia"
-    ahora = datetime.now()
-    f_str = ahora.strftime("%Y-%m-%d")
-    h_str = ahora.strftime("%H:%M:%S")
-    u_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
-
-    remanente = monto_pagar
-    cuentas_afectadas = 0
-    for c in pendientes:
-        if remanente <= 0.001:
-            break
-        ab = min(remanente, float(c.saldo_pendiente or 0.0))
-        c.monto_pagado = round(float(c.monto_pagado or 0.0) + ab, 2)
-        c.saldo_pendiente = round(max(0.0, float(c.saldo_pendiente or 0.0) - ab), 2)
-        c.estado = "Pagada" if c.saldo_pendiente <= 0.009 else "Parcial"
-        remanente = round(remanente - ab, 2)
-        cuentas_afectadas += 1
-
-    if not pendientes:
-        prov.saldo_acumulado = max(0.0, round(float(prov.saldo_acumulado or 0.0) - monto_pagar, 2))
-        prov.total_pagado = round(float(prov.total_pagado or 0.0) + monto_pagar, 2)
-
-    ref_val = (req.comprobante or req.referencia or "").strip()
-
-    gasto = Gasto(
-        concepto=f"Liquidación proveedor: {prov.nombre}",
-        categoria="Operativo diario",
-        clasificacion="Operativo diario",
-        descripcion=req.observaciones or f"Liquidación servicios proveedor {prov.nombre}",
-        valor=monto_pagar,
-        fecha=f_str,
-        hora=h_str,
-        fecha_pago=f"{f_str} {h_str}",
-        estado="Pagado",
-        metodo_pago=metodo,
-        tipo="Proveedor",
-        proveedor=prov.nombre,
-        comprobante=ref_val,
-        usuario_id=current_user.id,
-        usuario_nombre=u_nom,
-        observacion=req.observaciones or "",
-    )
-    db.add(gasto)
-    await db.flush()
-
-    cuenta_af = "CAJA_FISICA" if metodo == "Efectivo" else "BANCO_TRANSFERENCIA"
-    mf = await CajaService.registrar_movimiento_financiero(
-        db=db,
-        tipo="PAGO_PROVEEDOR",
-        concepto=f"Liquidación proveedor {prov.nombre}",
-        monto=monto_pagar,
-        metodo_pago=metodo,
-        cuenta_afectada=cuenta_af,
-        usuario=u_nom,
-        referencia_origen=f"PROVEEDOR-{prov.id}",
-        observaciones=req.observaciones or "",
-        sincronizar_caja=(metodo == "Efectivo"),
-        fecha_str=f_str,
-        hora_str=h_str,
-    )
-
-    num_liq = f"LIQ-PROV-{ahora.strftime('%Y%m%d%H%M%S')}-{prov.id}"
-    saldo_restante_final = max(0.0, round(saldo_total - monto_pagar, 2))
-    liq = LiquidacionProveedor(
-        numero_liquidacion=num_liq,
-        proveedor_id=prov.id,
-        proveedor_nombre=prov.nombre,
-        fecha=f_str,
-        hora=h_str,
-        monto_pagado=monto_pagar,
-        metodo_pago=metodo,
-        referencia=ref_val,
-        saldo_anterior=saldo_total,
-        saldo_restante=saldo_restante_final,
-        usuario=u_nom,
-        observaciones=req.observaciones or "",
-        estado="Completada",
-        idempotency_key=idem_clean,
-    )
-    db.add(liq)
-    await db.flush()
-    await VentaService._recalcular_acumulados_proveedor(db, prov.id)
-    await db.commit()
-
-    return {
-        "ok": True,
-        "exito": True,
-        "liquidacion_id": liq.id,
-        "numero_recibo": f"LQ-{liq.id:05d}",
-        "monto_pagado": monto_pagar,
-        "saldo_restante": float(prov.saldo_acumulado or 0.0),
-        "metodo_pago": metodo,
-        "cuentas_afectadas": len([c for c in pendientes if (float(c.monto_pagado or 0.0) > 0)]),
-    }
+        except IntegrityError:
+            await db.rollback()
+            if idem_clean:
+                res_liq = await db.execute(select(LiquidacionProveedor).where(LiquidacionProveedor.idempotency_key == idem_clean))
+                liq_existente = res_liq.scalars().first()
+                if liq_existente:
+                    return {
+                        "ok": True,
+                        "exito": True,
+                        "liquidacion_id": liq_existente.id,
+                        "numero_recibo": f"LQ-{liq_existente.id:05d}",
+                        "monto_pagado": float(liq_existente.monto_pagado or 0.0),
+                        "saldo_restante": float(liq_existente.saldo_restante or 0.0),
+                        "metodo_pago": liq_existente.metodo_pago or "Efectivo",
+                        "cuentas_afectadas": 0,
+                        "repetido": True,
+                    }
+            raise HTTPException(status_code=409, detail="Conflicto de concurrencia al liquidar proveedor.")

@@ -1,8 +1,10 @@
+import asyncio
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from typing import Optional, List, Dict, Any
 
 from ..database import get_db
@@ -10,8 +12,11 @@ from ..models.caja import SesionCaja, MovimientoCaja, MovimientoFinanciero
 from ..services.caja_service import CajaService
 from ..middleware.auth import get_current_user
 from ..models.usuario import Usuario
+from ..async_lock import LazyAsyncLock
 
 router = APIRouter(prefix="/caja", tags=["caja"])
+
+_CAJA_LOCK = LazyAsyncLock()
 
 
 class AbrirCajaRequest(BaseModel):
@@ -41,6 +46,7 @@ class MovimientoCajaCreateRequest(BaseModel):
     descripcion: Optional[str] = ""
     sesion_id: Optional[int] = None
     sincronizar_financiero: bool = True
+    idempotency_key: Optional[str] = None
 
 
 class MovimientoFinancieroCreateRequest(BaseModel):
@@ -56,6 +62,7 @@ class MovimientoFinancieroCreateRequest(BaseModel):
     estado: str = "Activo"
     sincronizar_caja: bool = True
     terminal: Optional[str] = "CAJA-01"
+    idempotency_key: Optional[str] = None
 
 
 class IngresoAutorizadoRequest(BaseModel):
@@ -241,20 +248,32 @@ async def post_movimiento_caja(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    u_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
-    mov = await CajaService.registrar_movimiento_caja(
-        db=db,
-        tipo=req.tipo,
-        monto=req.monto,
-        usuario=u_nom,
-        terminal=req.terminal or "CAJA-01",
-        referencia_id=req.referencia_id,
-        descripcion=req.descripcion or "",
-        sesion_id=req.sesion_id,
-        sincronizar_financiero=req.sincronizar_financiero,
-    )
-    await db.commit()
-    return {"ok": True, "id": mov.id}
+    idem_clean = (getattr(req, "idempotency_key", None) or "").strip() or None
+    async with _CAJA_LOCK:
+        try:
+            u_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+            mov = await CajaService.registrar_movimiento_caja(
+                db=db,
+                tipo=req.tipo,
+                monto=req.monto,
+                usuario=u_nom,
+                terminal=req.terminal or "CAJA-01",
+                referencia_id=req.referencia_id,
+                descripcion=req.descripcion or "",
+                sesion_id=req.sesion_id,
+                sincronizar_financiero=req.sincronizar_financiero,
+                idempotency_key=idem_clean,
+            )
+            await db.commit()
+            return {"ok": True, "id": mov.id}
+        except IntegrityError:
+            await db.rollback()
+            if idem_clean:
+                res_m = await db.execute(select(MovimientoCaja).where(MovimientoCaja.idempotency_key == idem_clean))
+                m_existente = res_m.scalars().first()
+                if m_existente:
+                    return {"ok": True, "id": m_existente.id, "repetido": True}
+            raise HTTPException(status_code=409, detail="Conflicto de concurrencia en movimiento de caja.")
 
 
 @router.post("/movimientos-financieros")
@@ -263,24 +282,36 @@ async def post_movimiento_financiero(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    u_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
-    mf = await CajaService.registrar_movimiento_financiero(
-        db=db,
-        tipo=req.tipo,
-        concepto=req.concepto,
-        monto=req.monto,
-        metodo_pago=req.metodo_pago,
-        cuenta_afectada=req.cuenta_afectada,
-        usuario=u_nom,
-        referencia_origen=req.referencia_origen or "",
-        sesion_id=req.sesion_id,
-        observaciones=req.observaciones or "",
-        estado=req.estado,
-        sincronizar_caja=req.sincronizar_caja,
-        terminal=req.terminal or "CAJA-01",
-    )
-    await db.commit()
-    return {"ok": True, "id": mf.id}
+    idem_clean = (getattr(req, "idempotency_key", None) or "").strip() or None
+    async with _CAJA_LOCK:
+        try:
+            u_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+            mf = await CajaService.registrar_movimiento_financiero(
+                db=db,
+                tipo=req.tipo,
+                concepto=req.concepto,
+                monto=req.monto,
+                metodo_pago=req.metodo_pago,
+                cuenta_afectada=req.cuenta_afectada,
+                usuario=u_nom,
+                referencia_origen=req.referencia_origen or "",
+                sesion_id=req.sesion_id,
+                observaciones=req.observaciones or "",
+                estado=req.estado,
+                sincronizar_caja=req.sincronizar_caja,
+                terminal=req.terminal or "CAJA-01",
+                idempotency_key=idem_clean,
+            )
+            await db.commit()
+            return {"ok": True, "id": mf.id}
+        except IntegrityError:
+            await db.rollback()
+            if idem_clean:
+                res_mf = await db.execute(select(MovimientoFinanciero).where(MovimientoFinanciero.idempotency_key == idem_clean))
+                mf_existente = res_mf.scalars().first()
+                if mf_existente:
+                    return {"ok": True, "id": mf_existente.id, "repetido": True}
+            raise HTTPException(status_code=409, detail="Conflicto de concurrencia en movimiento financiero.")
 
 
 @router.post("/ingresos-autorizados")

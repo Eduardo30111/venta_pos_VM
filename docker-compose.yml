@@ -23,7 +23,7 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@vmpos-db:5432/vmpos
-      - SECRET_KEY=supersecretkey
+      - VMPOS_SECRET_KEY=${VMPOS_SECRET_KEY:-}
     volumes:
       - ./server:/app/server
     depends_on:

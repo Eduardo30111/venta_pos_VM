@@ -13,21 +13,7 @@ from ..models.usuario import Usuario
 from ..middleware.audit import log_audit
 from .caja_service import CajaService
 
-class _LazyAsyncLock:
-    def __init__(self):
-        self._lock: Optional[asyncio.Lock] = None
-
-    def _get_lock(self) -> asyncio.Lock:
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        return self._lock
-
-    async def __aenter__(self):
-        return await self._get_lock().__aenter__()
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        return await self._get_lock().__aexit__(exc_type, exc_val, exc_tb)
-
+from ..async_lock import LazyAsyncLock as _LazyAsyncLock
 
 _ABONO_LOCK = _LazyAsyncLock()
 

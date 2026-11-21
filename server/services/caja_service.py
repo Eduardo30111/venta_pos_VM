@@ -139,7 +139,14 @@ class CajaService:
         sincronizar_financiero: bool = True,
         fecha_str: Optional[str] = None,
         hora_str: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> MovimientoCaja:
+        if idempotency_key:
+            res_m = await db.execute(select(MovimientoCaja).where(MovimientoCaja.idempotency_key == idempotency_key))
+            existente = res_m.scalars().first()
+            if existente:
+                return existente
+
         ahora = datetime.now()
         f_str = fecha_str or ahora.strftime("%Y-%m-%d")
         h_str = hora_str or ahora.strftime("%H:%M:%S")
@@ -167,6 +174,7 @@ class CajaService:
             terminal=terminal or "CAJA-01",
             referencia_id=str(referencia_id or ""),
             descripcion=descripcion or f"Movimiento {tipo}",
+            idempotency_key=idempotency_key,
         )
         db.add(mov)
         await db.flush()
@@ -182,6 +190,7 @@ class CajaService:
                 "DEVOLUCION_VENTA": "DEVOLUCION_VENTA",
             }
             tipo_f = tipo_fin_map.get(tipo, "AJUSTE_AUTORIZADO")
+            fin_idem = f"fin:{idempotency_key}" if idempotency_key else None
             mf = MovimientoFinanciero(
                 fecha=f_str,
                 hora=h_str,
@@ -195,6 +204,7 @@ class CajaService:
                 sesion_caja_id=sesion_id,
                 estado="Activo",
                 observaciones=f"Sincronizado desde caja física #{mov.id}",
+                idempotency_key=fin_idem,
             )
             db.add(mf)
             await db.flush()
@@ -218,7 +228,14 @@ class CajaService:
         terminal: str = "CAJA-01",
         fecha_str: Optional[str] = None,
         hora_str: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> MovimientoFinanciero:
+        if idempotency_key:
+            res_mf = await db.execute(select(MovimientoFinanciero).where(MovimientoFinanciero.idempotency_key == idempotency_key))
+            existente = res_mf.scalars().first()
+            if existente:
+                return existente
+
         ahora = datetime.now()
         f_str = fecha_str or ahora.strftime("%Y-%m-%d")
         h_str = hora_str or ahora.strftime("%H:%M:%S")
@@ -249,6 +266,7 @@ class CajaService:
             sesion_caja_id=sesion_id,
             estado=str(estado or "Activo"),
             observaciones=str(observaciones or ""),
+            idempotency_key=idempotency_key,
         )
         db.add(mf)
         await db.flush()

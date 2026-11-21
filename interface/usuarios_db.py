@@ -7,8 +7,15 @@ Módulo para la gestión de la base de datos de usuarios del sistema VmPOS.
 
 import sqlite3
 import hashlib
+import hmac
 import os
 from datetime import datetime
+
+try:
+    import bcrypt
+    _HAS_BCRYPT = True
+except ImportError:
+    _HAS_BCRYPT = False
 
 # Importar ruta de configuración centralizada
 try:
@@ -27,9 +34,34 @@ MODULOS_DISPONIBLES = [
 
 def hash_password(password):
     """
-    Genera un hash SHA-256 de la contraseña.
+    Genera un hash seguro bcrypt rounds=12 (o SHA-256 si bcrypt no está instalado).
     """
-    return hashlib.sha256(password.encode()).hexdigest()
+    if not password:
+        return ""
+    if _HAS_BCRYPT:
+        salt = bcrypt.gensalt(rounds=12)
+        return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+def verificar_password(password_plana, hash_almacenado):
+    """
+    Verifica una contraseña contra hash bcrypt ($2b$, $2a$), sha256 o texto plano legado.
+    Utiliza comparación en tiempo constante para evitar ataques de temporización.
+    """
+    if not password_plana or not hash_almacenado:
+        return False
+    hash_str = str(hash_almacenado).strip()
+    if hash_str.startswith("$2b$") or hash_str.startswith("$2a$"):
+        if _HAS_BCRYPT:
+            try:
+                return bcrypt.checkpw(password_plana.encode("utf-8"), hash_str.encode("utf-8"))
+            except Exception:
+                return False
+        return False
+    if len(hash_str) == 64:
+        calc_sha = hashlib.sha256(password_plana.encode("utf-8")).hexdigest()
+        return hmac.compare_digest(calc_sha, hash_str)
+    return hmac.compare_digest(password_plana, hash_str)
 
 def crear_tablas_iniciales():
     """
@@ -249,42 +281,51 @@ def eliminar_usuario_db(id_usuario):
 def obtener_usuario_por_credenciales(usuario, password):
     """
     Verifica las credenciales de un usuario y retorna su información.
+    Soporta contraseñas con hash bcrypt, sha256 y texto plano legado.
+    Realiza rehash automático a bcrypt si la contraseña verificada era legada.
     """
     try:
         conn = sqlite3.connect(DATABASE_PATH)
         cursor = conn.cursor()
         
-        password_hash = hash_password(password)
         cursor.execute('''
-            SELECT id, usuario, rol, estado, ultimo_acceso, fecha_registro, comision_porcentaje, comisiones_acumuladas
+            SELECT id, usuario, rol, estado, ultimo_acceso, fecha_registro, comision_porcentaje, comisiones_acumuladas, password
             FROM usuarios
-            WHERE usuario = ? AND password = ? AND estado = 'Activo'
-        ''', (usuario, password_hash))
+            WHERE usuario = ? AND estado = 'Activo'
+        ''', (usuario,))
         
         resultado = cursor.fetchone()
         
         if resultado:
-            # Actualizar último acceso
-            cursor.execute('''
-                UPDATE usuarios SET ultimo_acceso = ?
-                WHERE id = ?
-            ''', (datetime.now(), resultado[0]))
-            conn.commit()
-            
-            usuario_info = {
-                'id': resultado[0],
-                'usuario': resultado[1],
-                'rol': resultado[2],
-                'estado': resultado[3],
-                'ultimo_acceso': resultado[4],
-                'fecha_registro': resultado[5],
-                'permisos': resultado[2].lower(),  # Para compatibilidad con el sistema existente
-                'comision_porcentaje': resultado[6] if resultado[6] is not None else 0.0,
-                'comisiones_acumuladas': resultado[7] if resultado[7] is not None else 0.0
-            }
-            
-            conn.close()
-            return usuario_info
+            uid, u_nom, rol, estado, u_acc, f_reg, com_pct, com_acum, pass_guardada = resultado
+            if verificar_password(password, pass_guardada):
+                # Rehash automático a bcrypt si era plano o SHA-256
+                pass_str = str(pass_guardada or "")
+                if not (pass_str.startswith("$2b$") or pass_str.startswith("$2a$")) and _HAS_BCRYPT:
+                    nuevo_hash = hash_password(password)
+                    cursor.execute("UPDATE usuarios SET password = ?, fecha_modificacion = ? WHERE id = ?", (nuevo_hash, datetime.now(), uid))
+
+                # Actualizar último acceso
+                cursor.execute('''
+                    UPDATE usuarios SET ultimo_acceso = ?
+                    WHERE id = ?
+                ''', (datetime.now(), uid))
+                conn.commit()
+                
+                usuario_info = {
+                    'id': uid,
+                    'usuario': u_nom,
+                    'rol': rol,
+                    'estado': estado,
+                    'ultimo_acceso': u_acc,
+                    'fecha_registro': f_reg,
+                    'permisos': rol.lower(),
+                    'comision_porcentaje': com_pct if com_pct is not None else 0.0,
+                    'comisiones_acumuladas': com_acum if com_acum is not None else 0.0
+                }
+                
+                conn.close()
+                return usuario_info
         
         conn.close()
         return None

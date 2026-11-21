@@ -41,6 +41,7 @@ class MovimientoCaja(Base):
     terminal = Column(String, nullable=True)
     referencia_id = Column(String, nullable=True)
     descripcion = Column(String, nullable=True)
+    idempotency_key = Column(String, unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -59,4 +60,5 @@ class MovimientoFinanciero(Base):
     sesion_caja_id = Column(Integer, ForeignKey("sesiones_caja.id"), nullable=True, index=True)
     estado = Column(String, default="Activo")  # Activo / Anulado
     observaciones = Column(String, nullable=True)
+    idempotency_key = Column(String, unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

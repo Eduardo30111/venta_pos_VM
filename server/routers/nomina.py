@@ -1,6 +1,8 @@
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
 from datetime import datetime, date
 from sqlalchemy import func
@@ -12,8 +14,11 @@ from ..models.usuario import Usuario
 from ..models.venta import Venta, DetalleVenta
 from ..schemas.nomina import ComisionResponse, AsistenciaCreate, AsistenciaResponse, LiquidacionCreate, LiquidacionResponse
 from ..middleware.auth import get_current_user
+from ..async_lock import LazyAsyncLock
 
 router = APIRouter(prefix="/nomina", tags=["nomina"])
+
+_LIQ_NOMINA_LOCK = LazyAsyncLock()
 
 @router.get("/mi-recaudo")
 async def get_mi_recaudo(db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
@@ -245,89 +250,108 @@ async def get_asistencias(fecha: str, db: AsyncSession = Depends(get_db), curren
 
 @router.post("/liquidaciones", response_model=LiquidacionResponse)
 async def create_liquidacion(liq: LiquidacionCreate, db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
-    try:
-        # Idempotencia estricta para liquidaciones de nómina
-        idem_clean = (getattr(liq, "idempotency_key", None) or "").strip() or None
-        if idem_clean:
-            res_l = await db.execute(select(Liquidacion).where(Liquidacion.idempotency_key == idem_clean))
-            l_existente = res_l.scalars().first()
-            if l_existente:
-                usr_res = await db.execute(select(Usuario).where(Usuario.id == l_existente.usuario_id))
-                target_user = usr_res.scalars().first()
-                nombre_emp = f"{target_user.nombre or ''} {target_user.apellidos or ''}".strip() if target_user else f"Usuario {l_existente.usuario_id}"
-                l_existente.nombre_persona = nombre_emp
-                l_existente.monto = float(l_existente.total_liquidado or 0.0)
-                l_existente.fecha = l_existente.created_at.strftime("%Y-%m-%d %H:%M") if l_existente.created_at else ""
-                l_existente.mes_anio = l_existente.created_at.strftime("%m-%Y") if l_existente.created_at else ""
-                return l_existente
+    idem_clean = (getattr(liq, "idempotency_key", None) or "").strip() or None
+    async with _LIQ_NOMINA_LOCK:
+        try:
+            # Idempotencia estricta para liquidaciones de nómina
+            if idem_clean:
+                res_l = await db.execute(select(Liquidacion).where(Liquidacion.idempotency_key == idem_clean))
+                l_existente = res_l.scalars().first()
+                if l_existente:
+                    usr_res = await db.execute(select(Usuario).where(Usuario.id == l_existente.usuario_id))
+                    target_user = usr_res.scalars().first()
+                    nombre_emp = f"{target_user.nombre or ''} {target_user.apellidos or ''}".strip() if target_user else f"Usuario {l_existente.usuario_id}"
+                    l_existente.nombre_persona = nombre_emp
+                    l_existente.monto = float(l_existente.total_liquidado or 0.0)
+                    l_existente.fecha = l_existente.created_at.strftime("%Y-%m-%d %H:%M") if l_existente.created_at else ""
+                    l_existente.mes_anio = l_existente.created_at.strftime("%m-%Y") if l_existente.created_at else ""
+                    return l_existente
 
-        p_inicio = liq.periodo_inicio or datetime(2000, 1, 1)
-        p_fin = liq.periodo_fin or datetime.now()
+            p_inicio = liq.periodo_inicio or datetime(2000, 1, 1)
+            p_fin = liq.periodo_fin or datetime.now()
 
-        # 1. Comisiones pendientes
-        com_result = await db.execute(select(Comision).with_for_update().where(Comision.usuario_id == liq.usuario_id, Comision.estado == 'Pendiente'))
-        comisiones = com_result.scalars().all()
-        total_com = sum(c.monto_comision for c in comisiones)
-        
-        # 2. Asistencias pendientes
-        asi_result = await db.execute(select(Asistencia).where(Asistencia.usuario_id == liq.usuario_id, Asistencia.fecha >= p_inicio, Asistencia.fecha <= p_fin, Asistencia.salario_generado > 0))
-        asistencias = asi_result.scalars().all()
-        total_sal = sum(a.salario_generado for a in asistencias)
-        
-        # 3. Liquidacion
-        liquidacion = Liquidacion(
-            usuario_id=liq.usuario_id,
-            periodo_inicio=p_inicio,
-            periodo_fin=p_fin,
-            total_servicios_vendidos=len(comisiones),
-            total_comisiones=total_com,
-            total_salario_fijo=total_sal,
-            total_liquidado=total_com + total_sal,
-            estado="Liquidado",
-            liquidado_por=current_user.id,
-            observaciones=liq.observaciones,
-            idempotency_key=idem_clean,
-        )
-        db.add(liquidacion)
-        await db.flush()
-        
-        # 4. Actualizar comisiones a Liquidada
-        for c in comisiones:
-            c.estado = 'Liquidada'
-            c.liquidacion_id = liquidacion.id
+            # 1. Comisiones pendientes
+            com_result = await db.execute(select(Comision).with_for_update().where(Comision.usuario_id == liq.usuario_id, Comision.estado == 'Pendiente'))
+            comisiones = com_result.scalars().all()
+            total_com = sum(c.monto_comision for c in comisiones)
             
-        # 5. Limpiar solicitud de liquidación del usuario
-        usr_res = await db.execute(select(Usuario).where(Usuario.id == liq.usuario_id))
-        target_user = usr_res.scalars().first()
-        nombre_emp = f"Usuario {liq.usuario_id}"
-        if target_user:
-            target_user.solicitud_liquidacion = None
-            nombre_emp = f"{target_user.nombre or ''} {target_user.apellidos or ''}".strip() or target_user.usuario
+            # 2. Asistencias pendientes
+            asi_result = await db.execute(select(Asistencia).where(Asistencia.usuario_id == liq.usuario_id, Asistencia.fecha >= p_inicio, Asistencia.fecha <= p_fin, Asistencia.salario_generado > 0))
+            asistencias = asi_result.scalars().all()
+            total_sal = sum(a.salario_generado for a in asistencias)
+            
+            # 3. Liquidacion
+            liquidacion = Liquidacion(
+                usuario_id=liq.usuario_id,
+                periodo_inicio=p_inicio,
+                periodo_fin=p_fin,
+                total_servicios_vendidos=len(comisiones),
+                total_comisiones=total_com,
+                total_salario_fijo=total_sal,
+                total_liquidado=total_com + total_sal,
+                estado="Liquidado",
+                liquidado_por=current_user.id,
+                observaciones=liq.observaciones,
+                idempotency_key=idem_clean,
+            )
+            db.add(liquidacion)
+            await db.flush()
+            
+            # 4. Actualizar comisiones a Liquidada
+            for c in comisiones:
+                c.estado = 'Liquidada'
+                c.liquidacion_id = liquidacion.id
+                
+            # 5. Limpiar solicitud de liquidación del usuario
+            usr_res = await db.execute(select(Usuario).where(Usuario.id == liq.usuario_id))
+            target_user = usr_res.scalars().first()
+            nombre_emp = f"Usuario {liq.usuario_id}"
+            if target_user:
+                target_user.solicitud_liquidacion = None
+                nombre_emp = f"{target_user.nombre or ''} {target_user.apellidos or ''}".strip() or target_user.usuario
 
-        # 6. Gasto contable automático
-        gasto = Gasto(
-            concepto=f"Liquidación Nómina - {nombre_emp}",
-            categoria="Nomina",
-            valor=liquidacion.total_liquidado,
-            tipo="Liquidacion_Nomina",
-            referencia_id=liquidacion.id,
-            usuario_id=current_user.id
-        )
-        db.add(gasto)
-        
-        await db.commit()
-        await db.refresh(liquidacion)
-        
-        # Campos de conveniencia
-        liquidacion.nombre_persona = nombre_emp
-        liquidacion.monto = liquidacion.total_liquidado
-        liquidacion.fecha = liquidacion.created_at.strftime("%Y-%m-%d %H:%M") if liquidacion.created_at else ""
-        liquidacion.mes_anio = liquidacion.created_at.strftime("%m-%Y") if liquidacion.created_at else ""
-        return liquidacion
-        
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=400, detail=str(e))
+            # 6. Gasto contable automático
+            gasto = Gasto(
+                concepto=f"Liquidación Nómina - {nombre_emp}",
+                categoria="Nomina",
+                valor=liquidacion.total_liquidado,
+                tipo="Liquidacion_Nomina",
+                referencia_id=liquidacion.id,
+                usuario_id=current_user.id
+            )
+            db.add(gasto)
+            
+            await db.commit()
+            await db.refresh(liquidacion)
+            
+            # Campos de conveniencia
+            liquidacion.nombre_persona = nombre_emp
+            liquidacion.monto = liquidacion.total_liquidado
+            liquidacion.fecha = liquidacion.created_at.strftime("%Y-%m-%d %H:%M") if liquidacion.created_at else ""
+            liquidacion.mes_anio = liquidacion.created_at.strftime("%m-%Y") if liquidacion.created_at else ""
+            return liquidacion
+            
+        except IntegrityError:
+            await db.rollback()
+            if idem_clean:
+                res_l = await db.execute(select(Liquidacion).where(Liquidacion.idempotency_key == idem_clean))
+                l_existente = res_l.scalars().first()
+                if l_existente:
+                    usr_res = await db.execute(select(Usuario).where(Usuario.id == l_existente.usuario_id))
+                    target_user = usr_res.scalars().first()
+                    nombre_emp = f"{target_user.nombre or ''} {target_user.apellidos or ''}".strip() if target_user else f"Usuario {l_existente.usuario_id}"
+                    l_existente.nombre_persona = nombre_emp
+                    l_existente.monto = float(l_existente.total_liquidado or 0.0)
+                    l_existente.fecha = l_existente.created_at.strftime("%Y-%m-%d %H:%M") if l_existente.created_at else ""
+                    l_existente.mes_anio = l_existente.created_at.strftime("%m-%Y") if l_existente.created_at else ""
+                    return l_existente
+            raise HTTPException(status_code=409, detail="Conflicto de concurrencia al liquidar nómina.")
+        except HTTPException:
+            await db.rollback()
+            raise
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(status_code=400, detail=str(e))
 
 @router.get("/liquidaciones", response_model=List[LiquidacionResponse])
 async def list_liquidaciones(db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):

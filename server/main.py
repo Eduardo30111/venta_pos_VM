@@ -341,6 +341,8 @@ async def startup():
         "ALTER TABLE liquidaciones ADD COLUMN idempotency_key VARCHAR;",
         "ALTER TABLE movimientos_inventario ADD COLUMN idempotency_key VARCHAR;",
         "ALTER TABLE traslados_inventario ADD COLUMN idempotency_key VARCHAR;",
+        "ALTER TABLE movimientos_caja ADD COLUMN idempotency_key VARCHAR;",
+        "ALTER TABLE movimientos_financieros ADD COLUMN idempotency_key VARCHAR;",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_ventas_idempotency_key ON ventas(idempotency_key);",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_abonos_idempotency_key ON abonos(idempotency_key);",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_compras_idempotency_key ON compras_inventario(idempotency_key);",
@@ -349,6 +351,8 @@ async def startup():
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_liq_nom_idempotency_key ON liquidaciones(idempotency_key);",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_mov_inv_idempotency_key ON movimientos_inventario(idempotency_key);",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_traslados_idempotency_key ON traslados_inventario(idempotency_key);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_mov_caja_idempotency_key ON movimientos_caja(idempotency_key);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_mov_fin_idempotency_key ON movimientos_financieros(idempotency_key);",
         # Materiales y Presentaciones en Productos
         "ALTER TABLE productos ADD COLUMN es_material BOOLEAN DEFAULT 0;",
         "ALTER TABLE productos ADD COLUMN presentacion_defecto VARCHAR DEFAULT 'Paquete';",
@@ -411,8 +415,10 @@ async def startup():
         try:
             async with db_mod.engine.begin() as conn:
                 await conn.execute(text(stmt))
-        except Exception:
-            pass
+        except Exception as e_stmt:
+            msg = str(e_stmt).lower()
+            if "duplicate column" not in msg and "already exists" not in msg:
+                logger.debug("Nota en DDL arranque: %s | %s", e_stmt, stmt[:50])
 
     try:
         async with db_mod.engine.begin() as conn:

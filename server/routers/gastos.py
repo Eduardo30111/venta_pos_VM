@@ -1,8 +1,10 @@
+import asyncio
 from datetime import datetime
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
 
 from ..database import get_db
@@ -18,8 +20,11 @@ from ..schemas.gasto import (
 from ..services.caja_service import CajaService
 from ..middleware.auth import get_current_user
 from ..models.usuario import Usuario
+from ..async_lock import LazyAsyncLock
 
 router = APIRouter(prefix="/gastos", tags=["gastos"])
+
+_GASTO_LOCK = LazyAsyncLock()
 
 
 def _normalizar_metodo_gasto(metodo: str) -> str:
@@ -73,56 +78,72 @@ async def create_gasto(
 
     # Idempotencia estricta para evitar pagos de gastos duplicados ante reintentos
     idem_clean = (getattr(gasto, "idempotency_key", None) or "").strip() or None
-    if idem_clean:
-        res_g = await db.execute(select(Gasto).where(Gasto.idempotency_key == idem_clean))
-        gasto_existente = res_g.scalars().first()
-        if gasto_existente:
-            return gasto_existente
+    async with _GASTO_LOCK:
+        try:
+            if idem_clean:
+                res_g = await db.execute(select(Gasto).where(Gasto.idempotency_key == idem_clean))
+                gasto_existente = res_g.scalars().first()
+                if gasto_existente:
+                    return gasto_existente
 
-    metodo = _normalizar_metodo_gasto(gasto.metodo_pago)
-    ahora = datetime.now()
-    f_str = gasto.fecha or ahora.strftime("%Y-%m-%d")
-    h_str = gasto.hora or ahora.strftime("%H:%M:%S")
-    estado = gasto.estado or "Pagado"
-    u_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
+            metodo = _normalizar_metodo_gasto(gasto.metodo_pago)
+            ahora = datetime.now()
+            f_str = gasto.fecha or ahora.strftime("%Y-%m-%d")
+            h_str = gasto.hora or ahora.strftime("%H:%M:%S")
+            estado = gasto.estado or "Pagado"
+            u_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
 
-    datos = gasto.model_dump()
-    datos["metodo_pago"] = metodo
-    datos["fecha"] = f_str
-    datos["hora"] = h_str
-    datos["estado"] = estado
-    datos["idempotency_key"] = idem_clean
-    datos["clasificacion"] = datos.get("clasificacion") or datos.get("categoria") or "Operativo diario"
-    if estado == "Pagado" and not datos.get("fecha_pago"):
-        datos["fecha_pago"] = f"{f_str} {h_str}"
+            datos = gasto.model_dump()
+            datos["metodo_pago"] = metodo
+            datos["fecha"] = f_str
+            datos["hora"] = h_str
+            datos["estado"] = estado
+            datos["idempotency_key"] = idem_clean
+            datos["clasificacion"] = datos.get("clasificacion") or datos.get("categoria") or "Operativo diario"
+            if estado == "Pagado" and not datos.get("fecha_pago"):
+                datos["fecha_pago"] = f"{f_str} {h_str}"
 
-    db_gasto = Gasto(**datos, usuario_id=current_user.id, usuario_nombre=u_nom)
-    db.add(db_gasto)
-    await db.flush()
+            db_gasto = Gasto(**datos, usuario_id=current_user.id, usuario_nombre=u_nom)
+            db.add(db_gasto)
+            await db.flush()
 
-    if estado == "Pagado":
-        cuenta_af = "CAJA_FISICA" if metodo == "Efectivo" else "BANCO_TRANSFERENCIA"
-        mf = await CajaService.registrar_movimiento_financiero(
-            db=db,
-            tipo="GASTO_PAGADO",
-            concepto=f"Gasto #{db_gasto.id}: {db_gasto.concepto}",
-            monto=float(db_gasto.valor),
-            metodo_pago=metodo,
-            cuenta_afectada=cuenta_af,
-            usuario=u_nom,
-            referencia_origen=f"GASTO-{db_gasto.id}",
-            sesion_id=db_gasto.sesion_caja_id,
-            observaciones=db_gasto.observacion or db_gasto.descripcion or "",
-            sincronizar_caja=(metodo == "Efectivo"),
-            fecha_str=f_str,
-            hora_str=h_str,
-        )
-        if not db_gasto.sesion_caja_id and mf.sesion_caja_id:
-            db_gasto.sesion_caja_id = mf.sesion_caja_id
+            if estado == "Pagado":
+                cuenta_af = "CAJA_FISICA" if metodo == "Efectivo" else "BANCO_TRANSFERENCIA"
+                mf = await CajaService.registrar_movimiento_financiero(
+                    db=db,
+                    tipo="GASTO_PAGADO",
+                    concepto=f"Gasto #{db_gasto.id}: {db_gasto.concepto}",
+                    monto=float(db_gasto.valor),
+                    metodo_pago=metodo,
+                    cuenta_afectada=cuenta_af,
+                    usuario=u_nom,
+                    referencia_origen=f"GASTO-{db_gasto.id}",
+                    sesion_id=db_gasto.sesion_caja_id,
+                    observaciones=db_gasto.observacion or db_gasto.descripcion or "",
+                    sincronizar_caja=(metodo == "Efectivo"),
+                    fecha_str=f_str,
+                    hora_str=h_str,
+                )
+                if not db_gasto.sesion_caja_id and mf.sesion_caja_id:
+                    db_gasto.sesion_caja_id = mf.sesion_caja_id
 
-    await db.commit()
-    await db.refresh(db_gasto)
-    return db_gasto
+            await db.commit()
+            await db.refresh(db_gasto)
+            return db_gasto
+        except IntegrityError:
+            await db.rollback()
+            if idem_clean:
+                res_g = await db.execute(select(Gasto).where(Gasto.idempotency_key == idem_clean))
+                gasto_existente = res_g.scalars().first()
+                if gasto_existente:
+                    return gasto_existente
+            raise HTTPException(status_code=409, detail="Conflicto de concurrencia al registrar gasto.")
+        except HTTPException:
+            await db.rollback()
+            raise
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(status_code=500, detail=f"Fallo al registrar gasto: {str(e)}")
 
 
 @router.put("/{id}", response_model=GastoResponse)

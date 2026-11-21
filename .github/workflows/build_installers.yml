@@ -29,7 +29,49 @@ jobs:
 
       - name: Ejecutar pruebas unitarias de backend e integridad
         run: |
-          python -m unittest tests/test_idempotencia_global.py tests/test_seguridad_rehash.py tests/test_proveedor_phantom_balance.py tests/test_compra_ajuste_stock.py
+          python -m unittest tests/test_idempotencia_global.py tests/test_seguridad_rehash.py tests/test_proveedor_phantom_balance.py tests/test_compra_ajuste_stock.py tests/test_auditoria_idempotencia_exhaustiva.py tests/test_seguridad_usuarios_db.py
+
+  build-macos:
+    name: Compilar Instalador macOS (.dmg y .zip)
+    needs: test-and-verify
+    runs-on: macos-latest
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pillow reportlab matplotlib pandas openpyxl httpx pydantic pydantic_settings python-barcode babel python-escpos pyusb fastapi uvicorn "sqlalchemy[asyncio]" greenlet aiosqlite asyncpg "python-jose[cryptography]" "passlib[bcrypt]" "bcrypt==3.2.2" python-multipart
+
+      - name: Compilar VmPOS.app y DMG
+        run: |
+          bash packaging/build_macos.sh
+
+      - name: Subir artefactos de macOS a GitHub Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: VmPOS-macOS-Instalador
+          path: |
+            dist/*.dmg
+            dist/*.zip
+
+      - name: Publicar Release Oficial en GitHub (macOS)
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/*.dmg
+            dist/*.zip
+        continue-on-error: true
 
   build-windows:
     name: Compilar Instalador Windows (.exe)

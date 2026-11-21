@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 import unicodedata
 from typing import Optional, List, Dict, Any
@@ -5,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func, or_, delete
+from sqlalchemy.exc import IntegrityError
 
 from ..database import get_db
 from ..models.producto import Producto
@@ -27,8 +29,13 @@ from ..schemas.inventario import (
 )
 from ..middleware.auth import get_current_user
 from ..middleware.audit import log_audit
+from ..async_lock import LazyAsyncLock
 
 router = APIRouter(prefix="/inventario", tags=["inventario"])
+
+_COMPRA_LOCK = LazyAsyncLock()
+_TRASLADO_LOCK = LazyAsyncLock()
+_AJUSTE_LOCK = LazyAsyncLock()
 
 UNIDADES_DISCRETAS = {"Unidad", "Caja", "Paquete", "Docena", "Servicio"}
 
@@ -752,157 +759,181 @@ async def ejecutar_traslado_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ):
-    # Idempotencia estricta para traslados internos
     idem_key = (getattr(req, "idempotency_key", None) or "").strip() or None
-    if idem_key:
-        res_t = await db.execute(select(TrasladoInventario).where(TrasladoInventario.idempotency_key == idem_key))
-        t_existente = res_t.scalars().first()
-        if t_existente:
+    async with _TRASLADO_LOCK:
+        try:
+            # Idempotencia estricta para traslados internos
+            if idem_key:
+                res_t = await db.execute(select(TrasladoInventario).where(TrasladoInventario.idempotency_key == idem_key))
+                t_existente = res_t.scalars().first()
+                if t_existente:
+                    return {
+                        "numero_traslado": t_existente.numero_traslado,
+                        "producto": t_existente.nombre_producto,
+                        "codigo": t_existente.codigo_producto,
+                        "cantidad": t_existente.cantidad,
+                        "origen": t_existente.ubicacion_origen,
+                        "destino": t_existente.ubicacion_destino,
+                        "repetido": True,
+                    }
+
+            origen = str(req.origen or "").strip().upper()
+            destino = str(req.destino or "").strip().upper()
+            if origen not in ("BODEGA", "VITRINA") or destino not in ("BODEGA", "VITRINA"):
+                raise HTTPException(status_code=400, detail="Las ubicaciones deben ser BODEGA o VITRINA.")
+            if origen == destino:
+                raise HTTPException(status_code=400, detail="La ubicación de origen y destino deben ser diferentes.")
+
+            cant_float = float(req.cantidad or 0.0)
+            if cant_float <= 0:
+                raise HTTPException(status_code=400, detail="La cantidad a trasladar debe ser mayor que cero.")
+
+            key = str(req.codigo_o_id or "").strip()
+            q_prod = select(Producto).with_for_update().where(
+                or_(
+                    Producto.codigo == key,
+                    Producto.codigo == key.zfill(5),
+                    Producto.codigo_barras == key,
+                )
+            )
+            prod = (await db.execute(q_prod)).scalars().first()
+            if not prod and key.isdigit():
+                prod = (await db.execute(select(Producto).with_for_update().where(Producto.id == int(key)))).scalars().first()
+            if not prod:
+                raise HTTPException(status_code=404, detail=f"No se encontró el producto físico '{key}'.")
+
+            unidad = prod.unidad_medida or "Unidad"
+            _validar_cantidad_unidad(unidad, cant_float)
+
+            sb_ant = float(prod.stock_bodega or 0.0)
+            sv_ant = float(prod.stock_vitrina or 0.0)
+            st_ant = float(prod.stock or 0.0)
+            if sb_ant == 0.0 and sv_ant == 0.0 and st_ant > 0.0:
+                sv_ant = st_ant
+
+            if origen == "BODEGA":
+                if sb_ant + 1e-6 < cant_float:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Existencias insuficientes en Bodega para '{prod.nombre}'. "
+                            f"Disponible: {sb_ant:g} {unidad}, Solicitado: {cant_float:g} {unidad}."
+                        ),
+                    )
+                sb_des = round(sb_ant - cant_float, 4)
+                sv_des = round(sv_ant + cant_float, 4)
+                st_orig_ant, st_orig_des = sb_ant, sb_des
+                st_dest_ant, st_dest_des = sv_ant, sv_des
+                tipo_mov = "TRASLADO_BODEGA_A_VITRINA"
+            else:
+                if sv_ant + 1e-6 < cant_float:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Existencias insuficientes en Vitrina para '{prod.nombre}'. "
+                            f"Disponible: {sv_ant:g} {unidad}, Solicitado: {cant_float:g} {unidad}."
+                        ),
+                    )
+                sv_des = round(sv_ant - cant_float, 4)
+                sb_des = round(sb_ant + cant_float, 4)
+                st_orig_ant, st_orig_des = sv_ant, sv_des
+                st_dest_ant, st_dest_des = sb_ant, sb_des
+                tipo_mov = "TRASLADO_VITRINA_A_BODEGA"
+
+            cnt_res = await db.execute(select(func.count(TrasladoInventario.id)))
+            total_tr = int(cnt_res.scalar() or 0)
+            num_traslado = f"TR-{total_tr + 1:05d}"
+
+            ahora = datetime.now()
+            f_str = ahora.strftime("%Y-%m-%d")
+            h_str = ahora.strftime("%H:%M:%S")
+            usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+            st_nuevo = round(sb_des + sv_des, 4)
+            costo_u = float(prod.precio_costo or 0.0)
+
+            prod.stock_bodega = sb_des
+            prod.stock_vitrina = sv_des
+            prod.stock = st_nuevo
+
+            db.add(
+                TrasladoInventario(
+                    numero_traslado=num_traslado,
+                    fecha=f_str,
+                    hora=h_str,
+                    producto_id=prod.id,
+                    codigo_producto=prod.codigo or "",
+                    nombre_producto=prod.nombre or "",
+                    ubicacion_origen=origen,
+                    ubicacion_destino=destino,
+                    cantidad=cant_float,
+                    usuario=usuario_nom,
+                    estado="Completado",
+                    observaciones=req.observaciones or "",
+                    idempotency_key=idem_key,
+                )
+            )
+            db.add(
+                MovimientoInventario(
+                    fecha=f_str,
+                    hora=h_str,
+                    producto_id=prod.id,
+                    codigo_producto=prod.codigo,
+                    nombre_producto=prod.nombre,
+                    tipo=tipo_mov,
+                    cantidad=cant_float,
+                    unidad_medida=unidad,
+                    ubicacion_origen=origen,
+                    ubicacion_destino=destino,
+                    stock_anterior=st_nuevo,
+                    stock_nuevo=st_nuevo,
+                    stock_origen_ant=st_orig_ant,
+                    stock_origen_des=st_orig_des,
+                    stock_destino_ant=st_dest_ant,
+                    stock_destino_des=st_dest_des,
+                    costo_unitario=costo_u,
+                    valor_total=round(cant_float * costo_u, 2),
+                    referencia=num_traslado,
+                    usuario_id=current_user.id,
+                    usuario_nombre=usuario_nom,
+                    observacion=req.observaciones or f"Traslado de {cant_float:g} {unidad} de {origen} a {destino}",
+                    estado="Completado",
+                    idempotency_key=f"mov:{idem_key}" if idem_key else None,
+                )
+            )
+            await db.commit()
             return {
-                "numero_traslado": t_existente.numero_traslado,
-                "producto": t_existente.nombre_producto,
-                "codigo": t_existente.codigo_producto,
-                "cantidad": t_existente.cantidad,
-                "origen": t_existente.ubicacion_origen,
-                "destino": t_existente.ubicacion_destino,
-                "repetido": True,
+                "numero_traslado": num_traslado,
+                "producto": prod.nombre,
+                "codigo": prod.codigo,
+                "origen": origen,
+                "destino": destino,
+                "cantidad": cant_float,
+                "stock_bodega": sb_des,
+                "stock_vitrina": sv_des,
+                "stock_total": st_nuevo,
             }
-
-    origen = str(req.origen or "").strip().upper()
-    destino = str(req.destino or "").strip().upper()
-    if origen not in ("BODEGA", "VITRINA") or destino not in ("BODEGA", "VITRINA"):
-        raise HTTPException(status_code=400, detail="Las ubicaciones deben ser BODEGA o VITRINA.")
-    if origen == destino:
-        raise HTTPException(status_code=400, detail="La ubicación de origen y destino deben ser diferentes.")
-
-    cant_float = float(req.cantidad or 0.0)
-    if cant_float <= 0:
-        raise HTTPException(status_code=400, detail="La cantidad a trasladar debe ser mayor que cero.")
-
-    key = str(req.codigo_o_id or "").strip()
-    q_prod = select(Producto).with_for_update().where(
-        or_(
-            Producto.codigo == key,
-            Producto.codigo == key.zfill(5),
-            Producto.codigo_barras == key,
-        )
-    )
-    prod = (await db.execute(q_prod)).scalars().first()
-    if not prod and key.isdigit():
-        prod = (await db.execute(select(Producto).with_for_update().where(Producto.id == int(key)))).scalars().first()
-    if not prod:
-        raise HTTPException(status_code=404, detail=f"No se encontró el producto físico '{key}'.")
-
-    unidad = prod.unidad_medida or "Unidad"
-    _validar_cantidad_unidad(unidad, cant_float)
-
-    sb_ant = float(prod.stock_bodega or 0.0)
-    sv_ant = float(prod.stock_vitrina or 0.0)
-    st_ant = float(prod.stock or 0.0)
-    if sb_ant == 0.0 and sv_ant == 0.0 and st_ant > 0.0:
-        sv_ant = st_ant
-
-    if origen == "BODEGA":
-        if sb_ant + 1e-6 < cant_float:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Existencias insuficientes en Bodega para '{prod.nombre}'. "
-                    f"Disponible: {sb_ant:g} {unidad}, Solicitado: {cant_float:g} {unidad}."
-                ),
-            )
-        sb_des = round(sb_ant - cant_float, 4)
-        sv_des = round(sv_ant + cant_float, 4)
-        st_orig_ant, st_orig_des = sb_ant, sb_des
-        st_dest_ant, st_dest_des = sv_ant, sv_des
-        tipo_mov = "TRASLADO_BODEGA_A_VITRINA"
-    else:
-        if sv_ant + 1e-6 < cant_float:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Existencias insuficientes en Vitrina para '{prod.nombre}'. "
-                    f"Disponible: {sv_ant:g} {unidad}, Solicitado: {cant_float:g} {unidad}."
-                ),
-            )
-        sv_des = round(sv_ant - cant_float, 4)
-        sb_des = round(sb_ant + cant_float, 4)
-        st_orig_ant, st_orig_des = sv_ant, sv_des
-        st_dest_ant, st_dest_des = sb_ant, sb_des
-        tipo_mov = "TRASLADO_VITRINA_A_BODEGA"
-
-    cnt_res = await db.execute(select(func.count(TrasladoInventario.id)))
-    total_tr = int(cnt_res.scalar() or 0)
-    num_traslado = f"TR-{total_tr + 1:05d}"
-
-    ahora = datetime.now()
-    f_str = ahora.strftime("%Y-%m-%d")
-    h_str = ahora.strftime("%H:%M:%S")
-    usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
-    st_nuevo = round(sb_des + sv_des, 4)
-    costo_u = float(prod.precio_costo or 0.0)
-
-    prod.stock_bodega = sb_des
-    prod.stock_vitrina = sv_des
-    prod.stock = st_nuevo
-
-    db.add(
-        TrasladoInventario(
-            numero_traslado=num_traslado,
-            fecha=f_str,
-            hora=h_str,
-            producto_id=prod.id,
-            codigo_producto=prod.codigo or "",
-            nombre_producto=prod.nombre or "",
-            ubicacion_origen=origen,
-            ubicacion_destino=destino,
-            cantidad=cant_float,
-            usuario=usuario_nom,
-            estado="Completado",
-            observaciones=req.observaciones or "",
-            idempotency_key=idem_key,
-        )
-    )
-    db.add(
-        MovimientoInventario(
-            fecha=f_str,
-            hora=h_str,
-            producto_id=prod.id,
-            codigo_producto=prod.codigo,
-            nombre_producto=prod.nombre,
-            tipo=tipo_mov,
-            cantidad=cant_float,
-            unidad_medida=unidad,
-            ubicacion_origen=origen,
-            ubicacion_destino=destino,
-            stock_anterior=st_nuevo,
-            stock_nuevo=st_nuevo,
-            stock_origen_ant=st_orig_ant,
-            stock_origen_des=st_orig_des,
-            stock_destino_ant=st_dest_ant,
-            stock_destino_des=st_dest_des,
-            costo_unitario=costo_u,
-            valor_total=round(cant_float * costo_u, 2),
-            referencia=num_traslado,
-            usuario_id=current_user.id,
-            usuario_nombre=usuario_nom,
-            observacion=req.observaciones or f"Traslado de {cant_float:g} {unidad} de {origen} a {destino}",
-            estado="Completado",
-            idempotency_key=f"mov:{idem_key}" if idem_key else None,
-        )
-    )
-    await db.commit()
-    return {
-        "numero_traslado": num_traslado,
-        "producto": prod.nombre,
-        "codigo": prod.codigo,
-        "origen": origen,
-        "destino": destino,
-        "cantidad": cant_float,
-        "stock_bodega": sb_des,
-        "stock_vitrina": sv_des,
-        "stock_total": st_nuevo,
-    }
+        except IntegrityError:
+            await db.rollback()
+            if idem_key:
+                res_t = await db.execute(select(TrasladoInventario).where(TrasladoInventario.idempotency_key == idem_key))
+                t_existente = res_t.scalars().first()
+                if t_existente:
+                    return {
+                        "numero_traslado": t_existente.numero_traslado,
+                        "producto": t_existente.nombre_producto,
+                        "codigo": t_existente.codigo_producto,
+                        "cantidad": t_existente.cantidad,
+                        "origen": t_existente.ubicacion_origen,
+                        "destino": t_existente.ubicacion_destino,
+                        "repetido": True,
+                    }
+            raise HTTPException(status_code=409, detail="Conflicto de concurrencia al registrar traslado.")
+        except HTTPException:
+            await db.rollback()
+            raise
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(status_code=500, detail=f"Fallo al registrar traslado: {str(e)}")
 
 
 @router.get("/traslados")
@@ -947,131 +978,148 @@ async def registrar_ajuste_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ):
-    try:
-        # Idempotencia estricta para ajustes de inventario
-        idem_key = (getattr(req, "idempotency_key", None) or "").strip() or None
-        if idem_key:
-            res_m = await db.execute(select(MovimientoInventario).where(MovimientoInventario.idempotency_key == idem_key))
-            m_existente = res_m.scalars().first()
-            if m_existente:
-                return {
-                    "producto": m_existente.nombre_producto,
-                    "ubicacion": m_existente.ubicacion_destino or m_existente.ubicacion_origen,
-                    "stock_anterior": m_existente.stock_anterior,
-                    "stock_nuevo": m_existente.stock_nuevo,
-                    "diferencia": m_existente.cantidad if m_existente.tipo == "AJUSTE_POSITIVO" else -m_existente.cantidad,
-                    "tipo_ajuste": m_existente.tipo,
-                    "repetido": True,
-                }
+    idem_key = (getattr(req, "idempotency_key", None) or "").strip() or None
+    async with _AJUSTE_LOCK:
+        try:
+            # Idempotencia estricta para ajustes de inventario
+            if idem_key:
+                res_m = await db.execute(select(MovimientoInventario).where(MovimientoInventario.idempotency_key == idem_key))
+                m_existente = res_m.scalars().first()
+                if m_existente:
+                    return {
+                        "producto": m_existente.nombre_producto,
+                        "ubicacion": m_existente.ubicacion_destino or m_existente.ubicacion_origen,
+                        "stock_anterior": m_existente.stock_anterior,
+                        "stock_nuevo": m_existente.stock_nuevo,
+                        "diferencia": m_existente.cantidad if m_existente.tipo == "AJUSTE_POSITIVO" else -m_existente.cantidad,
+                        "tipo_ajuste": m_existente.tipo,
+                        "repetido": True,
+                    }
 
-        ubicacion = str(req.ubicacion or "").strip().upper()
-        if ubicacion not in ("BODEGA", "VITRINA"):
-            raise HTTPException(status_code=400, detail="La ubicación a ajustar debe ser BODEGA o VITRINA.")
-        conteo_flt = float(req.conteo_fisico)
-        if conteo_flt < 0:
-            raise HTTPException(status_code=400, detail="El conteo físico no puede ser negativo.")
+            ubicacion = str(req.ubicacion or "").strip().upper()
+            if ubicacion not in ("BODEGA", "VITRINA"):
+                raise HTTPException(status_code=400, detail="La ubicación a ajustar debe ser BODEGA o VITRINA.")
+            conteo_flt = float(req.conteo_fisico)
+            if conteo_flt < 0:
+                raise HTTPException(status_code=400, detail="El conteo físico no puede ser negativo.")
 
-        key = str(req.codigo_o_id or "").strip()
-        prod = (
-            await db.execute(
-                select(Producto).with_for_update().where(
-                    or_(
-                        Producto.codigo == key,
-                        Producto.codigo == key.zfill(5),
-                        Producto.codigo_barras == key,
+            key = str(req.codigo_o_id or "").strip()
+            prod = (
+                await db.execute(
+                    select(Producto).with_for_update().where(
+                        or_(
+                            Producto.codigo == key,
+                            Producto.codigo == key.zfill(5),
+                            Producto.codigo_barras == key,
+                        )
                     )
                 )
+            ).scalars().first()
+            if not prod and key.isdigit():
+                prod = (await db.execute(select(Producto).with_for_update().where(Producto.id == int(key)))).scalars().first()
+            if not prod:
+                raise HTTPException(status_code=404, detail=f"No se encontró el artículo físico '{key}'.")
+
+            sb_ant = float(prod.stock_bodega or 0.0)
+            sv_ant = float(prod.stock_vitrina or 0.0)
+            st_ant = float(prod.stock or 0.0)
+            if sb_ant == 0.0 and sv_ant == 0.0 and st_ant > 0.0:
+                sv_ant = st_ant
+
+            stock_actual_ub = sb_ant if ubicacion == "BODEGA" else sv_ant
+            delta = round(conteo_flt - stock_actual_ub, 4)
+            if abs(delta) < 0.0001:
+                return {"mensaje": "El conteo físico coincide exactamente con el sistema. No se requirió ajuste."}
+
+            tipo_mov = "AJUSTE_POSITIVO" if delta > 0 else "AJUSTE_NEGATIVO"
+            cant_ajuste = abs(delta)
+            if ubicacion == "BODEGA":
+                sb_des = conteo_flt
+                sv_des = sv_ant
+            else:
+                sb_des = sb_ant
+                sv_des = conteo_flt
+
+            st_nuevo = round(sb_des + sv_des, 4)
+            prod.stock_bodega = sb_des
+            prod.stock_vitrina = sv_des
+            prod.stock = st_nuevo
+
+            ahora = datetime.now()
+            f_str = ahora.strftime("%Y-%m-%d")
+            h_str = ahora.strftime("%H:%M:%S")
+            usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+            unidad = prod.unidad_medida or "Unidad"
+            costo_u = float(prod.precio_costo or 0.0)
+
+            user_id = current_user.id if current_user and getattr(current_user, "id", None) else None
+            if user_id:
+                u_chk = (await db.execute(select(Usuario.id).where(Usuario.id == user_id))).scalar()
+                if not u_chk:
+                    user_id = None
+
+            db.add(
+                MovimientoInventario(
+                    fecha=f_str,
+                    hora=h_str,
+                    producto_id=prod.id,
+                    codigo_producto=prod.codigo,
+                    nombre_producto=prod.nombre,
+                    tipo=tipo_mov,
+                    tipo_movimiento=tipo_mov,
+                    cantidad=cant_ajuste,
+                    unidad_medida=unidad,
+                    ubicacion_origen=ubicacion if delta < 0 else "NINGUNA",
+                    ubicacion_destino=ubicacion if delta > 0 else "NINGUNA",
+                    stock_anterior=sb_ant + sv_ant,
+                    stock_nuevo=st_nuevo,
+                    stock_origen_ant=stock_actual_ub,
+                    stock_origen_des=conteo_flt,
+                    stock_destino_ant=stock_actual_ub,
+                    stock_destino_des=conteo_flt,
+                    costo_unitario=costo_u,
+                    valor_total=round(cant_ajuste * costo_u, 2),
+                    referencia="AJUSTE-FISICO",
+                    usuario_id=user_id,
+                    usuario_nombre=usuario_nom,
+                    usuario=usuario_nom,
+                    observacion=req.motivo or f"Ajuste en {ubicacion}: {stock_actual_ub:g} -> {conteo_flt:g} {unidad}",
+                    observaciones=req.motivo or f"Ajuste en {ubicacion}: {stock_actual_ub:g} -> {conteo_flt:g} {unidad}",
+                    estado="Completado",
+                    idempotency_key=idem_key,
+                )
             )
-        ).scalars().first()
-        if not prod and key.isdigit():
-            prod = (await db.execute(select(Producto).with_for_update().where(Producto.id == int(key)))).scalars().first()
-        if not prod:
-            raise HTTPException(status_code=404, detail=f"No se encontró el artículo físico '{key}'.")
-
-        sb_ant = float(prod.stock_bodega or 0.0)
-        sv_ant = float(prod.stock_vitrina or 0.0)
-        st_ant = float(prod.stock or 0.0)
-        if sb_ant == 0.0 and sv_ant == 0.0 and st_ant > 0.0:
-            sv_ant = st_ant
-
-        stock_actual_ub = sb_ant if ubicacion == "BODEGA" else sv_ant
-        delta = round(conteo_flt - stock_actual_ub, 4)
-        if abs(delta) < 0.0001:
-            return {"mensaje": "El conteo físico coincide exactamente con el sistema. No se requirió ajuste."}
-
-        tipo_mov = "AJUSTE_POSITIVO" if delta > 0 else "AJUSTE_NEGATIVO"
-        cant_ajuste = abs(delta)
-        if ubicacion == "BODEGA":
-            sb_des = conteo_flt
-            sv_des = sv_ant
-        else:
-            sb_des = sb_ant
-            sv_des = conteo_flt
-
-        st_nuevo = round(sb_des + sv_des, 4)
-        prod.stock_bodega = sb_des
-        prod.stock_vitrina = sv_des
-        prod.stock = st_nuevo
-
-        ahora = datetime.now()
-        f_str = ahora.strftime("%Y-%m-%d")
-        h_str = ahora.strftime("%H:%M:%S")
-        usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
-        unidad = prod.unidad_medida or "Unidad"
-        costo_u = float(prod.precio_costo or 0.0)
-
-        user_id = current_user.id if current_user and getattr(current_user, "id", None) else None
-        if user_id:
-            u_chk = (await db.execute(select(Usuario.id).where(Usuario.id == user_id))).scalar()
-            if not u_chk:
-                user_id = None
-
-        db.add(
-            MovimientoInventario(
-                fecha=f_str,
-                hora=h_str,
-                producto_id=prod.id,
-                codigo_producto=prod.codigo,
-                nombre_producto=prod.nombre,
-                tipo=tipo_mov,
-                tipo_movimiento=tipo_mov,
-                cantidad=cant_ajuste,
-                unidad_medida=unidad,
-                ubicacion_origen=ubicacion if delta < 0 else "NINGUNA",
-                ubicacion_destino=ubicacion if delta > 0 else "NINGUNA",
-                stock_anterior=sb_ant + sv_ant,
-                stock_nuevo=st_nuevo,
-                stock_origen_ant=stock_actual_ub,
-                stock_origen_des=conteo_flt,
-                stock_destino_ant=stock_actual_ub,
-                stock_destino_des=conteo_flt,
-                costo_unitario=costo_u,
-                valor_total=round(cant_ajuste * costo_u, 2),
-                referencia="AJUSTE-FISICO",
-                usuario_id=user_id,
-                usuario_nombre=usuario_nom,
-                usuario=usuario_nom,
-                observacion=req.motivo or f"Ajuste en {ubicacion}: {stock_actual_ub:g} -> {conteo_flt:g} {unidad}",
-                observaciones=req.motivo or f"Ajuste en {ubicacion}: {stock_actual_ub:g} -> {conteo_flt:g} {unidad}",
-                estado="Completado",
-                idempotency_key=idem_key,
-            )
-        )
-        await db.commit()
-        return {
-            "producto": prod.nombre,
-            "ubicacion": ubicacion,
-            "stock_anterior": stock_actual_ub,
-            "stock_nuevo": conteo_flt,
-            "diferencia": delta,
-            "tipo_ajuste": tipo_mov,
-        }
-    except HTTPException:
-        await db.rollback()
-        raise
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Fallo al aplicar ajuste de inventario: {str(e)}")
+            await db.commit()
+            return {
+                "producto": prod.nombre,
+                "ubicacion": ubicacion,
+                "stock_anterior": stock_actual_ub,
+                "stock_nuevo": conteo_flt,
+                "diferencia": delta,
+                "tipo_ajuste": tipo_mov,
+            }
+        except IntegrityError:
+            await db.rollback()
+            if idem_key:
+                res_m = await db.execute(select(MovimientoInventario).where(MovimientoInventario.idempotency_key == idem_key))
+                m_existente = res_m.scalars().first()
+                if m_existente:
+                    return {
+                        "producto": m_existente.nombre_producto,
+                        "ubicacion": m_existente.ubicacion_destino or m_existente.ubicacion_origen,
+                        "stock_anterior": m_existente.stock_anterior,
+                        "stock_nuevo": m_existente.stock_nuevo,
+                        "diferencia": m_existente.cantidad if m_existente.tipo == "AJUSTE_POSITIVO" else -m_existente.cantidad,
+                        "tipo_ajuste": m_existente.tipo,
+                        "repetido": True,
+                    }
+            raise HTTPException(status_code=409, detail="Conflicto de concurrencia al aplicar ajuste de inventario.")
+        except HTTPException:
+            await db.rollback()
+            raise
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(status_code=500, detail=f"Fallo al aplicar ajuste de inventario: {str(e)}")
 
 
 async def _generar_numero_compra_central(db: AsyncSession) -> str:
@@ -1307,73 +1355,87 @@ async def registrar_compra_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ):
-    try:
-        # Idempotencia estricta para compras y entradas de mercancía
-        idem_key = (getattr(req, "idempotency_key", None) or "").strip() or None
-        if idem_key:
-            res_c = await db.execute(select(CompraInventario).where(CompraInventario.idempotency_key == idem_key))
-            compra_existente = res_c.scalars().first()
-            if compra_existente:
-                return {
-                    "numero_compra": compra_existente.numero_compra,
-                    "compra_id": compra_existente.id,
-                    "total": float(compra_existente.total_compra or 0.0),
-                    "repetido": True,
-                }
+    idem_key = (getattr(req, "idempotency_key", None) or "").strip() or None
+    async with _COMPRA_LOCK:
+        try:
+            # Idempotencia estricta para compras y entradas de mercancía
+            if idem_key:
+                res_c = await db.execute(select(CompraInventario).where(CompraInventario.idempotency_key == idem_key))
+                compra_existente = res_c.scalars().first()
+                if compra_existente:
+                    return {
+                        "numero_compra": compra_existente.numero_compra,
+                        "compra_id": compra_existente.id,
+                        "total": float(compra_existente.total_compra or 0.0),
+                        "repetido": True,
+                    }
 
-        if not req.items:
-            raise HTTPException(status_code=400, detail="Debe incluir al menos un artículo en la entrada de mercancía.")
-        ubic = (req.ubicacion_destino or "BODEGA").strip().upper()
-        if ubic not in ("BODEGA", "VITRINA"):
-            ubic = "BODEGA"
+            if not req.items:
+                raise HTTPException(status_code=400, detail="Debe incluir al menos un artículo en la entrada de mercancía.")
+            ubic = (req.ubicacion_destino or "BODEGA").strip().upper()
+            if ubic not in ("BODEGA", "VITRINA"):
+                ubic = "BODEGA"
 
-        ahora = datetime.now()
-        f_str = ahora.strftime("%Y-%m-%d")
-        h_str = ahora.strftime("%H:%M:%S")
-        usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
-        num_compra = await _generar_numero_compra_central(db)
+            ahora = datetime.now()
+            f_str = ahora.strftime("%Y-%m-%d")
+            h_str = ahora.strftime("%H:%M:%S")
+            usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+            num_compra = await _generar_numero_compra_central(db)
 
-        prov_id = req.proveedor_id
-        if prov_id is not None:
-            p_chk = (await db.execute(select(Proveedor.id).where(Proveedor.id == prov_id))).scalar()
-            if not p_chk:
-                prov_id = None
+            prov_id = req.proveedor_id
+            if prov_id is not None:
+                p_chk = (await db.execute(select(Proveedor.id).where(Proveedor.id == prov_id))).scalar()
+                if not p_chk:
+                    prov_id = None
 
-        user_id = current_user.id if current_user and getattr(current_user, "id", None) else None
-        if user_id:
-            u_chk = (await db.execute(select(Usuario.id).where(Usuario.id == user_id))).scalar()
-            if not u_chk:
-                user_id = None
+            user_id = current_user.id if current_user and getattr(current_user, "id", None) else None
+            if user_id:
+                u_chk = (await db.execute(select(Usuario.id).where(Usuario.id == user_id))).scalar()
+                if not u_chk:
+                    user_id = None
 
-        compra = CompraInventario(
-            numero_compra=num_compra,
-            fecha=f_str,
-            hora=h_str,
-            proveedor_id=prov_id,
-            proveedor_nombre=req.proveedor_nombre or "Sin Proveedor",
-            documento_referencia=req.doc_referencia or "",
-            ubicacion_destino=ubic,
-            total_compra=0.0,
-            usuario=usuario_nom,
-            observaciones=req.observaciones or "",
-            estado="Recibida",
-            idempotency_key=idem_key,
-        )
-        db.add(compra)
-        await db.flush()
+            compra = CompraInventario(
+                numero_compra=num_compra,
+                fecha=f_str,
+                hora=h_str,
+                proveedor_id=prov_id,
+                proveedor_nombre=req.proveedor_nombre or "Sin Proveedor",
+                documento_referencia=req.doc_referencia or "",
+                ubicacion_destino=ubic,
+                total_compra=0.0,
+                usuario=usuario_nom,
+                observaciones=req.observaciones or "",
+                estado="Recibida",
+                idempotency_key=idem_key,
+            )
+            db.add(compra)
+            await db.flush()
 
-        total_compra = await _aplicar_items_compra_central(
-            db, compra.id, num_compra, req.items, ubic, user_id, usuario_nom, f_str, h_str
-        )
-        compra.total_compra = total_compra
-        await db.commit()
-        return {"numero_compra": num_compra, "compra_id": compra.id, "total": total_compra}
-    except HTTPException:
-        await db.rollback()
-        raise
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Fallo al registrar entrada de mercancía: {str(e)}")
+            total_compra = await _aplicar_items_compra_central(
+                db, compra.id, num_compra, req.items, ubic, user_id, usuario_nom, f_str, h_str
+            )
+            compra.total_compra = total_compra
+            await db.commit()
+            return {"numero_compra": num_compra, "compra_id": compra.id, "total": total_compra}
+        except IntegrityError:
+            await db.rollback()
+            if idem_key:
+                res_c = await db.execute(select(CompraInventario).where(CompraInventario.idempotency_key == idem_key))
+                compra_existente = res_c.scalars().first()
+                if compra_existente:
+                    return {
+                        "numero_compra": compra_existente.numero_compra,
+                        "compra_id": compra_existente.id,
+                        "total": float(compra_existente.total_compra or 0.0),
+                        "repetido": True,
+                    }
+            raise HTTPException(status_code=409, detail="Conflicto de concurrencia al registrar entrada de mercancía.")
+        except HTTPException:
+            await db.rollback()
+            raise
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(status_code=500, detail=f"Fallo al registrar entrada de mercancía: {str(e)}")
 
 
 @router.get("/compras")
