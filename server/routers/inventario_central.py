@@ -752,6 +752,22 @@ async def ejecutar_traslado_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ):
+    # Idempotencia estricta para traslados internos
+    idem_key = (getattr(req, "idempotency_key", None) or "").strip() or None
+    if idem_key:
+        res_t = await db.execute(select(TrasladoInventario).where(TrasladoInventario.idempotency_key == idem_key))
+        t_existente = res_t.scalars().first()
+        if t_existente:
+            return {
+                "numero_traslado": t_existente.numero_traslado,
+                "producto": t_existente.nombre_producto,
+                "codigo": t_existente.codigo_producto,
+                "cantidad": t_existente.cantidad,
+                "origen": t_existente.ubicacion_origen,
+                "destino": t_existente.ubicacion_destino,
+                "repetido": True,
+            }
+
     origen = str(req.origen or "").strip().upper()
     destino = str(req.destino or "").strip().upper()
     if origen not in ("BODEGA", "VITRINA") or destino not in ("BODEGA", "VITRINA"):
@@ -844,6 +860,7 @@ async def ejecutar_traslado_endpoint(
             usuario=usuario_nom,
             estado="Completado",
             observaciones=req.observaciones or "",
+            idempotency_key=idem_key,
         )
     )
     db.add(
@@ -871,6 +888,7 @@ async def ejecutar_traslado_endpoint(
             usuario_nombre=usuario_nom,
             observacion=req.observaciones or f"Traslado de {cant_float:g} {unidad} de {origen} a {destino}",
             estado="Completado",
+            idempotency_key=f"mov:{idem_key}" if idem_key else None,
         )
     )
     await db.commit()
@@ -930,6 +948,22 @@ async def registrar_ajuste_endpoint(
     current_user: Usuario = Depends(get_current_user),
 ):
     try:
+        # Idempotencia estricta para ajustes de inventario
+        idem_key = (getattr(req, "idempotency_key", None) or "").strip() or None
+        if idem_key:
+            res_m = await db.execute(select(MovimientoInventario).where(MovimientoInventario.idempotency_key == idem_key))
+            m_existente = res_m.scalars().first()
+            if m_existente:
+                return {
+                    "producto": m_existente.nombre_producto,
+                    "ubicacion": m_existente.ubicacion_destino or m_existente.ubicacion_origen,
+                    "stock_anterior": m_existente.stock_anterior,
+                    "stock_nuevo": m_existente.stock_nuevo,
+                    "diferencia": m_existente.cantidad if m_existente.tipo == "AJUSTE_POSITIVO" else -m_existente.cantidad,
+                    "tipo_ajuste": m_existente.tipo,
+                    "repetido": True,
+                }
+
         ubicacion = str(req.ubicacion or "").strip().upper()
         if ubicacion not in ("BODEGA", "VITRINA"):
             raise HTTPException(status_code=400, detail="La ubicación a ajustar debe ser BODEGA o VITRINA.")
@@ -1020,6 +1054,7 @@ async def registrar_ajuste_endpoint(
                 observacion=req.motivo or f"Ajuste en {ubicacion}: {stock_actual_ub:g} -> {conteo_flt:g} {unidad}",
                 observaciones=req.motivo or f"Ajuste en {ubicacion}: {stock_actual_ub:g} -> {conteo_flt:g} {unidad}",
                 estado="Completado",
+                idempotency_key=idem_key,
             )
         )
         await db.commit()
@@ -1273,6 +1308,19 @@ async def registrar_compra_endpoint(
     current_user: Usuario = Depends(get_current_user),
 ):
     try:
+        # Idempotencia estricta para compras y entradas de mercancía
+        idem_key = (getattr(req, "idempotency_key", None) or "").strip() or None
+        if idem_key:
+            res_c = await db.execute(select(CompraInventario).where(CompraInventario.idempotency_key == idem_key))
+            compra_existente = res_c.scalars().first()
+            if compra_existente:
+                return {
+                    "numero_compra": compra_existente.numero_compra,
+                    "compra_id": compra_existente.id,
+                    "total": float(compra_existente.total_compra or 0.0),
+                    "repetido": True,
+                }
+
         if not req.items:
             raise HTTPException(status_code=400, detail="Debe incluir al menos un artículo en la entrada de mercancía.")
         ubic = (req.ubicacion_destino or "BODEGA").strip().upper()
@@ -1309,6 +1357,7 @@ async def registrar_compra_endpoint(
             usuario=usuario_nom,
             observaciones=req.observaciones or "",
             estado="Recibida",
+            idempotency_key=idem_key,
         )
         db.add(compra)
         await db.flush()

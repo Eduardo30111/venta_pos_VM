@@ -26,6 +26,7 @@ class LiquidarProveedorRequest(BaseModel):
     observaciones: Optional[str] = ""
     proveedor_nombre: Optional[str] = None
     documento_nit: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 @router.get("", response_model=List[ProveedorResponse])
@@ -389,6 +390,24 @@ async def liquidar_proveedor(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ) -> Dict[str, Any]:
+    # Idempotencia estricta para pagos de liquidaciones a proveedores
+    idem_clean = (getattr(req, "idempotency_key", None) or "").strip() or None
+    if idem_clean:
+        res_liq = await db.execute(select(LiquidacionProveedor).where(LiquidacionProveedor.idempotency_key == idem_clean))
+        liq_existente = res_liq.scalars().first()
+        if liq_existente:
+            return {
+                "ok": True,
+                "exito": True,
+                "liquidacion_id": liq_existente.id,
+                "numero_recibo": f"LQ-{liq_existente.id:05d}",
+                "monto_pagado": float(liq_existente.monto_pagado or 0.0),
+                "saldo_restante": float(liq_existente.saldo_restante or 0.0),
+                "metodo_pago": liq_existente.metodo_pago or "Efectivo",
+                "cuentas_afectadas": 0,
+                "repetido": True,
+            }
+
     res_p = await db.execute(select(Proveedor).with_for_update().where(Proveedor.id == id))
     prov = res_p.scalars().first()
     if not prov and req.proveedor_nombre:
@@ -514,6 +533,7 @@ async def liquidar_proveedor(
         usuario=u_nom,
         observaciones=req.observaciones or "",
         estado="Completada",
+        idempotency_key=idem_clean,
     )
     db.add(liq)
     await db.flush()

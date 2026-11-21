@@ -632,6 +632,20 @@ def inicializar_base_datos(db_path=None):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_liq_prov_id ON liquidaciones_proveedores(proveedor_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_liq_prov_fecha ON liquidaciones_proveedores(fecha)")
 
+        # 22.B Idempotencia Global en SQLite Local (Deduplicación atómica garantizada)
+        for tabla_idem in [
+            "ventas", "compras_inventario", "gastos", "liquidaciones_proveedores",
+            "movimientos_inventario", "traslados_inventario", "pagos_venta", "historial_liquidaciones"
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE {tabla_idem} ADD COLUMN idempotency_key TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{tabla_idem}_idempotency_key ON {tabla_idem}(idempotency_key)")
+            except Exception:
+                pass
+
         # 23. Tabla de Cola de Sincronización Offline Persistente
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cola_sincronizacion (

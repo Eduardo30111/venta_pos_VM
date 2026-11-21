@@ -116,6 +116,7 @@ class TrasladoCreate(BaseModel):
     cantidad: float
     usuario: Optional[str] = None
     observaciones: Optional[str] = ""
+    idempotency_key: Optional[str] = None
 
 
 class AjusteInventarioCreate(BaseModel):
@@ -124,6 +125,7 @@ class AjusteInventarioCreate(BaseModel):
     conteo_fisico: float
     usuario: Optional[str] = None
     motivo: Optional[str] = ""
+    idempotency_key: Optional[str] = None
 
 
 class ItemCompraCreate(BaseModel):
@@ -160,4 +162,5 @@ class CompraCreate(BaseModel):
     ubicacion_destino: str = "BODEGA"
     usuario: Optional[str] = None
     observaciones: Optional[str] = ""
+    idempotency_key: Optional[str] = None
     items: List[ItemCompraCreate]

@@ -45,4 +45,8 @@ assets/logos/
 Thumbs.db
 backups/
 config/token.json
+config/jwt_secret.key
+*.key
+.env
+.env.*
 abrir_carpeta_descargas.command

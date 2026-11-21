@@ -77,6 +77,7 @@ class Gasto(Base):
     usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
     usuario_nombre = Column(String, nullable=True)
     observacion = Column(String, nullable=True)
+    idempotency_key = Column(String, unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

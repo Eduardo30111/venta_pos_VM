@@ -388,6 +388,35 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                     created_at TIMESTAMP
                 );
             """)
+            # 10. Idempotencia y columnas transaccionales
+            idem_tablas = [
+                "compras_inventario",
+                "movimientos_inventario",
+                "traslados_inventario",
+                "gastos",
+                "liquidaciones_proveedores",
+                "liquidaciones",
+                "ventas",
+                "abonos",
+            ]
+            for t_nom in idem_tablas:
+                try:
+                    cur.execute(f"PRAGMA table_info({t_nom});")
+                    t_cols = {r[1] for r in cur.fetchall()}
+                    if t_cols and "idempotency_key" not in t_cols:
+                        cur.execute(f"ALTER TABLE {t_nom} ADD COLUMN idempotency_key TEXT;")
+                    if t_cols and "observaciones" not in t_cols and t_nom in ("compras_inventario", "traslados_inventario", "movimientos_inventario"):
+                        cur.execute(f"ALTER TABLE {t_nom} ADD COLUMN observaciones TEXT DEFAULT '';")
+                    if t_cols and "created_at" not in t_cols:
+                        cur.execute(f"ALTER TABLE {t_nom} ADD COLUMN created_at TIMESTAMP;")
+                except Exception:
+                    pass
+            for t_nom in idem_tablas:
+                try:
+                    cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{t_nom}_idempotency_key ON {t_nom}(idempotency_key);")
+                except Exception:
+                    pass
+
             conn.commit()
         finally:
             conn.close()
@@ -474,6 +503,15 @@ def _crear_engine(db_url: str):
                                     cursor.execute(f"ALTER TABLE proveedores ADD COLUMN {c_nom} {c_def};")
                                 except Exception:
                                     pass
+                    for t_nom in ("compras_inventario", "movimientos_inventario", "traslados_inventario", "gastos", "liquidaciones_proveedores", "liquidaciones", "ventas", "abonos"):
+                        try:
+                            cursor.execute(f"PRAGMA table_info({t_nom});")
+                            t_cols = {r[1] for r in cursor.fetchall()}
+                            if t_cols and "idempotency_key" not in t_cols:
+                                cursor.execute(f"ALTER TABLE {t_nom} ADD COLUMN idempotency_key TEXT;")
+                                cursor.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{t_nom}_idempotency_key ON {t_nom}(idempotency_key);")
+                        except Exception:
+                            pass
                     dbapi_connection.commit()
                 except Exception:
                     pass

@@ -1,5 +1,6 @@
 import os
 import socket
+import secrets
 from pydantic_settings import BaseSettings
 
 try:
@@ -12,6 +13,36 @@ except Exception:
 os.makedirs(_DB_DIR, exist_ok=True)
 _SQLITE_FILE = os.path.abspath(os.path.join(_DB_DIR, "vmpos_server.db")).replace("\\", "/")
 DEFAULT_SQLITE_URL = f"sqlite+aiosqlite:///{_SQLITE_FILE}"
+
+
+def _obtener_o_generar_secret_key() -> str:
+    env_sec = os.environ.get("VMPOS_SECRET_KEY", "").strip()
+    if env_sec:
+        return env_sec
+
+    cfg_dir = os.path.abspath(os.path.join(_DB_DIR, "..", "config"))
+    try:
+        os.makedirs(cfg_dir, exist_ok=True)
+        key_file = os.path.join(cfg_dir, "jwt_secret.key")
+        if os.path.exists(key_file):
+            try:
+                with open(key_file, "r", encoding="utf-8") as f:
+                    sec = f.read().strip()
+                    if len(sec) >= 32:
+                        return sec
+            except Exception:
+                pass
+        nuevo_sec = secrets.token_urlsafe(48)
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            mode = 0o600
+            with os.fdopen(os.open(key_file, flags, mode), "w", encoding="utf-8") as f:
+                f.write(nuevo_sec)
+        except Exception:
+            pass
+        return nuevo_sec
+    except Exception:
+        return "vmpos_default_secure_fallback_" + secrets.token_urlsafe(24)
 
 
 def _detectar_database_url_por_defecto() -> str:
@@ -37,7 +68,7 @@ def _detectar_database_url_por_defecto() -> str:
 
 class Settings(BaseSettings):
     DATABASE_URL: str = _detectar_database_url_por_defecto()
-    SECRET_KEY: str = "supersecretkey"
+    SECRET_KEY: str = _obtener_o_generar_secret_key()
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
     APP_NAME: str = "VmPOS"

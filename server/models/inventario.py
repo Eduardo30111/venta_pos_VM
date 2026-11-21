@@ -33,6 +33,7 @@ class MovimientoInventario(Base):
     observacion = Column(String, nullable=True)
     observaciones = Column(String, nullable=True)  # Compatibilidad con esquemas SQLite históricos
     estado = Column(String, default="Completado")
+    idempotency_key = Column(String, unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=True)
 
     def __init__(self, **kwargs):
@@ -67,6 +68,7 @@ class TrasladoInventario(Base):
     usuario = Column(String, nullable=False)
     estado = Column(String, default="Completado")
     observaciones = Column(String, nullable=True)
+    idempotency_key = Column(String, unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -84,6 +86,7 @@ class CompraInventario(Base):
     usuario = Column(String, nullable=False)
     observaciones = Column(String, nullable=True)
     estado = Column(String, default="Recibida")
+    idempotency_key = Column(String, unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -34,11 +34,20 @@ from .services.migracion_historica import sincronizar_y_auditar_datos_historicos
 
 app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION)
 
+# Configuración CORS estricta y segura para LAN y loopback (elimina wildcard inseguro con credenciales)
+_allowed_origins = [
+    "http://localhost",
+    "http://localhost:8000",
+    "http://127.0.0.1",
+    "http://127.0.0.1:8000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+)(:\d+)?$",
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -326,8 +335,20 @@ async def startup():
         "ALTER TABLE proveedores ADD COLUMN total_comisiones FLOAT DEFAULT 0.0;",
         "ALTER TABLE proveedores ADD COLUMN total_pagado FLOAT DEFAULT 0.0;",
         # Índices únicos de idempotencia
+        "ALTER TABLE compras_inventario ADD COLUMN idempotency_key VARCHAR;",
+        "ALTER TABLE gastos ADD COLUMN idempotency_key VARCHAR;",
+        "ALTER TABLE liquidaciones_proveedores ADD COLUMN idempotency_key VARCHAR;",
+        "ALTER TABLE liquidaciones ADD COLUMN idempotency_key VARCHAR;",
+        "ALTER TABLE movimientos_inventario ADD COLUMN idempotency_key VARCHAR;",
+        "ALTER TABLE traslados_inventario ADD COLUMN idempotency_key VARCHAR;",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_ventas_idempotency_key ON ventas(idempotency_key);",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_abonos_idempotency_key ON abonos(idempotency_key);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_compras_idempotency_key ON compras_inventario(idempotency_key);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_gastos_idempotency_key ON gastos(idempotency_key);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_liq_prov_idempotency_key ON liquidaciones_proveedores(idempotency_key);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_liq_nom_idempotency_key ON liquidaciones(idempotency_key);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_mov_inv_idempotency_key ON movimientos_inventario(idempotency_key);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_traslados_idempotency_key ON traslados_inventario(idempotency_key);",
         # Materiales y Presentaciones en Productos
         "ALTER TABLE productos ADD COLUMN es_material BOOLEAN DEFAULT 0;",
         "ALTER TABLE productos ADD COLUMN presentacion_defecto VARCHAR DEFAULT 'Paquete';",

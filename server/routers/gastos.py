@@ -71,6 +71,14 @@ async def create_gasto(
     if float(gasto.valor or 0.0) <= 0:
         raise HTTPException(status_code=400, detail="El valor del gasto debe ser mayor a cero")
 
+    # Idempotencia estricta para evitar pagos de gastos duplicados ante reintentos
+    idem_clean = (getattr(gasto, "idempotency_key", None) or "").strip() or None
+    if idem_clean:
+        res_g = await db.execute(select(Gasto).where(Gasto.idempotency_key == idem_clean))
+        gasto_existente = res_g.scalars().first()
+        if gasto_existente:
+            return gasto_existente
+
     metodo = _normalizar_metodo_gasto(gasto.metodo_pago)
     ahora = datetime.now()
     f_str = gasto.fecha or ahora.strftime("%Y-%m-%d")
@@ -83,6 +91,7 @@ async def create_gasto(
     datos["fecha"] = f_str
     datos["hora"] = h_str
     datos["estado"] = estado
+    datos["idempotency_key"] = idem_clean
     datos["clasificacion"] = datos.get("clasificacion") or datos.get("categoria") or "Operativo diario"
     if estado == "Pagado" and not datos.get("fecha_pago"):
         datos["fecha_pago"] = f"{f_str} {h_str}"

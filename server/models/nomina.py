@@ -32,6 +32,7 @@ class Liquidacion(Base):
     estado = Column(String, default="Pendiente") # Pendiente/Liquidado/Anulado
     liquidado_por = Column(Integer, ForeignKey("usuarios.id"), nullable=True)
     observaciones = Column(String, nullable=True)
+    idempotency_key = Column(String, unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class Asistencia(Base):

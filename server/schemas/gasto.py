@@ -24,6 +24,7 @@ class GastoBase(BaseModel):
     sesion_caja_id: Optional[int] = None
     referencia_id: Optional[int] = None
     observacion: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 class GastoCreate(GastoBase):

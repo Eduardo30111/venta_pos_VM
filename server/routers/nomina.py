@@ -246,6 +246,21 @@ async def get_asistencias(fecha: str, db: AsyncSession = Depends(get_db), curren
 @router.post("/liquidaciones", response_model=LiquidacionResponse)
 async def create_liquidacion(liq: LiquidacionCreate, db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
     try:
+        # Idempotencia estricta para liquidaciones de nómina
+        idem_clean = (getattr(liq, "idempotency_key", None) or "").strip() or None
+        if idem_clean:
+            res_l = await db.execute(select(Liquidacion).where(Liquidacion.idempotency_key == idem_clean))
+            l_existente = res_l.scalars().first()
+            if l_existente:
+                usr_res = await db.execute(select(Usuario).where(Usuario.id == l_existente.usuario_id))
+                target_user = usr_res.scalars().first()
+                nombre_emp = f"{target_user.nombre or ''} {target_user.apellidos or ''}".strip() if target_user else f"Usuario {l_existente.usuario_id}"
+                l_existente.nombre_persona = nombre_emp
+                l_existente.monto = float(l_existente.total_liquidado or 0.0)
+                l_existente.fecha = l_existente.created_at.strftime("%Y-%m-%d %H:%M") if l_existente.created_at else ""
+                l_existente.mes_anio = l_existente.created_at.strftime("%m-%Y") if l_existente.created_at else ""
+                return l_existente
+
         p_inicio = liq.periodo_inicio or datetime(2000, 1, 1)
         p_fin = liq.periodo_fin or datetime.now()
 
@@ -270,7 +285,8 @@ async def create_liquidacion(liq: LiquidacionCreate, db: AsyncSession = Depends(
             total_liquidado=total_com + total_sal,
             estado="Liquidado",
             liquidado_por=current_user.id,
-            observaciones=liq.observaciones
+            observaciones=liq.observaciones,
+            idempotency_key=idem_clean,
         )
         db.add(liquidacion)
         await db.flush()

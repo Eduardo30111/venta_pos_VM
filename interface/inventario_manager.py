@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import os
 import sys
 import sqlite3
+import uuid
 
 try:
     from client.api_client import api
@@ -680,6 +681,7 @@ def _sincronizar_compra_local_sqlite(
     observaciones: str,
     items: List[Dict[str, Any]],
     conn: Optional[sqlite3.Connection] = None,
+    idempotency_key: Optional[str] = None,
 ):
     debo_cerrar = False
     if conn is None:
@@ -694,6 +696,16 @@ def _sincronizar_compra_local_sqlite(
 
     try:
         cur = conn.cursor()
+
+        # Idempotencia estricta en SQLite local
+        cur.execute("PRAGMA table_info(compras_inventario)")
+        cols_c = [c[1] for c in cur.fetchall()]
+        if idempotency_key and "idempotency_key" in cols_c:
+            cur.execute("SELECT id, numero_compra, total_compra FROM compras_inventario WHERE idempotency_key = ?", (idempotency_key,))
+            c_ex = cur.fetchone()
+            if c_ex:
+                return {"numero_compra": c_ex[1], "compra_id": c_ex[0], "total": float(c_ex[2] or 0.0), "repetido": True}
+
         ahora = datetime.now()
         f_str = ahora.strftime("%Y-%m-%d")
         h_str = ahora.strftime("%H:%M:%S")
@@ -701,18 +713,31 @@ def _sincronizar_compra_local_sqlite(
         if ubic not in ("BODEGA", "VITRINA"):
             ubic = "BODEGA"
 
-        # Cabecera de compra
-        cur.execute("""
-            INSERT OR REPLACE INTO compras_inventario (
-                numero_compra, fecha, hora, proveedor_id, proveedor_nombre,
-                documento_referencia, ubicacion_destino, total_compra, usuario,
-                observaciones, estado
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Recibida')
-        """, (
-            numero_compra, f_str, h_str, proveedor_id, proveedor_nombre or "Sin Proveedor",
-            doc_referencia or "", ubic, 0.0, usuario or "Administrador",
-            observaciones or ""
-        ))
+        # Cabecera de compra con idempotency_key si existe la columna
+        if "idempotency_key" in cols_c:
+            cur.execute("""
+                INSERT OR REPLACE INTO compras_inventario (
+                    numero_compra, fecha, hora, proveedor_id, proveedor_nombre,
+                    documento_referencia, ubicacion_destino, total_compra, usuario,
+                    observaciones, estado, idempotency_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Recibida', ?)
+            """, (
+                numero_compra, f_str, h_str, proveedor_id, proveedor_nombre or "Sin Proveedor",
+                doc_referencia or "", ubic, 0.0, usuario or "Administrador",
+                observaciones or "", idempotency_key
+            ))
+        else:
+            cur.execute("""
+                INSERT OR REPLACE INTO compras_inventario (
+                    numero_compra, fecha, hora, proveedor_id, proveedor_nombre,
+                    documento_referencia, ubicacion_destino, total_compra, usuario,
+                    observaciones, estado
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Recibida')
+            """, (
+                numero_compra, f_str, h_str, proveedor_id, proveedor_nombre or "Sin Proveedor",
+                doc_referencia or "", ubic, 0.0, usuario or "Administrador",
+                observaciones or ""
+            ))
         cid = cur.lastrowid or compra_id
 
         total_compra = 0.0
@@ -813,7 +838,8 @@ def _sincronizar_ajuste_local_sqlite(
     conteo_fisico: float,
     usuario: str = "Administrador",
     motivo: str = "Conteo físico",
-    conn: Optional[sqlite3.Connection] = None
+    conn: Optional[sqlite3.Connection] = None,
+    idempotency_key: Optional[str] = None
 ):
     debo_cerrar = False
     if conn is None:
@@ -828,6 +854,20 @@ def _sincronizar_ajuste_local_sqlite(
 
     try:
         cur = conn.cursor()
+        if idempotency_key:
+            cur.execute("SELECT nombre_producto, ubicacion_destino, stock_anterior, stock_nuevo, cantidad, tipo FROM movimientos_inventario WHERE idempotency_key = ?", (idempotency_key,))
+            prev = cur.fetchone()
+            if prev:
+                return {
+                    "producto": prev[0],
+                    "ubicacion": prev[1],
+                    "stock_anterior": prev[2],
+                    "stock_nuevo": prev[3],
+                    "diferencia": prev[4] if prev[5] == "AJUSTE_POSITIVO" else -prev[4],
+                    "tipo_ajuste": prev[5],
+                    "repetido": True,
+                }
+
         ahora = datetime.now()
         f_str = ahora.strftime("%Y-%m-%d")
         h_str = ahora.strftime("%H:%M:%S")
@@ -874,7 +914,8 @@ def _sincronizar_ajuste_local_sqlite(
                     stock_destino_ant, stock_destino_des,
                     stock_anterior, stock_nuevo,
                     costo_unitario, valor_total, referencia,
-                    usuario, usuario_nombre, observacion, observaciones, estado
+                    usuario, usuario_nombre, observacion, observaciones, estado,
+                    idempotency_key
                 ) VALUES (
                     ?, ?, ?, ?, ?,
                     'AJUSTE_CONTEO', 'AJUSTE_CONTEO', ?, ?,
@@ -883,7 +924,8 @@ def _sincronizar_ajuste_local_sqlite(
                     ?, ?,
                     ?, ?,
                     ?, ?, 'AJUSTE-FISICO',
-                    ?, ?, ?, ?, 'Completado'
+                    ?, ?, ?, ?, 'Completado',
+                    ?
                 )
             """, (
                 f_str, h_str, pid, cod, nom,
@@ -893,7 +935,8 @@ def _sincronizar_ajuste_local_sqlite(
                 s_ant, s_des,
                 st, st_des,
                 costo, round(abs(dif) * costo, 2),
-                usuario, usuario, motivo, motivo
+                usuario, usuario, motivo, motivo,
+                idempotency_key
             ))
             conn.commit()
             return {
@@ -922,7 +965,9 @@ def registrar_compra_entrada(
     usuario="Administrador",
     observaciones="",
     conn=None,
+    idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
+    idem_key = str(idempotency_key or f"cmp-{uuid.uuid4()}")
     payload = {
         "proveedor_id": proveedor_id,
         "proveedor_nombre": str(proveedor_nombre or "Sin Proveedor"),
@@ -931,6 +976,7 @@ def registrar_compra_entrada(
         "usuario": str(usuario or "Administrador"),
         "observaciones": str(observaciones or ""),
         "items": items or [],
+        "idempotency_key": idem_key,
     }
     res = None
     es_error_red = False
@@ -964,7 +1010,8 @@ def registrar_compra_entrada(
                 usuario=usuario,
                 observaciones=observaciones,
                 items=items,
-                conn=conn
+                conn=conn,
+                idempotency_key=idem_key
             )
         except Exception as e_s:
             print(f"Aviso sincronizando compra local: {e_s}")
@@ -982,7 +1029,8 @@ def registrar_compra_entrada(
         usuario=usuario,
         observaciones=observaciones,
         items=items,
-        conn=conn
+        conn=conn,
+        idempotency_key=idem_key
     )
     try:
         from interface.sync_manager import SyncManager, OP_MOV_INVENTARIO
@@ -1044,13 +1092,16 @@ def registrar_ajuste_inventario(
     usuario="Administrador",
     motivo="Conteo físico",
     conn=None,
+    idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
+    idem_key = str(idempotency_key or f"ajuste-{uuid.uuid4()}")
     payload = {
         "codigo_o_id": str(codigo_o_id),
         "ubicacion": str(ubicacion).strip().upper(),
         "conteo_fisico": float(conteo_fisico),
         "usuario": str(usuario or "Administrador"),
         "motivo": str(motivo or "Conteo físico"),
+        "idempotency_key": idem_key,
     }
     res = None
     es_error_red = False
@@ -1079,7 +1130,8 @@ def registrar_ajuste_inventario(
                 conteo_fisico=conteo_fisico,
                 usuario=usuario,
                 motivo=motivo,
-                conn=conn
+                conn=conn,
+                idempotency_key=idem_key
             )
         except Exception as e_s:
             print(f"Aviso sincronizando ajuste local: {e_s}")
@@ -1092,7 +1144,8 @@ def registrar_ajuste_inventario(
         conteo_fisico=conteo_fisico,
         usuario=usuario,
         motivo=motivo,
-        conn=conn
+        conn=conn,
+        idempotency_key=idem_key
     )
     try:
         from interface.sync_manager import SyncManager, OP_MOV_INVENTARIO

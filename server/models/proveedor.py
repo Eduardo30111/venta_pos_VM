@@ -35,4 +35,5 @@ class LiquidacionProveedor(Base):
     usuario = Column(String, nullable=False)
     observaciones = Column(String, nullable=True)
     estado = Column(String, default="Completada")
+    idempotency_key = Column(String, unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

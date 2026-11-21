@@ -1,11 +1,13 @@
 import bcrypt as _bcrypt
+import hashlib
+import hmac
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from typing import Optional
+from typing import Optional, Tuple
 
 from ..config import settings
 from ..database import get_db
@@ -15,18 +17,39 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 def hash_password(password: str) -> str:
     pwd_bytes = (password or "").encode("utf-8")[:72]
-    return _bcrypt.hashpw(pwd_bytes, _bcrypt.gensalt()).decode("utf-8")
+    return _bcrypt.hashpw(pwd_bytes, _bcrypt.gensalt(rounds=12)).decode("utf-8")
+
+def verify_and_rehash_password(plain_password: str, hashed_password: str) -> Tuple[bool, bool, Optional[str]]:
+    """
+    Verifica la contraseña contra el hash almacenado con protección de tiempo constante.
+    Si la contraseña coincide con un hash legacy o texto plano previo a la migración,
+    retorna (True, True, nuevo_hash_bcrypt) para re-hashearla atómicamente y erradicar texto plano.
+    Si ya es un hash bcrypt ($2a$, $2b$, $2y$), valida directamente y retorna (True, False, None).
+    """
+    if not hashed_password or not plain_password:
+        return False, False, None
+    try:
+        pwd_bytes = plain_password.encode("utf-8")[:72]
+        if hashed_password.startswith(("$2a$", "$2b$", "$2y$")):
+            es_valido = _bcrypt.checkpw(pwd_bytes, hashed_password.encode("utf-8"))
+            return es_valido, False, None
+
+        # Soporte seguro para migración transparente de hashes SHA-256 históricos
+        sha_candidato = hashlib.sha256(plain_password.encode("utf-8")).hexdigest()
+        if hmac.compare_digest(sha_candidato, hashed_password):
+            return True, True, hash_password(plain_password)
+
+        # Soporte transitorio de texto plano con protección contra timing attacks para usuarios legacy
+        if hmac.compare_digest(plain_password, hashed_password):
+            return True, True, hash_password(plain_password)
+
+        return False, False, None
+    except Exception:
+        return False, False, None
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    if not hashed_password:
-        return False
-    try:
-        pwd_bytes = (plain_password or "").encode("utf-8")[:72]
-        if hashed_password.startswith("$2"):
-            return _bcrypt.checkpw(pwd_bytes, hashed_password.encode("utf-8"))
-        return plain_password == hashed_password
-    except Exception:
-        return False
+    valido, _, _ = verify_and_rehash_password(plain_password, hashed_password)
+    return valido
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()

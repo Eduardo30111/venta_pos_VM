@@ -95,23 +95,28 @@ def recalcular_saldo_proveedor(proveedor_id: int, conn: Optional[sqlite3.Connect
         tot_p = float(row[3] or 0.0)
         saldo_p = float(row[4] or 0.0)
 
-        # Si no hay cuentas por pagar registradas pero la API del servidor reporta saldo acumulado, tomar el saldo del servidor
-        if conteo_cxp == 0 and api is not None:
+        # Si la API del servidor central está disponible, es la fuente autoritativa en modo cliente/servidor
+        if api is not None and api.esta_disponible():
             try:
                 resp = api.get(f"/proveedores/{proveedor_id}", timeout=3.0)
                 if resp.status_code == 200:
                     d_api = resp.json()
-                    s_api = float(d_api.get("saldo_acumulado") or d_api.get("saldo_pendiente") or 0.0)
-                    if s_api > saldo_p:
-                        saldo_p = s_api
-                        tot_v = max(tot_v, float(d_api.get("total_ventas") or 0.0))
-                        tot_c = max(tot_c, float(d_api.get("total_comisiones") or 0.0))
-                        tot_p = max(tot_p, float(d_api.get("total_pagado") or 0.0))
+                    saldo_p = float(d_api.get("saldo_acumulado") or d_api.get("saldo_pendiente") or 0.0)
+                    tot_v = float(d_api.get("total_ventas") or 0.0)
+                    tot_c = float(d_api.get("total_comisiones") or 0.0)
+                    tot_p = float(d_api.get("total_pagado") or 0.0)
+                    # Si el servidor reporta saldo cero o liquidado, sincronizar estado local para erradicar saldos fantasmas
+                    if saldo_p <= 0.009:
+                        cur.execute("""
+                            UPDATE cuentas_por_pagar_proveedores
+                            SET saldo_pendiente = 0.0, estado = 'Pagada'
+                            WHERE (proveedor_id = ? OR CAST(proveedor_id AS TEXT) = ? OR ((proveedor_id IS NULL OR proveedor_id = 0) AND LOWER(proveedor_nombre) = LOWER(?)))
+                              AND estado != 'Anulada'
+                        """, (proveedor_id, str(proveedor_id), p_nom))
             except Exception:
                 pass
-
-        # Si el proveedor no tiene cuentas por pagar registradas pero ya tenía saldo acumulado previo (saldo legacy), conservarlo descontando liquidaciones
-        if conteo_cxp == 0 and p_row and float(p_row[2] or 0.0) > 0:
+        elif conteo_cxp == 0 and p_row and float(p_row[2] or 0.0) > 0:
+            # Modo Offline: si el proveedor no tiene cuentas por pagar registradas pero ya tenía saldo acumulado previo (saldo legacy), descontar liquidaciones
             try:
                 cur.execute("""
                     SELECT COALESCE(SUM(monto_liquidado), 0.0)
@@ -1247,6 +1252,15 @@ def _sincronizar_liquidacion_local_sqlite(cur, proveedor_id: int, monto_flt: flo
                 fecha, hora, mes_anio, usuario, observaciones, estado
             ) VALUES (?, ?, ?, ?, 0.0, 0.0, 'Total', ?, ?, ?, ?, ?, ?, ?, 'Aplicada')
         """, (numero_recibo, proveedor_id, prov_nom, monto_flt, metodo_pago, referencia, f_s, h_s, m_a, usuario, observaciones))
+
+        # Actualizar inmediatamente acumulados en la tabla proveedores de SQLite
+        cur.execute("SELECT COALESCE(saldo_acumulado, 0.0), COALESCE(total_pagado, 0.0) FROM proveedores WHERE id = ?", (proveedor_id,))
+        row_p = cur.fetchone()
+        if row_p:
+            s_act, p_act = float(row_p[0] or 0.0), float(row_p[1] or 0.0)
+            s_nuevo = max(0.0, round(s_act - monto_flt, 2))
+            p_nuevo = round(p_act + monto_flt, 2)
+            cur.execute("UPDATE proveedores SET saldo_acumulado = ?, total_pagado = ? WHERE id = ?", (s_nuevo, p_nuevo, proveedor_id))
     except Exception as e_sl:
         print(f"Aviso en _sincronizar_liquidacion_local_sqlite: {e_sl}")
 

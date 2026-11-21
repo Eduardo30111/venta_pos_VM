@@ -39,6 +39,7 @@ class LiquidacionCreate(BaseModel):
     periodo_inicio: Optional[datetime] = None
     periodo_fin: Optional[datetime] = None
     observaciones: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 class LiquidacionResponse(BaseModel):
     id: int
