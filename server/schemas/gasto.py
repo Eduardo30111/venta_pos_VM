@@ -70,6 +70,7 @@ class GastoResponse(GastoBase):
     id: int
     usuario_id: int
     usuario_nombre: Optional[str] = None
+    repetido: Optional[bool] = False
     created_at: Optional[datetime] = None
 
     class Config:

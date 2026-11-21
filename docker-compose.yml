@@ -5,11 +5,11 @@ services:
     image: postgres:16-alpine
     container_name: vmpos_db
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: vmpos
+      POSTGRES_USER: ${POSTGRES_USER:?Variable POSTGRES_USER obligatoria no definida en entorno o .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Variable POSTGRES_PASSWORD obligatoria no definida en entorno o .env}
+      POSTGRES_DB: ${POSTGRES_DB:-vmpos}
     ports:
-      - "5433:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -20,9 +20,9 @@ services:
       dockerfile: Dockerfile
     container_name: vmpos_api
     ports:
-      - "8000:8000"
+      - "${VMPOS_API_PORT:-8000}:8000"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@vmpos-db:5432/vmpos
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@vmpos-db:5432/${POSTGRES_DB:-vmpos}
       - VMPOS_SECRET_KEY=${VMPOS_SECRET_KEY:-}
     volumes:
       - ./server:/app/server

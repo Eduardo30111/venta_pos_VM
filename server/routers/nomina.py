@@ -265,6 +265,7 @@ async def create_liquidacion(liq: LiquidacionCreate, db: AsyncSession = Depends(
                     l_existente.monto = float(l_existente.total_liquidado or 0.0)
                     l_existente.fecha = l_existente.created_at.strftime("%Y-%m-%d %H:%M") if l_existente.created_at else ""
                     l_existente.mes_anio = l_existente.created_at.strftime("%m-%Y") if l_existente.created_at else ""
+                    l_existente.repetido = True
                     return l_existente
 
             p_inicio = liq.periodo_inicio or datetime(2000, 1, 1)
@@ -344,6 +345,7 @@ async def create_liquidacion(liq: LiquidacionCreate, db: AsyncSession = Depends(
                     l_existente.monto = float(l_existente.total_liquidado or 0.0)
                     l_existente.fecha = l_existente.created_at.strftime("%Y-%m-%d %H:%M") if l_existente.created_at else ""
                     l_existente.mes_anio = l_existente.created_at.strftime("%m-%Y") if l_existente.created_at else ""
+                    l_existente.repetido = True
                     return l_existente
             raise HTTPException(status_code=409, detail="Conflicto de concurrencia al liquidar nómina.")
         except HTTPException:

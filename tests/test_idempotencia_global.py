@@ -1,15 +1,22 @@
 import unittest
 import asyncio
+import os
 from httpx import AsyncClient, ASGITransport
 from server.main import app
-from server.database import SessionLocal
-from server.models.usuario import Usuario
-from server.middleware.auth import hash_password, verify_and_rehash_password
+from tests.test_helpers import init_isolated_test_db, cleanup_isolated_test_db
 
 
 class TestIdempotenciaGlobal(unittest.TestCase):
-    def setUp(self):
-        self.transport = ASGITransport(app=app)
+    test_db = f"/tmp/test_idempotencia_global_{os.getpid()}.db"
+
+    @classmethod
+    def setUpClass(cls):
+        asyncio.run(init_isolated_test_db(cls.test_db))
+        cls.transport = ASGITransport(app=app)
+
+    @classmethod
+    def tearDownClass(cls):
+        asyncio.run(cleanup_isolated_test_db(cls.test_db))
 
     def test_idempotencia_compras_y_ajustes(self):
         async def _test():

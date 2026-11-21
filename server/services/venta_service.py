@@ -84,6 +84,7 @@ class VentaService:
         venta.total_items = sum(float(d.cantidad or 0.0) for d in dets)
         venta.cuenta_por_cobrar_id = cxc_id
         venta.ya_existia_idempotencia = ya_existia
+        venta.repetido = ya_existia
         return venta
 
     @staticmethod

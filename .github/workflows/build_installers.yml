@@ -71,7 +71,6 @@ jobs:
           files: |
             dist/*.dmg
             dist/*.zip
-        continue-on-error: true
 
   build-windows:
     name: Compilar Instalador Windows (.exe)
@@ -101,18 +100,7 @@ jobs:
           set -eo pipefail
           python packaging/build_windows.py 2>&1 | tee build.log
 
-      - name: Diagnostico en caso de error
-        if: failure()
-        shell: bash
-        run: |
-          cp build.log build_log.txt
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add -f build_log.txt
-          git commit -m "chore(debug): build log"
-          git push origin main
-
-      - name: Subir log de compilacion
+      - name: Subir log de compilacion Windows
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -161,4 +149,3 @@ jobs:
             dist/*.exe
             dist/*.zip
             dist/*.dmg
-        continue-on-error: true

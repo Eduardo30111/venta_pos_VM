@@ -57,6 +57,7 @@ class LiquidacionResponse(BaseModel):
     monto: Optional[float] = None
     fecha: Optional[str] = None
     mes_anio: Optional[str] = None
+    repetido: Optional[bool] = False
 
     class Config:
         from_attributes = True

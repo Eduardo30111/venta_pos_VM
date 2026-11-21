@@ -84,6 +84,7 @@ async def create_gasto(
                 res_g = await db.execute(select(Gasto).where(Gasto.idempotency_key == idem_clean))
                 gasto_existente = res_g.scalars().first()
                 if gasto_existente:
+                    gasto_existente.repetido = True
                     return gasto_existente
 
             metodo = _normalizar_metodo_gasto(gasto.metodo_pago)
@@ -136,6 +137,7 @@ async def create_gasto(
                 res_g = await db.execute(select(Gasto).where(Gasto.idempotency_key == idem_clean))
                 gasto_existente = res_g.scalars().first()
                 if gasto_existente:
+                    gasto_existente.repetido = True
                     return gasto_existente
             raise HTTPException(status_code=409, detail="Conflicto de concurrencia al registrar gasto.")
         except HTTPException:

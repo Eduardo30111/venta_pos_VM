@@ -169,15 +169,16 @@ async def startup():
         if os.path.exists(_v_db):
             asegurar_migraciones_sqlite(f"sqlite:///{_v_db}")
     except Exception as e_mig:
-        print(f"Aviso asegurando migraciones iniciales SQLite: {e_mig}")
+        logger.warning("Aviso asegurando migraciones iniciales SQLite: %s", e_mig)
 
     try:
         async with db_mod.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
     except Exception as pg_err:
-        print(
-            f"Aviso conectando motor primario ({settings.DATABASE_URL}): {pg_err}. "
-            f"Activando motor central SQLite/WAL..."
+        logger.warning(
+            "Aviso conectando motor primario (%s): %s. Activando motor central SQLite/WAL...",
+            settings.DATABASE_URL,
+            pg_err,
         )
         db_mod.activar_fallback_sqlite()
         await _reparar_tablas_bigint_sqlite()
@@ -418,7 +419,7 @@ async def startup():
         except Exception as e_stmt:
             msg = str(e_stmt).lower()
             if "duplicate column" not in msg and "already exists" not in msg:
-                logger.debug("Nota en DDL arranque: %s | %s", e_stmt, stmt[:50])
+                logger.warning("Aviso en DDL de arranque (%s): %s", stmt[:50], e_stmt)
 
     try:
         async with db_mod.engine.begin() as conn:
@@ -432,8 +433,8 @@ async def startup():
                     """
                 )
             )
-    except Exception:
-        pass
+    except Exception as e_cola:
+        logger.warning("Aviso limpiando usuarios no-operarios de cola_turno: %s", e_cola)
 
     from .models.terminal import Terminal
     from .models.usuario import Usuario

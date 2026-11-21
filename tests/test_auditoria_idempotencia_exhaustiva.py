@@ -1,14 +1,23 @@
 import unittest
 import asyncio
+import os
 import time
 from httpx import AsyncClient, ASGITransport
 from server.main import app
-from server.database import SessionLocal
+from tests.test_helpers import init_isolated_test_db, cleanup_isolated_test_db
 
 
 class TestAuditoriaIdempotenciaExhaustiva(unittest.TestCase):
-    def setUp(self):
-        self.transport = ASGITransport(app=app)
+    test_db = f"/tmp/test_idempotencia_exhaustiva_{os.getpid()}.db"
+
+    @classmethod
+    def setUpClass(cls):
+        asyncio.run(init_isolated_test_db(cls.test_db))
+        cls.transport = ASGITransport(app=app)
+
+    @classmethod
+    def tearDownClass(cls):
+        asyncio.run(cleanup_isolated_test_db(cls.test_db))
 
     def test_concurrencia_idempotencia_exhaustiva(self):
         async def _run():

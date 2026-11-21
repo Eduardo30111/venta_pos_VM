@@ -202,6 +202,7 @@ class VentaResponse(BaseModel):
     total_items: Optional[float] = None
     cuenta_por_cobrar_id: Optional[int] = None
     ya_existia_idempotencia: Optional[bool] = False
+    repetido: Optional[bool] = False
     detalles: List[DetalleVentaResponse] = []
     pagos: List[PagoResponse] = []
 

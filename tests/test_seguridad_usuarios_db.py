@@ -81,6 +81,24 @@ class TestSeguridadUsuariosDB(unittest.TestCase):
         finally:
             udb.DATABASE_PATH = orig_path
 
+    def test_hash_password_obliga_bcrypt_y_sin_fallback_inseguro(self):
+        import interface.usuarios_db as udb
+        # 1. Con bcrypt activo, genera hash bcrypt válido
+        pwd = "PasswordSegura999!"
+        h = hash_password(pwd)
+        self.assertTrue(h.startswith("$2b$") or h.startswith("$2a$"))
+
+        # 2. Si bcrypt no estuviera disponible, debe lanzar RuntimeError y NO generar SHA-256 silencioso
+        orig_bcrypt_flag = udb._HAS_BCRYPT
+        try:
+            udb._HAS_BCRYPT = False
+            with self.assertRaises(RuntimeError) as ctx:
+                hash_password("otra_password")
+            self.assertIn("es obligatorio", str(ctx.exception))
+            self.assertIn("bcrypt", str(ctx.exception))
+        finally:
+            udb._HAS_BCRYPT = orig_bcrypt_flag
+
 
 if __name__ == "__main__":
     unittest.main()

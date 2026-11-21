@@ -28,6 +28,22 @@ def _migrar_archivo_sqlite_directo(db_url: str):
         import sqlite3
         conn = sqlite3.connect(db_path, timeout=12)
         cur = conn.cursor()
+
+        def _safe_alter_column_direct(c, sql: str, desc: str = ""):
+            try:
+                c.execute(sql)
+            except Exception as e:
+                msg = str(e).lower()
+                if "duplicate column" in msg or "already exists" in msg:
+                    return
+                logger.warning("Aviso DDL migración directa (%s): %s", desc or sql[:50], e)
+
+        def _safe_update_direct(c, sql: str, desc: str = ""):
+            try:
+                c.execute(sql)
+            except Exception as e:
+                logger.warning("Aviso UPDATE migración directa (%s): %s", desc or sql[:50], e)
+
         try:
             # 1. Sesiones de Caja
             cur.execute("PRAGMA table_info(sesiones_caja);")
@@ -53,14 +69,8 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                 ]
                 for c_nom, c_def in cols_sesion:
                     if c_nom not in cols_caja:
-                        try:
-                            cur.execute(f"ALTER TABLE sesiones_caja ADD COLUMN {c_nom} {c_def};")
-                        except Exception:
-                            pass
-                try:
-                    cur.execute("UPDATE sesiones_caja SET created_at = datetime('now') WHERE created_at IS NULL;")
-                except Exception:
-                    pass
+                        _safe_alter_column_direct(cur, f"ALTER TABLE sesiones_caja ADD COLUMN {c_nom} {c_def};", f"sesiones_caja.{c_nom}")
+                _safe_update_direct(cur, "UPDATE sesiones_caja SET created_at = datetime('now') WHERE created_at IS NULL;", "sesiones_caja created_at")
 
             # 2. Proveedores
             cur.execute("PRAGMA table_info(proveedores);")
@@ -79,17 +89,11 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                 ]
                 for c_nom, c_def in cols_p:
                     if c_nom not in cols_prov:
-                        try:
-                            cur.execute(f"ALTER TABLE proveedores ADD COLUMN {c_nom} {c_def};")
-                        except Exception:
-                            pass
-                try:
-                    if "nit_documento" in cols_prov:
-                        cur.execute("UPDATE proveedores SET documento_nit = nit_documento WHERE (documento_nit IS NULL OR documento_nit = '') AND nit_documento IS NOT NULL;")
-                    if "correo" in cols_prov:
-                        cur.execute("UPDATE proveedores SET email = correo WHERE (email IS NULL OR email = '') AND correo IS NOT NULL;")
-                except Exception:
-                    pass
+                        _safe_alter_column_direct(cur, f"ALTER TABLE proveedores ADD COLUMN {c_nom} {c_def};", f"proveedores.{c_nom}")
+                if "nit_documento" in cols_prov:
+                    _safe_update_direct(cur, "UPDATE proveedores SET documento_nit = nit_documento WHERE (documento_nit IS NULL OR documento_nit = '') AND nit_documento IS NOT NULL;", "proveedores nit_documento")
+                if "correo" in cols_prov:
+                    _safe_update_direct(cur, "UPDATE proveedores SET email = correo WHERE (email IS NULL OR email = '') AND correo IS NOT NULL;", "proveedores correo")
 
             # 3. Productos (catálogo unificado y tolerante a alias costo/precio)
             cur.execute("PRAGMA table_info(productos);")
@@ -128,26 +132,20 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                 ]
                 for c_nom, c_def in cols_pr:
                     if c_nom not in cols_prod:
-                        try:
-                            cur.execute(f"ALTER TABLE productos ADD COLUMN {c_nom} {c_def};")
-                        except Exception:
-                            pass
-                try:
-                    if "costo" in cols_prod:
-                        cur.execute("UPDATE productos SET precio_costo = costo WHERE (precio_costo IS NULL OR precio_costo = 0.0) AND costo IS NOT NULL AND costo > 0.0;")
-                    if "precio_costo" in cols_prod:
-                        cur.execute("UPDATE productos SET costo = precio_costo WHERE (costo IS NULL OR costo = 0.0) AND precio_costo IS NOT NULL AND precio_costo > 0.0;")
-                    if "precio" in cols_prod:
-                        cur.execute("UPDATE productos SET precio_venta = precio WHERE (precio_venta IS NULL OR precio_venta = 0.0) AND precio IS NOT NULL AND precio > 0.0;")
-                    if "precio_venta" in cols_prod:
-                        cur.execute("UPDATE productos SET precio = precio_venta WHERE (precio IS NULL OR precio = 0.0) AND precio_venta IS NOT NULL AND precio_venta > 0.0;")
-                    if "stock" in cols_prod:
-                        cur.execute("UPDATE productos SET stock_vitrina = stock WHERE (stock_vitrina IS NULL OR stock_vitrina = 0.0) AND (stock_bodega IS NULL OR stock_bodega = 0.0) AND stock > 0.0;")
-                    cur.execute("UPDATE productos SET tipo_producto = 'Producto' WHERE tipo_producto IS NULL OR tipo_producto = '';")
-                    cur.execute("UPDATE productos SET created_at = datetime('now') WHERE created_at IS NULL;")
-                    cur.execute("UPDATE productos SET updated_at = datetime('now') WHERE updated_at IS NULL;")
-                except Exception:
-                    pass
+                        _safe_alter_column_direct(cur, f"ALTER TABLE productos ADD COLUMN {c_nom} {c_def};", f"productos.{c_nom}")
+                if "costo" in cols_prod:
+                    _safe_update_direct(cur, "UPDATE productos SET precio_costo = costo WHERE (precio_costo IS NULL OR precio_costo = 0.0) AND costo IS NOT NULL AND costo > 0.0;", "productos costo -> precio_costo")
+                if "precio_costo" in cols_prod:
+                    _safe_update_direct(cur, "UPDATE productos SET costo = precio_costo WHERE (costo IS NULL OR costo = 0.0) AND precio_costo IS NOT NULL AND precio_costo > 0.0;", "productos precio_costo -> costo")
+                if "precio" in cols_prod:
+                    _safe_update_direct(cur, "UPDATE productos SET precio_venta = precio WHERE (precio_venta IS NULL OR precio_venta = 0.0) AND precio IS NOT NULL AND precio > 0.0;", "productos precio -> precio_venta")
+                if "precio_venta" in cols_prod:
+                    _safe_update_direct(cur, "UPDATE productos SET precio = precio_venta WHERE (precio IS NULL OR precio = 0.0) AND precio_venta IS NOT NULL AND precio_venta > 0.0;", "productos precio_venta -> precio")
+                if "stock" in cols_prod:
+                    _safe_update_direct(cur, "UPDATE productos SET stock_vitrina = stock WHERE (stock_vitrina IS NULL OR stock_vitrina = 0.0) AND (stock_bodega IS NULL OR stock_bodega = 0.0) AND stock > 0.0;", "productos stock -> stock_vitrina")
+                _safe_update_direct(cur, "UPDATE productos SET tipo_producto = 'Producto' WHERE tipo_producto IS NULL OR tipo_producto = '';", "productos tipo_producto default")
+                _safe_update_direct(cur, "UPDATE productos SET created_at = datetime('now') WHERE created_at IS NULL;", "productos created_at")
+                _safe_update_direct(cur, "UPDATE productos SET updated_at = datetime('now') WHERE updated_at IS NULL;", "productos updated_at")
 
             # 4. Movimientos de Inventario (Kárdex tolerante a tipo y tipo_movimiento)
             cur.execute("""
@@ -217,26 +215,20 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                 ]
                 for c_nom, c_def in cols_m:
                     if c_nom not in cols_mov:
-                        try:
-                            cur.execute(f"ALTER TABLE movimientos_inventario ADD COLUMN {c_nom} {c_def};")
-                        except Exception:
-                            pass
-                try:
-                    if "tipo_movimiento" in cols_mov:
-                        cur.execute("UPDATE movimientos_inventario SET tipo = tipo_movimiento WHERE (tipo IS NULL OR tipo = '') AND tipo_movimiento IS NOT NULL;")
-                    if "tipo" in cols_mov:
-                        cur.execute("UPDATE movimientos_inventario SET tipo_movimiento = tipo WHERE (tipo_movimiento IS NULL OR tipo_movimiento = '') AND tipo IS NOT NULL;")
-                    if "usuario" in cols_mov:
-                        cur.execute("UPDATE movimientos_inventario SET usuario_nombre = usuario WHERE (usuario_nombre IS NULL OR usuario_nombre = '') AND usuario IS NOT NULL;")
-                    if "usuario_nombre" in cols_mov:
-                        cur.execute("UPDATE movimientos_inventario SET usuario = usuario_nombre WHERE (usuario IS NULL OR usuario = '') AND usuario_nombre IS NOT NULL;")
-                    if "observaciones" in cols_mov:
-                        cur.execute("UPDATE movimientos_inventario SET observacion = observaciones WHERE (observacion IS NULL OR observacion = '') AND observaciones IS NOT NULL;")
-                    if "observacion" in cols_mov:
-                        cur.execute("UPDATE movimientos_inventario SET observaciones = observacion WHERE (observaciones IS NULL OR observaciones = '') AND observacion IS NOT NULL;")
-                    cur.execute("UPDATE movimientos_inventario SET created_at = datetime('now') WHERE created_at IS NULL;")
-                except Exception:
-                    pass
+                        _safe_alter_column_direct(cur, f"ALTER TABLE movimientos_inventario ADD COLUMN {c_nom} {c_def};", f"movimientos_inventario.{c_nom}")
+                if "tipo_movimiento" in cols_mov:
+                    _safe_update_direct(cur, "UPDATE movimientos_inventario SET tipo = tipo_movimiento WHERE (tipo IS NULL OR tipo = '') AND tipo_movimiento IS NOT NULL;", "movimientos tipo_movimiento -> tipo")
+                if "tipo" in cols_mov:
+                    _safe_update_direct(cur, "UPDATE movimientos_inventario SET tipo_movimiento = tipo WHERE (tipo_movimiento IS NULL OR tipo_movimiento = '') AND tipo IS NOT NULL;", "movimientos tipo -> tipo_movimiento")
+                if "usuario" in cols_mov:
+                    _safe_update_direct(cur, "UPDATE movimientos_inventario SET usuario_nombre = usuario WHERE (usuario_nombre IS NULL OR usuario_nombre = '') AND usuario IS NOT NULL;", "movimientos usuario -> usuario_nombre")
+                if "usuario_nombre" in cols_mov:
+                    _safe_update_direct(cur, "UPDATE movimientos_inventario SET usuario = usuario_nombre WHERE (usuario IS NULL OR usuario = '') AND usuario_nombre IS NOT NULL;", "movimientos usuario_nombre -> usuario")
+                if "observaciones" in cols_mov:
+                    _safe_update_direct(cur, "UPDATE movimientos_inventario SET observacion = observaciones WHERE (observacion IS NULL OR observacion = '') AND observaciones IS NOT NULL;", "movimientos observaciones -> observacion")
+                if "observacion" in cols_mov:
+                    _safe_update_direct(cur, "UPDATE movimientos_inventario SET observaciones = observacion WHERE (observaciones IS NULL OR observaciones = '') AND observacion IS NOT NULL;", "movimientos observacion -> observaciones")
+                _safe_update_direct(cur, "UPDATE movimientos_inventario SET created_at = datetime('now') WHERE created_at IS NULL;", "movimientos created_at")
 
             # 5. Compras de Inventario
             cur.execute("""
@@ -259,11 +251,8 @@ def _migrar_archivo_sqlite_directo(db_url: str):
             cur.execute("PRAGMA table_info(compras_inventario);")
             cols_ci = {r[1] for r in cur.fetchall()}
             if "created_at" not in cols_ci:
-                try:
-                    cur.execute("ALTER TABLE compras_inventario ADD COLUMN created_at TIMESTAMP;")
-                    cur.execute("UPDATE compras_inventario SET created_at = datetime('now') WHERE created_at IS NULL;")
-                except Exception:
-                    pass
+                _safe_alter_column_direct(cur, "ALTER TABLE compras_inventario ADD COLUMN created_at TIMESTAMP;", "compras_inventario.created_at")
+                _safe_update_direct(cur, "UPDATE compras_inventario SET created_at = datetime('now') WHERE created_at IS NULL;", "compras_inventario created_at")
 
             # 6. Detalle Compras
             cur.execute("""
@@ -305,11 +294,8 @@ def _migrar_archivo_sqlite_directo(db_url: str):
             cur.execute("PRAGMA table_info(traslados_inventario);")
             cols_ti = {r[1] for r in cur.fetchall()}
             if "created_at" not in cols_ti:
-                try:
-                    cur.execute("ALTER TABLE traslados_inventario ADD COLUMN created_at TIMESTAMP;")
-                    cur.execute("UPDATE traslados_inventario SET created_at = datetime('now') WHERE created_at IS NULL;")
-                except Exception:
-                    pass
+                _safe_alter_column_direct(cur, "ALTER TABLE traslados_inventario ADD COLUMN created_at TIMESTAMP;", "traslados_inventario.created_at")
+                _safe_update_direct(cur, "UPDATE traslados_inventario SET created_at = datetime('now') WHERE created_at IS NULL;", "traslados_inventario created_at")
 
             # 8. Servicios
             cur.execute("PRAGMA table_info(servicios);")
@@ -326,10 +312,7 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                 ]
                 for c_nom, c_def in cols_s_defs:
                     if c_nom not in cols_srv:
-                        try:
-                            cur.execute(f"ALTER TABLE servicios ADD COLUMN {c_nom} {c_def};")
-                        except Exception:
-                            pass
+                        _safe_alter_column_direct(cur, f"ALTER TABLE servicios ADD COLUMN {c_nom} {c_def};", f"servicios.{c_nom}")
 
             # 9. Tablas de Materiales, Operarios y Consumos
             cur.execute("""
@@ -483,12 +466,13 @@ def _crear_engine(db_url: str):
                             if c_nom not in cols_caja:
                                 try:
                                     cursor.execute(f"ALTER TABLE sesiones_caja ADD COLUMN {c_nom} {c_def};")
-                                except Exception:
-                                    pass
+                                except Exception as e_sc:
+                                    if "duplicate column" not in str(e_sc).lower():
+                                        logger.warning("Aviso pragma sesiones_caja.%s: %s", c_nom, e_sc)
                         try:
                             cursor.execute("UPDATE sesiones_caja SET created_at = datetime('now') WHERE created_at IS NULL;")
-                        except Exception:
-                            pass
+                        except Exception as e_sc_up:
+                            logger.warning("Aviso pragma UPDATE sesiones_caja: %s", e_sc_up)
 
                     cursor.execute("PRAGMA table_info(proveedores);")
                     cols_prov = [r[1] for r in cursor.fetchall()]
@@ -508,8 +492,9 @@ def _crear_engine(db_url: str):
                             if c_nom not in cols_prov:
                                 try:
                                     cursor.execute(f"ALTER TABLE proveedores ADD COLUMN {c_nom} {c_def};")
-                                except Exception:
-                                    pass
+                                except Exception as e_pv:
+                                    if "duplicate column" not in str(e_pv).lower():
+                                        logger.warning("Aviso pragma proveedores.%s: %s", c_nom, e_pv)
                     for t_nom in ("compras_inventario", "movimientos_inventario", "traslados_inventario", "gastos", "liquidaciones_proveedores", "liquidaciones", "ventas", "abonos", "movimientos_caja", "movimientos_financieros"):
                         try:
                             cursor.execute(f"PRAGMA table_info({t_nom});")
@@ -519,14 +504,14 @@ def _crear_engine(db_url: str):
                                 cursor.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{t_nom}_idempotency_key ON {t_nom}(idempotency_key);")
                         except Exception as e_prg:
                             if "duplicate column" not in str(e_prg).lower() and "already exists" not in str(e_prg).lower():
-                                logger.debug("Aviso pragma idempotencia %s: %s", t_nom, e_prg)
+                                logger.warning("Aviso pragma idempotencia %s: %s", t_nom, e_prg)
                     dbapi_connection.commit()
-                except Exception:
-                    pass
+                except Exception as e_pragma_mig:
+                    logger.warning("Aviso en bloque de migración pragma connect: %s", e_pragma_mig)
 
                 cursor.close()
-            except Exception:
-                pass
+            except Exception as e_conn_pragma:
+                logger.warning("Aviso configurando conexión SQLite: %s", e_conn_pragma)
 
         return eng
     return create_async_engine(db_url, echo=_echo_sql)

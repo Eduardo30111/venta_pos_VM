@@ -9,6 +9,9 @@ Reemplaza todas las definiciones locales de bases de datos para evitar inconsist
 import sqlite3
 import os
 import sys
+import logging
+
+logger = logging.getLogger("vmpos.database_manager")
 
 # Importar rutas de config.py
 try:
@@ -19,6 +22,23 @@ except ImportError:
     except ImportError:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from config import DB_VENTAS_PATH, DB_USUARIOS_PATH
+
+def _safe_alter_column(cursor, sql: str, desc: str = ""):
+    try:
+        cursor.execute(sql)
+    except sqlite3.OperationalError as e:
+        msg = str(e).lower()
+        if "duplicate column" in msg or "already exists" in msg:
+            return
+        logger.warning("Aviso DDL al agregar columna en SQLite (%s): %s", desc or sql[:50], e)
+    except Exception as e:
+        logger.warning("Error DDL inesperado en SQLite (%s): %s", desc or sql[:50], e)
+
+def _safe_update(cursor, sql: str, desc: str = ""):
+    try:
+        cursor.execute(sql)
+    except Exception as e:
+        logger.warning("Aviso UPDATE en SQLite (%s): %s", desc or sql[:50], e)
 
 def conectar_db(db_path=None):
     """
@@ -209,15 +229,8 @@ def inicializar_base_datos(db_path=None):
         conn.commit()
 
         # Migraciones (agregar columnas si no existen)
-        try:
-            cursor.execute("ALTER TABLE ventas ADD COLUMN metodo_pago TEXT DEFAULT 'Efectivo'")
-        except sqlite3.OperationalError:
-            pass # La columna ya existe
-
-        try:
-            cursor.execute("ALTER TABLE ventas ADD COLUMN operario TEXT DEFAULT 'Administrador'")
-        except sqlite3.OperationalError:
-            pass
+        _safe_alter_column(cursor, "ALTER TABLE ventas ADD COLUMN metodo_pago TEXT DEFAULT 'Efectivo'", "ventas.metodo_pago")
+        _safe_alter_column(cursor, "ALTER TABLE ventas ADD COLUMN operario TEXT DEFAULT 'Administrador'", "ventas.operario")
 
         # 12. Tabla de Gastos Recurrentes / Programados
         cursor.execute("""
@@ -277,109 +290,46 @@ def inicializar_base_datos(db_path=None):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_mov_fin_sesion ON movimientos_financieros(sesion_caja_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_mov_fin_ref ON movimientos_financieros(referencia_origen)")
 
-        try:
-            cursor.execute("ALTER TABLE ventas ADD COLUMN estado TEXT DEFAULT 'Completada'")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            cursor.execute("ALTER TABLE ventas ADD COLUMN motivo_anulacion TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            cursor.execute("ALTER TABLE ventas ADD COLUMN anulado_por TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            cursor.execute("ALTER TABLE ventas ADD COLUMN fecha_anulacion TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            cursor.execute("ALTER TABLE ventas ADD COLUMN modificado_por TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            cursor.execute("ALTER TABLE ventas ADD COLUMN fecha_modificacion TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            cursor.execute("ALTER TABLE ventas ADD COLUMN sesion_caja_id INTEGER DEFAULT NULL")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            cursor.execute("ALTER TABLE clientes ADD COLUMN permite_fiado INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            cursor.execute("ALTER TABLE clientes ADD COLUMN saldo_pendiente REAL DEFAULT 0.0")
-        except sqlite3.OperationalError:
-            pass
+        _safe_alter_column(cursor, "ALTER TABLE ventas ADD COLUMN estado TEXT DEFAULT 'Completada'", "ventas.estado")
+        _safe_alter_column(cursor, "ALTER TABLE ventas ADD COLUMN motivo_anulacion TEXT", "ventas.motivo_anulacion")
+        _safe_alter_column(cursor, "ALTER TABLE ventas ADD COLUMN anulado_por TEXT", "ventas.anulado_por")
+        _safe_alter_column(cursor, "ALTER TABLE ventas ADD COLUMN fecha_anulacion TEXT", "ventas.fecha_anulacion")
+        _safe_alter_column(cursor, "ALTER TABLE ventas ADD COLUMN modificado_por TEXT", "ventas.modificado_por")
+        _safe_alter_column(cursor, "ALTER TABLE ventas ADD COLUMN fecha_modificacion TEXT", "ventas.fecha_modificacion")
+        _safe_alter_column(cursor, "ALTER TABLE ventas ADD COLUMN sesion_caja_id INTEGER DEFAULT NULL", "ventas.sesion_caja_id")
+        _safe_alter_column(cursor, "ALTER TABLE clientes ADD COLUMN permite_fiado INTEGER DEFAULT 0", "clientes.permite_fiado")
+        _safe_alter_column(cursor, "ALTER TABLE clientes ADD COLUMN saldo_pendiente REAL DEFAULT 0.0", "clientes.saldo_pendiente")
 
         for col_cli in [
             "limite_credito REAL DEFAULT 0.0",
             "estado TEXT DEFAULT 'Activo'",
             "direccion TEXT DEFAULT ''"
         ]:
-            try:
-                cursor.execute(f"ALTER TABLE clientes ADD COLUMN {col_cli}")
-            except sqlite3.OperationalError:
-                pass
+            _safe_alter_column(cursor, f"ALTER TABLE clientes ADD COLUMN {col_cli}", f"clientes.{col_cli.split()[0]}")
 
         for col_vta in [
             "cliente_id INTEGER DEFAULT NULL",
             "saldo_pendiente REAL DEFAULT 0.0"
         ]:
-            try:
-                cursor.execute(f"ALTER TABLE ventas ADD COLUMN {col_vta}")
-            except sqlite3.OperationalError:
-                pass
+            _safe_alter_column(cursor, f"ALTER TABLE ventas ADD COLUMN {col_vta}", f"ventas.{col_vta.split()[0]}")
 
-        try:
-            cursor.execute("ALTER TABLE productos ADD COLUMN tipo_producto TEXT DEFAULT 'Fisico'")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            cursor.execute("ALTER TABLE productos ADD COLUMN descripcion TEXT DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            cursor.execute("ALTER TABLE productos ADD COLUMN proveedor_id INTEGER DEFAULT NULL")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            cursor.execute("ALTER TABLE gastos ADD COLUMN metodo_pago TEXT DEFAULT 'Efectivo'")
-        except sqlite3.OperationalError:
-            pass
+        _safe_alter_column(cursor, "ALTER TABLE productos ADD COLUMN tipo_producto TEXT DEFAULT 'Fisico'", "productos.tipo_producto")
+        _safe_alter_column(cursor, "ALTER TABLE productos ADD COLUMN descripcion TEXT DEFAULT ''", "productos.descripcion")
+        _safe_alter_column(cursor, "ALTER TABLE productos ADD COLUMN proveedor_id INTEGER DEFAULT NULL", "productos.proveedor_id")
+        _safe_alter_column(cursor, "ALTER TABLE gastos ADD COLUMN metodo_pago TEXT DEFAULT 'Efectivo'", "gastos.metodo_pago")
 
         # Migraciones contables profesionales:
         # A. Costo histórico unitario en detalle_ventas
-        try:
-            cursor.execute("ALTER TABLE detalle_ventas ADD COLUMN costo_unitario REAL DEFAULT 0.0")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            cursor.execute("""
-                UPDATE detalle_ventas 
-                SET costo_unitario = (
-                    SELECT COALESCE(p.costo, 0.0) 
-                    FROM productos p 
-                    WHERE p.codigo = detalle_ventas.codigo_producto
-                )
-                WHERE costo_unitario IS NULL OR costo_unitario = 0.0
-            """)
-        except Exception:
-            pass
+        _safe_alter_column(cursor, "ALTER TABLE detalle_ventas ADD COLUMN costo_unitario REAL DEFAULT 0.0", "detalle_ventas.costo_unitario")
+        _safe_update(cursor, """
+            UPDATE detalle_ventas 
+            SET costo_unitario = (
+                SELECT COALESCE(p.costo, 0.0) 
+                FROM productos p 
+                WHERE p.codigo = detalle_ventas.codigo_producto
+            )
+            WHERE costo_unitario IS NULL OR costo_unitario = 0.0
+        """, "detalle_ventas backfill costo_unitario")
 
         # B. Clasificación y estados contables en gastos
         for col_def in [
@@ -397,15 +347,9 @@ def inicializar_base_datos(db_path=None):
             "es_recurrente INTEGER DEFAULT 0",
             "recurrencia_id INTEGER DEFAULT NULL"
         ]:
-            try:
-                cursor.execute(f"ALTER TABLE gastos ADD COLUMN {col_def}")
-            except sqlite3.OperationalError:
-                pass
+            _safe_alter_column(cursor, f"ALTER TABLE gastos ADD COLUMN {col_def}", f"gastos.{col_def.split()[0]}")
 
-        try:
-            cursor.execute("UPDATE gastos SET fecha_pago = fecha WHERE fecha_pago IS NULL AND estado = 'Pagado'")
-        except Exception:
-            pass
+        _safe_update(cursor, "UPDATE gastos SET fecha_pago = fecha WHERE fecha_pago IS NULL AND estado = 'Pagado'", "gastos backfill fecha_pago")
 
         # C. Conciliación bancaria y Arqueo de Apertura en sesiones_caja
         for col_def in [
@@ -416,10 +360,7 @@ def inicializar_base_datos(db_path=None):
             "arqueo_apertura_json TEXT",
             "arqueo_cierre_json TEXT"
         ]:
-            try:
-                cursor.execute(f"ALTER TABLE sesiones_caja ADD COLUMN {col_def}")
-            except sqlite3.OperationalError:
-                pass
+            _safe_alter_column(cursor, f"ALTER TABLE sesiones_caja ADD COLUMN {col_def}", f"sesiones_caja.{col_def.split()[0]}")
 
         # D. Inventario Profesional: Bodega, Vitrina, Categorías y Atributos en productos
         for col_def in [
@@ -435,26 +376,20 @@ def inicializar_base_datos(db_path=None):
             "fecha_creacion TEXT DEFAULT NULL",
             "fecha_modificacion TEXT DEFAULT NULL"
         ]:
-            try:
-                cursor.execute(f"ALTER TABLE productos ADD COLUMN {col_def}")
-            except sqlite3.OperationalError:
-                pass
+            _safe_alter_column(cursor, f"ALTER TABLE productos ADD COLUMN {col_def}", f"productos.{col_def.split()[0]}")
 
         # Migración inicial de existencias preexistentes a Bodega si ambas ubicaciones están en cero
-        try:
-            cursor.execute("""
-                UPDATE productos 
-                SET stock_bodega = stock 
-                WHERE (stock_bodega IS NULL OR stock_bodega = 0.0) 
-                  AND (stock_vitrina IS NULL OR stock_vitrina = 0.0) 
-                  AND stock > 0
-            """)
-            cursor.execute("""
-                UPDATE productos 
-                SET stock = COALESCE(stock_bodega, 0.0) + COALESCE(stock_vitrina, 0.0)
-            """)
-        except Exception:
-            pass
+        _safe_update(cursor, """
+            UPDATE productos 
+            SET stock_bodega = stock 
+            WHERE (stock_bodega IS NULL OR stock_bodega = 0.0) 
+              AND (stock_vitrina IS NULL OR stock_vitrina = 0.0) 
+              AND stock > 0
+        """, "productos backfill stock_bodega")
+        _safe_update(cursor, """
+            UPDATE productos 
+            SET stock = COALESCE(stock_bodega, 0.0) + COALESCE(stock_vitrina, 0.0)
+        """, "productos backfill stock total")
 
         # 15. Tabla de Movimientos de Inventario (Kárdex Inmutable)
         cursor.execute("""
@@ -557,10 +492,7 @@ def inicializar_base_datos(db_path=None):
             "precio_variable INTEGER DEFAULT 0",
             "porcentaje_comision REAL DEFAULT 0.0"
         ]:
-            try:
-                cursor.execute(f"ALTER TABLE productos ADD COLUMN {col_def}")
-            except sqlite3.OperationalError:
-                pass
+            _safe_alter_column(cursor, f"ALTER TABLE productos ADD COLUMN {col_def}", f"productos.{col_def.split()[0]}")
 
         # 20. Migraciones de Proveedores (NIT, acumulados, estado y métricas)
         for col_def in [
@@ -573,10 +505,7 @@ def inicializar_base_datos(db_path=None):
             "direccion TEXT DEFAULT ''",
             "contacto TEXT DEFAULT ''"
         ]:
-            try:
-                cursor.execute(f"ALTER TABLE proveedores ADD COLUMN {col_def}")
-            except sqlite3.OperationalError:
-                pass
+            _safe_alter_column(cursor, f"ALTER TABLE proveedores ADD COLUMN {col_def}", f"proveedores.{col_def.split()[0]}")
 
         # 21. Tabla de Cuentas por Pagar a Proveedores (Servicios asociados)
         cursor.execute("""
@@ -638,14 +567,12 @@ def inicializar_base_datos(db_path=None):
             "movimientos_inventario", "traslados_inventario", "pagos_venta", "historial_liquidaciones",
             "movimientos_caja", "movimientos_financieros"
         ]:
-            try:
-                cursor.execute(f"ALTER TABLE {tabla_idem} ADD COLUMN idempotency_key TEXT")
-            except sqlite3.OperationalError:
-                pass
+            _safe_alter_column(cursor, f"ALTER TABLE {tabla_idem} ADD COLUMN idempotency_key TEXT", f"{tabla_idem}.idempotency_key")
             try:
                 cursor.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{tabla_idem}_idempotency_key ON {tabla_idem}(idempotency_key)")
-            except Exception:
-                pass
+            except Exception as e_idx:
+                if "already exists" not in str(e_idx).lower():
+                    logger.warning("Aviso creando índice uq_%s_idempotency_key: %s", tabla_idem, e_idx)
 
         # 23. Tabla de Cola de Sincronización Offline Persistente
         cursor.execute("""
@@ -746,10 +673,7 @@ def inicializar_base_datos(db_path=None):
             "factor_conversion_defecto REAL DEFAULT 1.0",
             "unidad_consumo_defecto TEXT DEFAULT 'Unidad'"
         ]:
-            try:
-                cursor.execute(f"ALTER TABLE productos ADD COLUMN {col_def}")
-            except sqlite3.OperationalError:
-                pass
+            _safe_alter_column(cursor, f"ALTER TABLE productos ADD COLUMN {col_def}", f"productos.{col_def.split()[0]}")
 
         # Índices de aceleración de consultas frecuentes (Ventas, Detalles, Productos y Clientes)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_fecha_estado ON ventas(fecha_venta, estado)")
@@ -768,8 +692,8 @@ def inicializar_base_datos(db_path=None):
         try:
             from server.database import asegurar_migraciones_sqlite
             asegurar_migraciones_sqlite(f"sqlite:///{DB_VENTAS_PATH}")
-        except Exception:
-            pass
+        except Exception as e_mig_sqlite:
+            logger.warning("Aviso sincronizando migraciones adicionales SQLite en database_manager: %s", e_mig_sqlite)
 
         print("✅ Base de datos ventas.db inicializada correctamente.")
         return True

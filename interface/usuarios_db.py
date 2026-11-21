@@ -34,14 +34,19 @@ MODULOS_DISPONIBLES = [
 
 def hash_password(password):
     """
-    Genera un hash seguro bcrypt rounds=12 (o SHA-256 si bcrypt no está instalado).
+    Genera un hash seguro bcrypt rounds=12.
+    Si el módulo 'bcrypt' no está disponible, genera un RuntimeError controlado
+    para impedir de forma absoluta la creación o almacenamiento de contraseñas inseguras.
     """
     if not password:
         return ""
-    if _HAS_BCRYPT:
-        salt = bcrypt.gensalt(rounds=12)
-        return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    if not _HAS_BCRYPT:
+        raise RuntimeError(
+            "El componente de seguridad 'bcrypt' es obligatorio para generar o modificar "
+            "contraseñas en VmPOS. Instale la dependencia con: pip install bcrypt"
+        )
+    salt = bcrypt.gensalt(rounds=12)
+    return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
 
 def verificar_password(password_plana, hash_almacenado):
     """

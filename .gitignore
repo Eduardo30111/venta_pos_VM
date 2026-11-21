@@ -32,11 +32,14 @@ trace_output.log
 scratch/
 .system_generated/
 
-# Base de datos temporales WAL y servidor generado
+# Bases de datos SQLite locales y temporales WAL
+*.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
 *backup*.db
-database/vmpos_server.db*
+database/*.db*
 config/network_config.json
 assets/logos/
 
@@ -49,4 +52,5 @@ config/jwt_secret.key
 *.key
 .env
 .env.*
+!.env.example
 abrir_carpeta_descargas.command
