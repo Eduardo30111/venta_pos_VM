@@ -79,10 +79,11 @@ class IngresoAutorizadoRequest(BaseModel):
 
 @router.get("/sesion-activa")
 async def get_sesion_activa(
+    terminal_id: Optional[int] = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    activa = await CajaService.obtener_sesion_activa(db)
+    activa = await CajaService.obtener_sesion_activa(db, terminal_id=terminal_id)
     if not activa:
         return {"activa": None}
     return {"activa": CajaService._sesion_to_dict(activa)}

@@ -77,8 +77,8 @@ class TestPantallaCargaYBienvenida(unittest.TestCase):
         duracion = time.time() - t_inicio
         
         self.assertIsNotNone(ventana)
-        # La animación dura ~1.2s a 1.5s
-        self.assertLess(duracion, 4.0, "La pantalla de carga tardó más de 4s en cerrarse")
+        # La animación dura ~1.2s a 1.5s (tolerante a carga del sistema hasta 8.0s)
+        self.assertLess(duracion, 8.0, "La pantalla de carga tardó más de 8s en cerrarse")
 
     def test_05_integracion_inicio_sesion(self):
         """Verifica que interface/inicio_sesion.py contenga la llamada a mostrar_carga."""

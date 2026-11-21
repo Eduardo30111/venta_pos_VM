@@ -165,15 +165,18 @@ class APIClient:
             return False
         self._ultimo_check_ts = ahora
         try:
-            with httpx.Client(timeout=2.0) as c:
-                r = c.get(f"{self.base_url}/api/health")
-                if r.status_code == 200:
-                    datos = r.json()
-                    ok = isinstance(datos, dict) and datos.get("status") == "ok" and datos.get("database") == "connected"
-                    self.servidor_disponible = ok
-                    return ok
+            client = self._get_http_client()
+            if client is None:
                 self.servidor_disponible = False
                 return False
+            r = client.get(f"{self.base_url}/api/health", timeout=2.5)
+            if r.status_code == 200:
+                datos = r.json()
+                ok = isinstance(datos, dict) and datos.get("status") == "ok" and datos.get("database") == "connected"
+                self.servidor_disponible = ok
+                return ok
+            self.servidor_disponible = False
+            return False
         except Exception:
             self.servidor_disponible = False
             return False

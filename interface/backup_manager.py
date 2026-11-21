@@ -84,6 +84,25 @@ def verificar_integridad_sqlite(db_path: str) -> Tuple[bool, str]:
                 pass
 
 
+def checkpoint_wal_sqlite(db_path: str) -> bool:
+    """Ejecuta PRAGMA wal_checkpoint(TRUNCATE) para vaciar WAL en el archivo principal."""
+    if not db_path or not os.path.isfile(db_path):
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        return True
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _backup_sqlite_en_caliente(origen: str, destino: str) -> Dict[str, Any]:
     """Copia consistente de una base SQLite usando la API online backup (segura con WAL)."""
     os.makedirs(os.path.dirname(os.path.abspath(destino)), exist_ok=True)
@@ -93,9 +112,17 @@ def _backup_sqlite_en_caliente(origen: str, destino: str) -> Dict[str, Any]:
     dst_conn = None
     try:
         src_conn = sqlite3.connect(origen, timeout=20.0)
+        try:
+            src_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        except Exception:
+            pass
         dst_conn = sqlite3.connect(destino, timeout=20.0)
         src_conn.backup(dst_conn)
         dst_conn.commit()
+        try:
+            dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        except Exception:
+            pass
     finally:
         if dst_conn is not None:
             try:
@@ -263,13 +290,24 @@ def restaurar_respaldo(
     crear_respaldo_previo: bool = True,
 ) -> Dict[str, Any]:
     """
-    Restaura de forma segura un respaldo previamente verificado:
+    Restaura de forma segura un respaldo previamente verificado con arquitectura
+    de dos fases (Staging + Atomic Swap con Rollback Todo-o-Nada):
+
     1. Valida SHA-256 y PRAGMA integrity_check del respaldo fuente.
-    2. Si `crear_respaldo_previo=True` y existen bases actuales, toma un snapshot preventivo
+    2. Checkpoint preventivo de WAL en todas las bases activas locales.
+    3. Si `crear_respaldo_previo=True` y existen bases actuales, toma un snapshot preventivo
        obligatorio antes de tocar producción.
-    3. Restaura cada SQLite usando la API nativa de backup (compatible con WAL) y limpia
-       archivos -wal/-shm residuales de forma segura.
-    4. Verifica PRAGMA integrity_check sobre las bases restauradas.
+    4. Fase 1 (Staging): Extrae y genera copias limpias de todas las bases y configs en un
+       directorio temporal aislado, validando la integridad SQLite y consistencia antes de
+       modificar ningún archivo de producción.
+    5. Fase 2 (Atomic Swap con Rollback Automático):
+       - Mueve los archivos activos actuales a un directorio de contingencia.
+       - Reemplaza atómicamente con los archivos validados de la etapa de staging.
+       - Limpia archivos -wal y -shm residuales de forma segura.
+       - Valida la integridad final de cada base instalada.
+       - En caso de cualquier excepción en esta fase, revierte inmediatamente todos
+         los cambios restaurando los archivos originales desde el área de contingencia,
+         garantizando que el sistema jamás quede en un estado mixto o corrupto.
     """
     ok_ver, msg_ver, manifest = verificar_respaldo(backup_dir)
     if not ok_ver or not manifest:
@@ -281,6 +319,13 @@ def restaurar_respaldo(
     os.makedirs(dir_db, exist_ok=True)
     os.makedirs(dir_cfg, exist_ok=True)
 
+    # 2. Checkpoint preventivo de las bases activas en producción
+    for db_name in DB_FILENAMES:
+        db_path = os.path.join(dir_db, db_name)
+        if os.path.isfile(db_path):
+            checkpoint_wal_sqlite(db_path)
+
+    # 3. Snapshot preventivo previo
     pre_backup_info = None
     if crear_respaldo_previo:
         existen_dbs = any(os.path.isfile(os.path.join(dir_db, n)) for n in DB_FILENAMES)
@@ -293,54 +338,155 @@ def restaurar_respaldo(
             )
 
     ruta_bk = os.path.abspath(backup_dir)
+    dbs_target = list(manifest.get("databases", {}).keys())
+    cfgs_target = [c for c in manifest.get("configs", {}).keys() if os.path.isfile(os.path.join(ruta_bk, "config", c))]
+
+    # 4. Fase 1: Staging aislado
+    stage_dir = tempfile.mkdtemp(prefix=".restore_stage_", dir=dir_db)
+    try:
+        for db_name in dbs_target:
+            src_db = os.path.join(ruta_bk, "database", db_name)
+            staged_db = os.path.join(stage_dir, db_name)
+            _backup_sqlite_en_caliente(src_db, staged_db)
+            ok_s, msg_s = verificar_integridad_sqlite(staged_db)
+            if not ok_s:
+                raise RuntimeError(f"Error en staging: base {db_name} no superó integrity_check: {msg_s}")
+
+        for cfg_name in cfgs_target:
+            src_cfg = os.path.join(ruta_bk, "config", cfg_name)
+            staged_cfg = os.path.join(stage_dir, cfg_name)
+            shutil.copy2(src_cfg, staged_cfg)
+    except Exception as exc:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+        raise RuntimeError(f"Fallo durante la fase de staging de restauración: {exc}. Producción intacta.")
+
+    # 5. Fase 2: Atomic Swap con Rollback Todo-o-Nada
+    rollback_dir = tempfile.mkdtemp(prefix=".restore_rollback_", dir=dir_db)
+    swapped_items: List[Dict[str, Any]] = []
     dbs_restauradas: List[str] = []
     cfgs_restaurados: List[str] = []
 
-    for db_name in manifest.get("databases", {}).keys():
-        src_db = os.path.join(ruta_bk, "database", db_name)
-        dst_db = os.path.join(dir_db, db_name)
+    try:
+        # Reemplazar bases de datos
+        for db_name in dbs_target:
+            dst_db = os.path.join(dir_db, db_name)
+            staged_db = os.path.join(stage_dir, db_name)
+            rb_db = os.path.join(rollback_dir, db_name)
+            sidecars_rb: Dict[str, str] = {}
 
-        # Restaurar mediante archivo temporal + backup online + reemplazo atómico
-        fd, tmp_db = tempfile.mkstemp(prefix=f".restore_{db_name}_", suffix=".tmp", dir=dir_db)
-        os.close(fd)
-        try:
-            _backup_sqlite_en_caliente(src_db, tmp_db)
-            os.replace(tmp_db, dst_db)
-            # Limpiar archivos WAL/SHM antiguos que pudieran pertenecer al estado previo
+            # Mover archivo original si existe a rollback_dir
+            tenia_original = os.path.isfile(dst_db)
+            if tenia_original:
+                checkpoint_wal_sqlite(dst_db)
+                os.replace(dst_db, rb_db)
+                for ext in ("-wal", "-shm"):
+                    side_src = f"{dst_db}{ext}"
+                    if os.path.exists(side_src):
+                        side_dst = os.path.join(rollback_dir, f"{db_name}{ext}")
+                        os.replace(side_src, side_dst)
+                        sidecars_rb[ext] = side_dst
+
+            # Registrar inmediatamente en swapped_items antes de reemplazar para garantizar rollback
+            item_record = {
+                "type": "db",
+                "name": db_name,
+                "dst_path": dst_db,
+                "rb_path": rb_db if tenia_original else None,
+                "sidecars": sidecars_rb,
+                "tenia_original": tenia_original,
+            }
+            swapped_items.append(item_record)
+
+            # Instalar archivo desde staging
+            os.replace(staged_db, dst_db)
+
+            # Limpiar cualquier residuo de -wal/-shm en destino
             for ext in ("-wal", "-shm"):
-                side_f = f"{dst_db}{ext}"
-                if os.path.exists(side_f):
+                side_cur = f"{dst_db}{ext}"
+                if os.path.exists(side_cur):
                     try:
-                        os.remove(side_f)
+                        os.remove(side_cur)
                     except Exception:
                         pass
-            ok_post, msg_post = verificar_integridad_sqlite(dst_db)
-            if not ok_post:
-                raise RuntimeError(f"La base restaurada {db_name} no superó integrity_check: {msg_post}")
-            dbs_restauradas.append(db_name)
-        finally:
-            if os.path.exists(tmp_db):
-                try:
-                    os.remove(tmp_db)
-                except Exception:
-                    pass
 
-    for cfg_name in manifest.get("configs", {}).keys():
-        src_cfg = os.path.join(ruta_bk, "config", cfg_name)
-        dst_cfg = os.path.join(dir_cfg, cfg_name)
-        if os.path.isfile(src_cfg):
-            fd, tmp_cfg = tempfile.mkstemp(prefix=f".restore_{cfg_name}_", suffix=".tmp", dir=dir_cfg)
-            os.close(fd)
+            # Validar integridad post-swap
+            ok_dst, msg_dst = verificar_integridad_sqlite(dst_db)
+            if not ok_dst:
+                raise RuntimeError(f"Integridad SQLite falló post-swap en {db_name}: {msg_dst}")
+
+            dbs_restauradas.append(db_name)
+
+        # Reemplazar configuraciones
+        for cfg_name in cfgs_target:
+            dst_cfg = os.path.join(dir_cfg, cfg_name)
+            staged_cfg = os.path.join(stage_dir, cfg_name)
+            rb_cfg = os.path.join(rollback_dir, cfg_name)
+
+            tenia_original = os.path.isfile(dst_cfg)
+            if tenia_original:
+                os.replace(dst_cfg, rb_cfg)
+
+            item_record_cfg = {
+                "type": "cfg",
+                "name": cfg_name,
+                "dst_path": dst_cfg,
+                "rb_path": rb_cfg if tenia_original else None,
+                "sidecars": {},
+                "tenia_original": tenia_original,
+            }
+            swapped_items.append(item_record_cfg)
+
+            os.replace(staged_cfg, dst_cfg)
+            cfgs_restaurados.append(cfg_name)
+
+    except Exception as exc:
+        # ROLLBACK AUTOMÁTICO TODO-O-NADA
+        rollback_errors = []
+        for item in reversed(swapped_items):
             try:
-                shutil.copy2(src_cfg, tmp_cfg)
-                os.replace(tmp_cfg, dst_cfg)
-                cfgs_restaurados.append(cfg_name)
-            finally:
-                if os.path.exists(tmp_cfg):
+                # Quitar lo instalado
+                if os.path.exists(item["dst_path"]):
                     try:
-                        os.remove(tmp_cfg)
-                    except Exception:
-                        pass
+                        os.remove(item["dst_path"])
+                    except Exception as e_rm:
+                        rollback_errors.append(f"No se pudo remover {item['dst_path']}: {e_rm}")
+
+                # Si existía original, devolverlo
+                if item["tenia_original"] and item["rb_path"] and os.path.exists(item["rb_path"]):
+                    os.replace(item["rb_path"], item["dst_path"])
+                    # Restaurar sidecars (-wal, -shm)
+                    for ext, side_rb in item.get("sidecars", {}).items():
+                        side_dst = f"{item['dst_path']}{ext}"
+                        if os.path.exists(side_rb):
+                            os.replace(side_rb, side_dst)
+
+                # Si no existía original, asegurarse que no quede residuo
+                elif not item["tenia_original"]:
+                    for ext in ("-wal", "-shm"):
+                        side_dst = f"{item['dst_path']}{ext}"
+                        if os.path.exists(side_dst):
+                            try:
+                                os.remove(side_dst)
+                            except Exception:
+                                pass
+            except Exception as e_rb:
+                rollback_errors.append(f"Error revirtiendo {item['name']}: {e_rb}")
+
+        # Limpiar directorios temporales
+        shutil.rmtree(rollback_dir, ignore_errors=True)
+        shutil.rmtree(stage_dir, ignore_errors=True)
+
+        rb_status = "Rollback completado con éxito; datos originales conservados intactos."
+        if rollback_errors:
+            rb_status = f"Rollback parcial con alertas: {'; '.join(rollback_errors)}"
+
+        raise RuntimeError(
+            f"Fallo durante el reemplazo atómico de la restauración: {exc}. {rb_status}"
+        )
+    finally:
+        # Limpieza normal en caso de éxito
+        shutil.rmtree(rollback_dir, ignore_errors=True)
+        shutil.rmtree(stage_dir, ignore_errors=True)
 
     return {
         "ok": True,
@@ -348,4 +494,5 @@ def restaurar_respaldo(
         "pre_restore_backup": pre_backup_info["backup_dir"] if pre_backup_info else None,
         "databases_restauradas": dbs_restauradas,
         "configs_restaurados": cfgs_restaurados,
+        "atomic_swap_verified": True,
     }

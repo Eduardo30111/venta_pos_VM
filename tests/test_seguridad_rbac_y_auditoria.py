@@ -65,18 +65,33 @@ class TestSeguridadRBACyAuditoria(unittest.TestCase):
         asyncio.run(cleanup_isolated_test_db(cls.test_db))
 
     def test_01_politica_password_fuerte_servidor(self):
-        """Valida que el servidor rechace contraseñas cortas o predeterminadas."""
+        """Valida que el servidor rechace contraseñas de menos de 12 caracteres, débiles o predeterminadas."""
         valido, msg = validar_password_fuerte_servidor("123")
         self.assertFalse(valido)
-        self.assertIn("al menos 6", msg)
+        self.assertIn("al menos 12", msg)
+
+        # 8 caracteres (falla política de 12)
+        valido, msg = validar_password_fuerte_servidor("Clave123!")
+        self.assertFalse(valido)
+        self.assertIn("al menos 12", msg)
 
         valido, msg = validar_password_fuerte_servidor("admin123")
         self.assertFalse(valido)
-        self.assertIn("predeterminada o insegura", msg)
 
-        valido, msg = validar_password_fuerte_servidor("password")
+        valido, msg = validar_password_fuerte_servidor("123456789012")
         self.assertFalse(valido)
 
+        # 12 caracteres pero sin minúscula
+        valido, msg = validar_password_fuerte_servidor("CLAVE123456!")
+        self.assertFalse(valido)
+        self.assertIn("minúscula", msg)
+
+        # 12 caracteres pero sin números
+        valido, msg = validar_password_fuerte_servidor("ClaveSinNum!")
+        self.assertFalse(valido)
+        self.assertIn("número", msg)
+
+        # Válida con 12+ caracteres y alta entropía
         valido, msg = validar_password_fuerte_servidor("ClaveSuperSegura2026#")
         self.assertTrue(valido)
         self.assertEqual(msg, "")

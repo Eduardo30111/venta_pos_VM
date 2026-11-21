@@ -13,11 +13,14 @@ from ..models.finanzas import CuentaPorCobrar
 
 class CajaService:
     @staticmethod
-    async def obtener_sesion_activa(db: AsyncSession) -> Optional[SesionCaja]:
+    async def obtener_sesion_activa(db: AsyncSession, terminal_id: Optional[int] = None) -> Optional[SesionCaja]:
         try:
+            conds = [SesionCaja.estado == "Abierta"]
+            if terminal_id is not None:
+                conds.append(SesionCaja.terminal_id == terminal_id)
             res = await db.execute(
                 select(SesionCaja)
-                .where(SesionCaja.estado == "Abierta")
+                .where(*conds)
                 .order_by(SesionCaja.id.desc())
                 .limit(1)
             )
@@ -51,9 +54,12 @@ class CajaService:
                         except Exception:
                             pass
                     await db.commit()
+                    conds = [SesionCaja.estado == "Abierta"]
+                    if terminal_id is not None:
+                        conds.append(SesionCaja.terminal_id == terminal_id)
                     res = await db.execute(
                         select(SesionCaja)
-                        .where(SesionCaja.estado == "Abierta")
+                        .where(*conds)
                         .order_by(SesionCaja.id.desc())
                         .limit(1)
                     )
@@ -72,7 +78,7 @@ class CajaService:
         terminal_nombre: Optional[str] = "CAJA-01",
         arqueo_apertura: Optional[Any] = None,
     ) -> SesionCaja:
-        activa = await CajaService.obtener_sesion_activa(db)
+        activa = await CajaService.obtener_sesion_activa(db, terminal_id=terminal_id)
         if activa:
             return activa
 

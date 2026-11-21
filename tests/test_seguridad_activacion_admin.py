@@ -40,18 +40,33 @@ class TestSeguridadActivacionAdmin(unittest.TestCase):
             os.remove(_test_db)
 
     def test_01_validacion_password_fuerte(self):
-        """Valida que se rechacen contraseñas cortas o predeterminadas."""
+        """Valida que se rechacen contraseñas de menos de 12 caracteres, débiles o predeterminadas."""
         valido, msg = validar_password_fuerte("123")
         self.assertFalse(valido)
-        self.assertIn("al menos 6", msg)
+        self.assertIn("al menos 12", msg)
+
+        # 8 caracteres (falla política de 12)
+        valido, msg = validar_password_fuerte("Clave123!")
+        self.assertFalse(valido)
+        self.assertIn("al menos 12", msg)
 
         valido, msg = validar_password_fuerte("admin123")
         self.assertFalse(valido)
-        self.assertIn("predeterminada o insegura", msg)
 
-        valido, msg = validar_password_fuerte("123456")
+        valido, msg = validar_password_fuerte("123456789012")
         self.assertFalse(valido)
 
+        # 12 caracteres pero sin mayúscula
+        valido, msg = validar_password_fuerte("clave123456!")
+        self.assertFalse(valido)
+        self.assertIn("mayúscula", msg)
+
+        # 12 caracteres pero sin símbolo
+        valido, msg = validar_password_fuerte("Clave12345678")
+        self.assertFalse(valido)
+        self.assertIn("especial", msg)
+
+        # 12 caracteres válida y robusta
         valido, msg = validar_password_fuerte("MiClaveSegura2026!")
         self.assertTrue(valido)
         self.assertEqual(msg, "")

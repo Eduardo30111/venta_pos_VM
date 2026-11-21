@@ -119,17 +119,23 @@ def obtener_ips_locales() -> List[str]:
     candidatos = []
 
     for dest in [("8.8.8.8", 80), ("1.1.1.1", 80), ("192.168.1.1", 80), ("10.0.0.1", 80)]:
+        s = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.settimeout(0.3)
             s.connect(dest)
             ip = s.getsockname()[0]
-            s.close()
             if _es_ip_valida_lan(ip) and ip not in candidatos:
                 candidatos.append(ip)
                 break
         except Exception:
             pass
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
 
     if sys.platform == "win32":
         try:

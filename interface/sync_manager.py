@@ -158,8 +158,9 @@ class SyncManager:
             if cerrar_conn and conn:
                 conn.close()
 
-        # Intentar disparo en segundo plano si hay red disponible
-        self.disparar_sincronizacion_asincrona()
+        # Intentar disparo en segundo plano si hay red disponible y no está pausado
+        if not getattr(self, "_pausar_auto_disparo", False):
+            self.disparar_sincronizacion_asincrona()
         return op_id
 
     def marcar_como_sincronizada(self, op_id: str, conn: Optional[sqlite3.Connection] = None) -> bool:
@@ -217,8 +218,11 @@ class SyncManager:
             if cerrar_conn and conn:
                 conn.close()
 
-    def _marcar_sincronizando(self, op_id: str):
-        conn = conectar_db()
+    def _marcar_sincronizando(self, op_id: str, conn: Optional[sqlite3.Connection] = None):
+        cerrar_conn = False
+        if conn is None:
+            conn = conectar_db()
+            cerrar_conn = True
         if not conn:
             return
         try:
@@ -231,7 +235,8 @@ class SyncManager:
         except Exception:
             pass
         finally:
-            conn.close()
+            if cerrar_conn and conn:
+                conn.close()
 
     def recuperar_operaciones_interrumpidas(self, conn: Optional[sqlite3.Connection] = None):
         """Reencola operaciones que quedaron en SINCRONIZANDO por un cierre abrupto o apagón."""
@@ -326,7 +331,7 @@ class SyncManager:
             if cerrar_conn and conn:
                 conn.close()
 
-    def procesar_cola(self) -> Dict[str, Any]:
+    def procesar_cola(self, conn: Optional[sqlite3.Connection] = None) -> Dict[str, Any]:
         """
         Ejecuta el ciclo de sincronización de la cola:
         1. Verifica salud real del servidor (/api/health).
@@ -358,8 +363,8 @@ class SyncManager:
                 if not api.esta_disponible(forzar=True):
                     return {"status": "servidor_no_disponible", "procesados": 0}
 
-            self.recuperar_operaciones_interrumpidas()
-            items = self.obtener_items_pendientes(limite=30)
+            self.recuperar_operaciones_interrumpidas(conn=conn)
+            items = self.obtener_items_pendientes(limite=30, conn=conn)
             if not items:
                 return {"status": "vacio", "procesados": 0}
 
@@ -381,14 +386,14 @@ class SyncManager:
                         pass
 
                 procesados += 1
-                self._marcar_sincronizando(op_id)
+                self._marcar_sincronizando(op_id, conn=conn)
                 exito, err_msg, es_conflicto = self._despachar_operacion(op_id, tipo, payload)
                 if exito:
                     exitosos += 1
-                    self.marcar_como_sincronizada(op_id)
+                    self.marcar_como_sincronizada(op_id, conn=conn)
                 else:
                     fallidos += 1
-                    self.marcar_error_sincronizacion(op_id, err_msg, es_conflicto=es_conflicto)
+                    self.marcar_error_sincronizacion(op_id, err_msg, conn=conn, es_conflicto=es_conflicto)
                     # Si falla por error de conexión global, pausar el ciclo
                     if not es_conflicto and ("no disponible" in err_msg.lower() or "timeout" in err_msg.lower() or "connect" in err_msg.lower()):
                         break

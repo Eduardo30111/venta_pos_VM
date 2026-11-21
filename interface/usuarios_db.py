@@ -42,12 +42,29 @@ CLAVES_INSEGURAS = frozenset({
     "1234567",
     "12345678",
     "123456789",
+    "123456789012",
+    "012345678901",
     "admin",
+    "administrador",
     "password",
+    "password1234",
+    "password12345",
     "qwerty",
+    "qwertyuiop12",
+    "qwerty123456",
     "vmpos",
     "vmpos123",
+    "vmpos12345678",
     "000000",
+    "000000000000",
+    "111111111111",
+    "abcdefghijkl",
+    "superadmin12",
+    "welcome12345",
+    "cambiame1234",
+    "cambiame2026",
+    "seguridad123",
+    "colombia2026",
 })
 
 
@@ -92,12 +109,33 @@ def verificar_password(password_plana, hash_almacenado):
 
 
 def validar_password_fuerte(password: str) -> tuple:
-    """Valida que la contraseña cumpla los requisitos mínimos de seguridad y no sea genérica."""
-    if not password or len(password.strip()) < 6:
-        return False, "La contraseña debe tener al menos 6 caracteres."
-    p_lower = password.strip().lower()
+    """
+    Valida que la contraseña cumpla los requisitos de seguridad empresarial:
+    - Longitud mínima de 12 caracteres.
+    - Al menos una letra mayúscula (A-Z).
+    - Al menos una letra minúscula (a-z).
+    - Al menos un dígito numérico (0-9).
+    - Al menos un carácter especial o símbolo (!@#$%^&*...).
+    - No pertenecer a listas de contraseñas comunes, predeterminadas o secuencias simples.
+    """
+    if not password:
+        return False, "La contraseña no puede estar vacía."
+    pwd = str(password).strip()
+    if len(pwd) < 12:
+        return False, f"La contraseña debe tener al menos 12 caracteres (longitud actual: {len(pwd)})."
+    p_lower = pwd.lower()
     if p_lower in CLAVES_INSEGURAS:
-        return False, "La contraseña ingresada es predeterminada o insegura. Elija una clave personalizada y robusta."
+        return False, "La contraseña ingresada es común o predeterminada. Elija una clave personalizada y robusta."
+    if not any(c.isupper() for c in pwd):
+        return False, "La contraseña debe contener al menos una letra mayúscula."
+    if not any(c.islower() for c in pwd):
+        return False, "La contraseña debe contener al menos una letra minúscula."
+    if not any(c.isdigit() for c in pwd):
+        return False, "La contraseña debe contener al menos un número (0-9)."
+    if not any(not c.isalnum() for c in pwd):
+        return False, "La contraseña debe contener al menos un carácter especial (!@#$%^&*...)."
+    if len(set(pwd)) <= 3:
+        return False, "La contraseña no puede componerse de caracteres repetitivos."
     return True, ""
 
 
