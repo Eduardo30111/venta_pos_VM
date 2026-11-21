@@ -49,6 +49,9 @@ except ImportError:
 # Candado en memoria para evitar dobles pagos simultáneos por interfaz
 _PAGOS_EN_PROCESO = set()
 
+# Caché en memoria para persistencia de proveedores ante caídas de red o desconexiones
+_MEMORIA_PROVEEDORES_CACHE: List[Dict[str, Any]] = []
+
 
 def inicializar_tablas_proveedores(conn: Optional[sqlite3.Connection] = None) -> bool:
     """Asegura la creación de tablas e índices para cuentas por pagar y liquidaciones de proveedores."""
@@ -69,6 +72,9 @@ def recalcular_saldo_proveedor(proveedor_id: int, conn: Optional[sqlite3.Connect
     if conn is None:
         conn = conectar_db()
         cerrar_conn = True
+
+    if not conn:
+        return list(_MEMORIA_PROVEEDORES_CACHE)
 
     try:
         cur = conn.cursor()
@@ -187,6 +193,9 @@ def registrar_cxp_servicio_venta(
     if conn is None:
         conn = conectar_db()
         cerrar_conn = True
+
+    if not conn:
+        return list(_MEMORIA_PROVEEDORES_CACHE)
 
     try:
         cur = conn.cursor()
@@ -390,6 +399,9 @@ def revertir_cxp_por_venta_anulada(
         conn = conectar_db()
         cerrar_conn = True
 
+    if not conn:
+        return list(_MEMORIA_PROVEEDORES_CACHE)
+
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -480,6 +492,9 @@ def ajustar_cxp_por_edicion_venta(
     if conn is None:
         conn = conectar_db()
         cerrar_conn = True
+
+    if not conn:
+        return list(_MEMORIA_PROVEEDORES_CACHE)
 
     try:
         cur = conn.cursor()
@@ -600,6 +615,9 @@ def sincronizar_cxp_retroactivas(conn: Optional[sqlite3.Connection] = None) -> D
     if conn is None:
         conn = conectar_db()
         cerrar_conn = True
+
+    if not conn:
+        return list(_MEMORIA_PROVEEDORES_CACHE)
 
     try:
         cur = conn.cursor()
@@ -735,6 +753,9 @@ def sincronizar_cxp_ventas_anuladas(conn: Optional[sqlite3.Connection] = None) -
         conn = conectar_db()
         cerrar_conn = True
 
+    if not conn:
+        return list(_MEMORIA_PROVEEDORES_CACHE)
+
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -787,6 +808,7 @@ def obtener_resumen_proveedores(
     - Total de Comisiones descontadas
     - Total Liquidado / Pagado
     """
+    global _MEMORIA_PROVEEDORES_CACHE
     if conn is None and api is not None:
         try:
             params = {}
@@ -815,66 +837,51 @@ def obtener_resumen_proveedores(
                         "estado": p.get("estado") or "Activo",
                     })
 
-                # Verificar y reconciliar con el estado real de las CXP en el servidor
-                for item in res:
-                    pid = item.get("id")
-                    if pid:
-                        try:
-                            r_cxp = api.get(f"/proveedores/{pid}/cxp", timeout=3.0)
-                            if r_cxp.status_code == 200:
-                                cxps = r_cxp.json()
-                                if cxps:
-                                    s_real = sum(float(c.get("saldo_pendiente") or 0.0) for c in cxps if str(c.get("estado", "")).lower() in ("pendiente", "parcial"))
-                                    item["saldo_pendiente"] = s_real
-                                    item["saldo_acumulado"] = s_real
-                                    tot_pag = sum(float(c.get("monto_pagado") or c.get("precio_venta") or 0.0) for c in cxps if str(c.get("estado", "")).lower() == "pagada")
-                                    if tot_pag > item["total_pagado"]:
-                                        item["total_pagado"] = tot_pag
-                        except Exception as e_cxp_live:
-                            pass
-
                 # Reconciliar con cuentas por pagar de SQLite local para reflejar ventas pendientes de inmediato
                 try:
                     sincronizar_cxp_retroactivas()
                     conn_loc = conectar_db()
-                    cur_loc = conn_loc.cursor()
-                    for item in res:
-                        pid = item.get("id")
-                        if pid:
-                            cur_loc.execute("""
-                                SELECT 
-                                    COALESCE(SUM(precio_venta), 0.0),
-                                    COALESCE(SUM(monto_comision), 0.0),
-                                    COALESCE(SUM(monto_pagado), 0.0),
-                                    COALESCE(SUM(saldo_pendiente), 0.0)
-                                FROM cuentas_por_pagar_proveedores
-                                WHERE proveedor_id = ? AND estado != 'Anulada'
-                            """, (pid,))
-                            cxp_r = cur_loc.fetchone()
-                            if cxp_r and float(cxp_r[3] or 0.0) > 0:
-                                loc_v = float(cxp_r[0] or 0.0)
-                                loc_c = float(cxp_r[1] or 0.0)
-                                loc_p = float(cxp_r[2] or 0.0)
-                                loc_s = float(cxp_r[3] or 0.0)
-                                if item["saldo_pendiente"] <= 0 or loc_s > item["saldo_pendiente"]:
-                                    item["saldo_pendiente"] = loc_s
-                                    item["saldo_acumulado"] = loc_s
-                                    item["total_ventas"] = max(item["total_ventas"], loc_v)
-                                    item["total_comisiones"] = max(item["total_comisiones"], loc_c)
-                                    item["total_pagado"] = max(item["total_pagado"], loc_p)
-                            # Asegurar que el proveedor esté registrado localmente en proveedores
-                            try:
+                    if conn_loc:
+                        cur_loc = conn_loc.cursor()
+                        for item in res:
+                            pid = item.get("id")
+                            if pid:
                                 cur_loc.execute("""
-                                    INSERT OR REPLACE INTO proveedores (id, nombre, nit, telefono, saldo_acumulado, estado)
-                                    VALUES (?, ?, ?, ?, ?, ?)
-                                """, (pid, item["nombre"], item.get("nit") or "", item.get("telefono") or "", item["saldo_acumulado"], item.get("estado", "Activo")))
-                            except Exception:
-                                pass
-                    conn_loc.commit()
-                    conn_loc.close()
+                                    SELECT 
+                                        COALESCE(SUM(precio_venta), 0.0),
+                                        COALESCE(SUM(monto_comision), 0.0),
+                                        COALESCE(SUM(monto_pagado), 0.0),
+                                        COALESCE(SUM(saldo_pendiente), 0.0)
+                                    FROM cuentas_por_pagar_proveedores
+                                    WHERE proveedor_id = ? AND estado != 'Anulada'
+                                """, (pid,))
+                                cxp_r = cur_loc.fetchone()
+                                if cxp_r and float(cxp_r[3] or 0.0) > 0:
+                                    loc_v = float(cxp_r[0] or 0.0)
+                                    loc_c = float(cxp_r[1] or 0.0)
+                                    loc_p = float(cxp_r[2] or 0.0)
+                                    loc_s = float(cxp_r[3] or 0.0)
+                                    if item["saldo_pendiente"] <= 0 or loc_s > item["saldo_pendiente"]:
+                                        item["saldo_pendiente"] = loc_s
+                                        item["saldo_acumulado"] = loc_s
+                                        item["total_ventas"] = max(item["total_ventas"], loc_v)
+                                        item["total_comisiones"] = max(item["total_comisiones"], loc_c)
+                                        item["total_pagado"] = max(item["total_pagado"], loc_p)
+                                # Asegurar que el proveedor esté registrado localmente en proveedores
+                                try:
+                                    cur_loc.execute("""
+                                        INSERT OR REPLACE INTO proveedores (id, nombre, nit, telefono, saldo_acumulado, estado)
+                                        VALUES (?, ?, ?, ?, ?, ?)
+                                    """, (pid, item["nombre"], item.get("nit") or "", item.get("telefono") or "", item["saldo_acumulado"], item.get("estado", "Activo")))
+                                except Exception:
+                                    pass
+                        conn_loc.commit()
+                        conn_loc.close()
                 except Exception as e_rec:
                     print(f"Aviso reconciliando saldos locales con API: {e_rec}")
 
+                if res:
+                    _MEMORIA_PROVEEDORES_CACHE = list(res)
                 return res
         except Exception:
             pass
@@ -883,6 +890,9 @@ def obtener_resumen_proveedores(
     if conn is None:
         conn = conectar_db()
         cerrar_conn = True
+
+    if not conn:
+        return list(_MEMORIA_PROVEEDORES_CACHE)
 
     try:
         cur = conn.cursor()
@@ -939,6 +949,10 @@ def obtener_resumen_proveedores(
                 "total_comisiones": rec["total_comisiones"],
                 "total_pagado": rec["total_pagado"]
             })
+        if not resultado and _MEMORIA_PROVEEDORES_CACHE:
+            return list(_MEMORIA_PROVEEDORES_CACHE)
+        if resultado:
+            _MEMORIA_PROVEEDORES_CACHE = list(resultado)
         return resultado
     finally:
         if cerrar_conn and conn:
@@ -1432,6 +1446,9 @@ def liquidar_proveedor_db(
         conn = conectar_db()
         cerrar_conn = True
 
+    if not conn:
+        return list(_MEMORIA_PROVEEDORES_CACHE)
+
     try:
         cur = conn.cursor()
 
@@ -1718,6 +1735,9 @@ def revertir_liquidacion_proveedor_db(
     if conn is None:
         conn = conectar_db()
         cerrar_conn = True
+
+    if not conn:
+        return list(_MEMORIA_PROVEEDORES_CACHE)
 
     try:
         cur = conn.cursor()

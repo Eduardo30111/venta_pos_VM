@@ -360,8 +360,9 @@ def _iniciar_flujo_principal(datos_usuario, usuario_actual):
         _iniciar_flujo_principal_ejecutar(datos_usuario, usuario_actual)
 
 def _iniciar_flujo_principal_ejecutar(datos_usuario, usuario_actual):
+    session_mgr.registrar_login_window(ventana)
     try:
-        ventana.destroy()
+        ventana.withdraw()
     except Exception:
         pass
 
@@ -376,13 +377,13 @@ def _iniciar_flujo_principal_ejecutar(datos_usuario, usuario_actual):
 
     if mostrar_carga:
         try:
-            datos_usuario['ventana_carga'] = mostrar_carga(nombre=usuario_actual, usuario_info=datos_usuario)
+            datos_usuario['ventana_carga'] = mostrar_carga(nombre=usuario_actual, usuario_info=datos_usuario, parent=ventana)
         except Exception as e_carga:
             print(f"Aviso al mostrar pantalla de carga: {e_carga}")
 
     try:
         from interface.menu_inicio import iniciar_dashboard
-        iniciar_dashboard(usuario_actual, datos_usuario)
+        iniciar_dashboard(usuario_actual, datos_usuario, login_window=ventana)
     except Exception as e:
         import traceback
         try:
@@ -390,6 +391,12 @@ def _iniciar_flujo_principal_ejecutar(datos_usuario, usuario_actual):
             os.makedirs(LOGS_DIR, exist_ok=True)
             with open(os.path.join(LOGS_DIR, "dashboard_error.log"), "a", encoding="utf-8") as _ef:
                 _ef.write(traceback.format_exc() + "\n")
+        except Exception:
+            pass
+        try:
+            ventana.deiconify()
+            ventana.lift()
+            ventana.focus_force()
         except Exception:
             pass
         messagebox.showerror("Error", f"Fallo al abrir dashboard: {e}")
@@ -774,6 +781,24 @@ business_mgr.agregar_listener(recargar_identidad_login)
 ventana.bind("<Return>", validar_usuario)
 ventana.bind("<Escape>", limpiar_campos)
 entry_user.focus()
+
+def limpiar_para_nuevo_login():
+    """Restaura los campos de login listos para la autenticación de un nuevo usuario in-process."""
+    try:
+        if 'entry_pass' in globals() and entry_pass.winfo_exists():
+            entry_pass.delete(0, tk.END)
+        if 'entry_user' in globals() and entry_user.winfo_exists():
+            entry_user.delete(0, tk.END)
+            entry_user.focus_set()
+        if 'lbl_status' in globals() and lbl_status.winfo_exists():
+            lbl_status.config(text="")
+        if 'btn_login' in globals() and btn_login.winfo_exists():
+            btn_login.config(state="normal")
+    except Exception:
+        pass
+
+ventana.limpiar_para_nuevo_login = limpiar_para_nuevo_login
+session_mgr.registrar_login_window(ventana)
 
 def forzar_repintado_mac(event=None):
     """

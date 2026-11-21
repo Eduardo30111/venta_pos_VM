@@ -161,7 +161,7 @@ class APIClient:
         if not HTTPX_DISPONIBLE:
             return False
         ahora = time.time()
-        if not forzar and self.servidor_disponible is False and (ahora - self._ultimo_check_ts) < 1.0:
+        if not forzar and self.servidor_disponible is False and (ahora - self._ultimo_check_ts) < 2.0:
             return False
         self._ultimo_check_ts = ahora
         try:
@@ -169,7 +169,7 @@ class APIClient:
             if client is None:
                 self.servidor_disponible = False
                 return False
-            r = client.get(f"{self.base_url}/api/health", timeout=2.5)
+            r = client.get(f"{self.base_url}/api/health", timeout=1.0)
             if r.status_code == 200:
                 datos = r.json()
                 ok = isinstance(datos, dict) and datos.get("status") == "ok" and datos.get("database") == "connected"
@@ -236,6 +236,7 @@ class APIClient:
         if not self._asegurar_disponibilidad():
             return DummyResponse(503, {"detail": "Servidor central no disponible"}, is_network_error=True, error_type="unavailable")
         req_timeout = timeout if timeout is not None else self.timeout
+
         try:
             client = self._get_http_client() or httpx.Client(timeout=req_timeout)
             kwargs = {
@@ -253,15 +254,22 @@ class APIClient:
             resp.is_network_error = False
             resp.error_type = None
             self.servidor_disponible = True
+
+            # Detección y manejo resiliente de 401
             if resp.status_code == 401 and self.token and endpoint != "/auth/login":
-                self.clear_token()
+                nuevo_token = self._load_token()
+                if nuevo_token and nuevo_token != self.token:
+                    self.token = nuevo_token
+                    kwargs["headers"] = self._get_headers()
+                    resp = client.request(method.upper(), f"{self.base_url}{endpoint}", **kwargs)
+                else:
+                    self.clear_token()
             return resp
-        except httpx.TimeoutException as e:
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
             self.servidor_disponible = False
-            return DummyResponse(504, {"detail": f"Tiempo de espera agotado comunicando con el servidor: {e}"}, is_network_error=True, error_type="timeout")
-        except httpx.ConnectError as e:
-            self.servidor_disponible = False
-            return DummyResponse(503, {"detail": f"No se pudo conectar al servidor central: {e}"}, is_network_error=True, error_type="connect")
+            err_type = "timeout" if isinstance(e, httpx.TimeoutException) else "connect"
+            code = 504 if isinstance(e, httpx.TimeoutException) else 503
+            return DummyResponse(code, {"detail": f"Error comunicando con servidor central ({err_type}): {e}"}, is_network_error=True, error_type=err_type)
         except httpx.RequestError as e:
             self.servidor_disponible = False
             return DummyResponse(503, {"detail": f"Error de red durante la solicitud: {e}"}, is_network_error=True, error_type="network")

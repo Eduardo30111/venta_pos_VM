@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = _detectar_database_url_por_defecto()
     SECRET_KEY: str = _obtener_o_generar_secret_key()
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.environ.get("VMPOS_TOKEN_EXPIRE_MINUTES", "43200"))
     APP_NAME: str = "VmPOS"
     APP_VERSION: str = "4.1.2"
     SERVER_PORT: int = OFFICIAL_SERVER_PORT

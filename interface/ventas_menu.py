@@ -2262,9 +2262,10 @@ class App:
                             (cod, nom, sv_fmt, precio_v, "Fisico", prov_id, p_id, costo_u, es_var_prod, sb, cod_barras)
                         )
 
-                if str(self.rol).strip().lower() == "operario":
-                    return [item for item in todos_los_productos if item[4] == "Servicio"]
-                return todos_los_productos
+                if todos_los_productos:
+                    if str(self.rol).strip().lower() == "operario":
+                        return [item for item in todos_los_productos if item[4] == "Servicio"]
+                    return todos_los_productos
         except Exception as e:
             print(f"Aviso consultando catálogo central `/inventario/catalogo`: {e}")
 
@@ -2333,11 +2334,17 @@ class App:
                         )
                     )
 
+            if not todos_los_productos and getattr(self, "productos_inventario", None):
+                print("Aviso: Catálogo temporalmente inaccesible. Preservando productos en memoria.")
+                return list(self.productos_inventario)
+
             if str(self.rol).strip().lower() == "operario":
                 return [item for item in todos_los_productos if item[4] == "Servicio"]
             return todos_los_productos
         except Exception as e:
             print(f"Aviso respaldo API productos/servicios: {e}")
+            if getattr(self, "productos_inventario", None):
+                return list(self.productos_inventario)
             return todos_los_productos
 
     def formato_peso(self, valor):

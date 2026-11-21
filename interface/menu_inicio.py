@@ -162,13 +162,21 @@ except ImportError:
     except ImportError:
         abrir_gestion_ventas = None
 
-class VmPOSDashboard(tk.Tk):
+class VmPOSDashboard(tk.Toplevel):
     """
     Clase principal de la aplicación para el Dashboard de VmPOS.
-    Hereda de tk.Tk, haciendo que la instancia de la clase sea la ventana principal.
+    Hereda de tk.Toplevel (utiliza _hidden_root si se instancia de forma independiente),
+    garantizando un ciclo de vida limpio sin destrucción ni recreación de intérpretes Tcl.
     """
-    def __init__(self, usuario="Admin", datos_usuario=None):
-        super().__init__()
+    def __init__(self, usuario="Admin", datos_usuario=None, parent=None):
+        if parent is None and tk._default_root is None:
+            self._hidden_root = tk.Tk()
+            self._hidden_root.withdraw()
+            parent = self._hidden_root
+        super().__init__(parent)
+        self.login_window = parent if (parent and parent != getattr(self, "_hidden_root", None)) else None
+        if self.login_window:
+            session_mgr.registrar_login_window(self.login_window)
 
         business_mgr.recargar()
 
@@ -267,13 +275,7 @@ class VmPOSDashboard(tk.Tk):
 
     def _on_close_window(self):
         """Maneja el evento de cierre de ventana desde el sistema operativo (X superior)."""
-        if messagebox.askyesno("Salir de VmPOS", "¿Estás seguro que deseas salir del sistema?"):
-            try:
-                if hasattr(business_mgr, "_listeners") and self.refrescar_identidad_negocio in business_mgr._listeners:
-                    business_mgr._listeners.remove(self.refrescar_identidad_negocio)
-            except Exception:
-                pass
-            session_mgr.cerrar_sesion(root_window=self, lanzar_login=False)
+        self._salir_sistema()
 
     def _get_user_permissions(self):
         """
@@ -460,8 +462,11 @@ class VmPOSDashboard(tk.Tk):
             btn_tema = crear_boton(self.user_strip, text=txt_btn_tema, tipo="secondary", tam_fuente=8, padx=8, pady=2, command=self._toggle_tema)
             btn_tema.pack(side="left", padx=(0, 6))
 
-            btn_cerrar_sesion = crear_boton(self.user_strip, text="🚪 Salir", tipo="danger", tam_fuente=8, padx=8, pady=2, command=self._cerrar_sesion)
-            btn_cerrar_sesion.pack(side="left")
+            btn_cerrar_sesion = crear_boton(self.user_strip, text="🔒 Cerrar Sesión", tipo="secondary", tam_fuente=8, padx=8, pady=2, command=self._cerrar_sesion)
+            btn_cerrar_sesion.pack(side="left", padx=(0, 6))
+
+            btn_salir_sistema = crear_boton(self.user_strip, text="🚪 Salir", tipo="danger", tam_fuente=8, padx=8, pady=2, command=self._salir_sistema)
+            btn_salir_sistema.pack(side="left")
             
             # Fecha y hora en tiempo real + alerta admin o comision en una fila compacta
             self.info_strip = tk.Frame(self.header_right, bg=bg_h)
@@ -613,9 +618,19 @@ class VmPOSDashboard(tk.Tk):
                 self.after(5000, self._actualizar_notificaciones_admin)
 
     def _cerrar_sesion(self):
-        """Cierra la sesión actual y vuelve a la pantalla de login de forma segura."""
-        if messagebox.askyesno("Cerrar Sesión", "¿Estás seguro que deseas cerrar sesión?"):
-            session_mgr.cerrar_sesion(root_window=self, lanzar_login=True)
+        """Cierra la sesión actual y vuelve a la pantalla de login in-process de forma segura."""
+        if messagebox.askyesno("Cerrar Sesión", "¿Deseas cerrar la sesión activa y volver al inicio de sesión?"):
+            session_mgr.cerrar_sesion(root_window=self, lanzar_login=True, login_window=getattr(self, "login_window", None))
+
+    def _salir_sistema(self):
+        """Sale completamente del sistema VmPOS tras confirmación del usuario."""
+        if messagebox.askyesno("Salir de VmPOS", "¿Estás seguro que deseas salir completamente del sistema?"):
+            try:
+                if hasattr(business_mgr, "_listeners") and self.refrescar_identidad_negocio in business_mgr._listeners:
+                    business_mgr._listeners.remove(self.refrescar_identidad_negocio)
+            except Exception:
+                pass
+            session_mgr.cerrar_sesion(root_window=self, lanzar_login=False, login_window=getattr(self, "login_window", None))
 
     def _actualizar_comision_empleado(self):
         try:
@@ -1932,7 +1947,9 @@ class VmPOSDashboard(tk.Tk):
             return None
 
     def _abrir_ventas(self):
-        """Abre el módulo de ventas in-process para preservar sesión y evitar relanzar login."""
+        """Abre el módulo de ventas in-process con control estricto de instancia única."""
+        if session_mgr.enfocar_o_restaurar_modulo("ventas"):
+            return session_mgr.obtener_modulo("ventas")
         try:
             try:
                 from interface.ventas_menu import iniciar_ventas
@@ -1941,7 +1958,7 @@ class VmPOSDashboard(tk.Tk):
             uid = str(self.datos_usuario.get("id", ""))
             app = iniciar_ventas(parent=self, user_id=uid, rol=self.rol_usuario, usuario_nombre=str(self.usuario))
             if app and hasattr(app, "ventana"):
-                session_mgr.registrar_ventana(app.ventana)
+                session_mgr.registrar_modulo("ventas", app.ventana)
                 return app.ventana
         except Exception as e:
             import traceback
@@ -1957,7 +1974,9 @@ class VmPOSDashboard(tk.Tk):
                 messagebox.showerror("❌ Error al abrir Ventas", f"No se pudo abrir el módulo de ventas:\n{e}")
 
     def _abrir_inventario(self):
-        """Abre el módulo de inventario in-process."""
+        """Abre el módulo de inventario in-process con control estricto de instancia única."""
+        if session_mgr.enfocar_o_restaurar_modulo("inventario"):
+            return session_mgr.obtener_modulo("inventario")
         try:
             try:
                 from interface.inventario_menu import iniciar_inventario
@@ -1965,7 +1984,7 @@ class VmPOSDashboard(tk.Tk):
                 from inventario_menu import iniciar_inventario
             w = iniciar_inventario(usuario_actual=self.usuario, parent=self)
             if w:
-                session_mgr.registrar_ventana(w)
+                session_mgr.registrar_modulo("inventario", w)
                 return w
         except Exception as e:
             import traceback
@@ -1977,7 +1996,9 @@ class VmPOSDashboard(tk.Tk):
                 messagebox.showerror("❌ Error al abrir Inventario", f"No se pudo abrir inventario:\n{e}")
 
     def _abrir_usuarios(self):
-        """Abre el módulo de gestión de usuarios in-process."""
+        """Abre el módulo de gestión de usuarios in-process con control estricto de instancia única."""
+        if session_mgr.enfocar_o_restaurar_modulo("usuarios"):
+            return session_mgr.obtener_modulo("usuarios")
         try:
             try:
                 from interface.usuarios_menu import iniciar_usuarios
@@ -1985,7 +2006,7 @@ class VmPOSDashboard(tk.Tk):
                 from usuarios_menu import iniciar_usuarios
             w = iniciar_usuarios(parent=self)
             if w:
-                session_mgr.registrar_ventana(w)
+                session_mgr.registrar_modulo("usuarios", w)
                 return w
         except Exception as e:
             import traceback
@@ -1997,7 +2018,9 @@ class VmPOSDashboard(tk.Tk):
                 messagebox.showerror("❌ Error al abrir Usuarios", f"No se pudo abrir usuarios:\n{e}")
 
     def _abrir_clientes(self):
-        """Abre el módulo de clientes in-process."""
+        """Abre el módulo de clientes in-process con control estricto de instancia única."""
+        if session_mgr.enfocar_o_restaurar_modulo("clientes"):
+            return session_mgr.obtener_modulo("clientes")
         try:
             try:
                 from interface.clientes_menu import iniciar_clientes
@@ -2005,7 +2028,7 @@ class VmPOSDashboard(tk.Tk):
                 from clientes_menu import iniciar_clientes
             w = iniciar_clientes(parent=self)
             if w:
-                session_mgr.registrar_ventana(w)
+                session_mgr.registrar_modulo("clientes", w)
                 return w
         except Exception as e:
             import traceback
@@ -2017,7 +2040,9 @@ class VmPOSDashboard(tk.Tk):
                 messagebox.showerror("❌ Error al abrir Clientes", f"No se pudo abrir clientes:\n{e}")
 
     def _abrir_generador_codigo_barras(self):
-        """Abre el generador de códigos de barras in-process."""
+        """Abre el generador de códigos de barras in-process con control estricto de instancia única."""
+        if session_mgr.enfocar_o_restaurar_modulo("codigo_barras"):
+            return session_mgr.obtener_modulo("codigo_barras")
         try:
             gen = None
             try:
@@ -2026,17 +2051,19 @@ class VmPOSDashboard(tk.Tk):
             except Exception:
                 if GENERADOR_DISPONIBLE and iniciar_generador_barras:
                     gen = iniciar_generador_barras(parent=self)
-            if gen and hasattr(gen, "ventana"):
-                session_mgr.registrar_ventana(gen.ventana)
-            elif gen and isinstance(gen, (tk.Toplevel, tk.Tk)):
-                session_mgr.registrar_ventana(gen)
+            w = gen.ventana if (gen and hasattr(gen, "ventana")) else (gen if isinstance(gen, (tk.Toplevel, tk.Tk)) else None)
+            if w:
+                session_mgr.registrar_modulo("codigo_barras", w)
+                return w
         except Exception as e:
             import traceback
             traceback.print_exc()
             messagebox.showerror("❌ Error", f"No se pudo abrir el generador de códigos de barras:\n{e}")
 
     def _abrir_control_gastos(self):
-        """Abre el módulo de control de gastos in-process."""
+        """Abre el módulo de control de gastos in-process con control estricto de instancia única."""
+        if session_mgr.enfocar_o_restaurar_modulo("gastos"):
+            return session_mgr.obtener_modulo("gastos")
         try:
             try:
                 from interface.gastos_menu import iniciar_gastos
@@ -2044,7 +2071,7 @@ class VmPOSDashboard(tk.Tk):
                 from gastos_menu import iniciar_gastos
             w = iniciar_gastos(parent=self)
             if w:
-                session_mgr.registrar_ventana(w)
+                session_mgr.registrar_modulo("gastos", w)
                 return w
         except Exception as e:
             import traceback
@@ -2248,7 +2275,7 @@ class VmPOSDashboard(tk.Tk):
                 "Clientes": self._abrir_clientes,
                 "Contabilidad": self._abrir_contabilidad,
                 "Reportes": self._abrir_contabilidad,
-                "Configuración": lambda: iniciar_configuracion(parent=self, on_save_callback=self.refrescar_identidad_negocio) if 'iniciar_configuracion' in globals() else messagebox.showwarning("⚠️ Módulo no disponible", "El módulo de configuración no está disponible."),
+                "Configuración": self._abrir_configuracion,
                 "Usuarios": self._abrir_usuarios,
                 "Gastos": self._abrir_control_gastos,
                 "Nómina": self._abrir_nomina,
@@ -2268,16 +2295,36 @@ class VmPOSDashboard(tk.Tk):
         except Exception as e:
             messagebox.showerror("❌ Error", f"Error al abrir {nombre}:\n{str(e)}")
 
+    def _abrir_configuracion(self):
+        """Abre el módulo de configuración in-process con control estricto de instancia única."""
+        if session_mgr.enfocar_o_restaurar_modulo("configuracion"):
+            return session_mgr.obtener_modulo("configuracion")
+        try:
+            try:
+                from interface.configuracion_menu import iniciar_configuracion
+            except ImportError:
+                from configuracion_menu import iniciar_configuracion
+            w = iniciar_configuracion(parent=self, on_save_callback=self.refrescar_identidad_negocio)
+            if w:
+                session_mgr.registrar_modulo("configuracion", w)
+                return w
+        except Exception as e:
+            messagebox.showerror("❌ Error", f"No se pudo abrir configuración:\n{e}")
+
     def _abrir_contabilidad(self):
-        """Abre el módulo central de Contabilidad e Inteligencia Financiera in-process."""
+        """Abre el módulo central de Contabilidad e Inteligencia Financiera in-process con control estricto de instancia única."""
+        if session_mgr.enfocar_o_restaurar_modulo("contabilidad"):
+            return session_mgr.obtener_modulo("contabilidad")
         try:
             try:
                 from interface.contabilidad_menu import iniciar_contabilidad
             except ImportError:
                 from contabilidad_menu import iniciar_contabilidad
             app = iniciar_contabilidad(parent=self)
-            if app and hasattr(app, "root"):
-                session_mgr.registrar_ventana(app.root)
+            w = app.root if (app and hasattr(app, "root")) else app
+            if w:
+                session_mgr.registrar_modulo("contabilidad", w)
+                return w
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -2288,7 +2335,9 @@ class VmPOSDashboard(tk.Tk):
                 messagebox.showerror("❌ Error al abrir Contabilidad", f"No se pudo abrir contabilidad:\n{e}")
 
     def _abrir_caja(self):
-        """Abre el módulo de Control de Caja y Arqueo Físico in-process."""
+        """Abre el módulo de Control de Caja y Arqueo Físico in-process con control estricto de instancia única."""
+        if session_mgr.enfocar_o_restaurar_modulo("caja"):
+            return session_mgr.obtener_modulo("caja")
         try:
             try:
                 from interface.caja_menu import iniciar_control_caja
@@ -2296,7 +2345,7 @@ class VmPOSDashboard(tk.Tk):
                 from caja_menu import iniciar_control_caja
             w = iniciar_control_caja(usuario_actual=self.usuario, rol_actual=self.rol_usuario, parent=self)
             if w:
-                session_mgr.registrar_ventana(w)
+                session_mgr.registrar_modulo("caja", w)
                 return w
         except Exception as e:
             import traceback
@@ -2313,12 +2362,15 @@ class VmPOSDashboard(tk.Tk):
                 messagebox.showerror("❌ Error al abrir Caja", f"No se pudo abrir el control de caja:\n{e}")
 
     def _abrir_gestion_ventas(self):
-        """Abre la supervisión y control de ventas con anulación y auditoría."""
+        """Abre la supervisión y control de ventas con control estricto de instancia única."""
+        if session_mgr.enfocar_o_restaurar_modulo("gestion_ventas"):
+            return session_mgr.obtener_modulo("gestion_ventas")
         try:
             if abrir_gestion_ventas:
                 dlg = abrir_gestion_ventas(parent=self, usuario_actual=self.usuario)
                 if dlg:
-                    session_mgr.registrar_ventana(dlg)
+                    session_mgr.registrar_modulo("gestion_ventas", dlg)
+                    return dlg
             elif not getattr(sys, 'frozen', False):
                 self._lanzar_modulo_subproceso("ventas_admin_dialog.py", "Gestión de Ventas")
             else:
@@ -2329,7 +2381,9 @@ class VmPOSDashboard(tk.Tk):
             messagebox.showerror("❌ Error", f"No se pudo abrir la gestión de ventas:\n{e}")
 
     def _abrir_nomina(self):
-        """Abre el módulo de nómina y liquidación in-process."""
+        """Abre el módulo de nómina y liquidación in-process con control estricto de instancia única."""
+        if session_mgr.enfocar_o_restaurar_modulo("nomina"):
+            return session_mgr.obtener_modulo("nomina")
         try:
             try:
                 from interface.nomina_menu import iniciar_nomina
@@ -2337,7 +2391,7 @@ class VmPOSDashboard(tk.Tk):
                 from nomina_menu import iniciar_nomina
             w = iniciar_nomina(parent=self)
             if w:
-                session_mgr.registrar_ventana(w)
+                session_mgr.registrar_modulo("nomina", w)
                 return w
         except Exception as e:
             import traceback
@@ -2349,7 +2403,9 @@ class VmPOSDashboard(tk.Tk):
                 messagebox.showerror("❌ Error al abrir Nómina", f"No se pudo abrir nómina:\n{e}")
 
     def _abrir_turnos(self):
-        """Abre el módulo de Control del Turno in-process."""
+        """Abre el módulo de Control del Turno in-process con control estricto de instancia única."""
+        if session_mgr.enfocar_o_restaurar_modulo("turnos"):
+            return session_mgr.obtener_modulo("turnos")
         try:
             try:
                 from interface.turnos_menu import iniciar_control_turnos
@@ -2363,7 +2419,7 @@ class VmPOSDashboard(tk.Tk):
                 ventana_padre=self
             )
             if top:
-                session_mgr.registrar_ventana(top)
+                session_mgr.registrar_modulo("turnos", top)
                 return top
         except Exception as e:
             import traceback
@@ -2380,17 +2436,20 @@ class VmPOSDashboard(tk.Tk):
                 messagebox.showerror("❌ Error al abrir Turnos", f"No se pudo abrir control de turnos:\n{e}")
 
 # --- Punto de entrada desde el login ---
-def iniciar_dashboard(usuario, datos_usuario):
+def iniciar_dashboard(usuario, datos_usuario, login_window=None):
     """
     Función de entrada principal para lanzar el dashboard.
     Esta es la función que se llamaría desde la pantalla de login.
     """
     try:
-        app = VmPOSDashboard(usuario=usuario, datos_usuario=datos_usuario)
-        app.mainloop()
+        app = VmPOSDashboard(usuario=usuario, datos_usuario=datos_usuario, parent=login_window)
+        if not login_window:
+            app.mainloop()
+        return app
     except Exception as e:
         print(f"Error iniciando dashboard: {e}")
         messagebox.showerror("Error Fatal", f"Error iniciando el dashboard:\n{e}")
+        return None
 
 
 # --- Punto de entrada principal para pruebas independientes ---

@@ -43,25 +43,39 @@ def _safe_update(cursor, sql: str, desc: str = ""):
         logger.critical("Error fatal en UPDATE de migración SQLite (%s): %s", desc or sql[:50], e)
         raise RuntimeError(f"Fallo crítico en UPDATE SQLite ({desc}): {e}") from e
 
-def conectar_db(db_path=None):
+def conectar_db(db_path=None, reintentos: int = 3):
     """
-    Establece conexión optimizada con la base de datos especificada.
-    Configura WAL (Write-Ahead Logging), busy_timeout de 5s y sincronización NORMAL
-    para máxima velocidad y evitar bloqueos 'database is locked'.
+    Establece conexión optimizada y resiliente con la base de datos especificada.
+    Configura WAL (Write-Ahead Logging), busy_timeout de 30s y sincronización NORMAL
+    con reintentos automáticos para máxima estabilidad y prevención de bloqueos 'database is locked'.
     """
+    import time
     if db_path is None:
         db_path = os.environ.get("VMPOS_DB_VENTAS") or DB_VENTAS_PATH
-    try:
-        conn = sqlite3.connect(db_path, timeout=10.0)
-        # Optimizaciones de rendimiento de SQLite
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        conn.execute("PRAGMA busy_timeout = 5000")
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
-    except Exception as e:
-        print(f"Error conectando a la base de datos {db_path}: {e}")
-        return None
+
+    ultimo_error = None
+    for intento in range(max(1, reintentos)):
+        try:
+            conn = sqlite3.connect(db_path, timeout=30.0)
+            # Optimizaciones de rendimiento de SQLite y alta concurrencia
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA busy_timeout = 30000")
+            conn.execute("PRAGMA foreign_keys = ON")
+            return conn
+        except sqlite3.OperationalError as e_op:
+            ultimo_error = e_op
+            if "locked" in str(e_op).lower() and intento < reintentos - 1:
+                time.sleep(0.05 * (intento + 1))
+                continue
+            logger.warning("Aviso operacional SQLite en %s (intento %s/%s): %s", db_path, intento + 1, reintentos, e_op)
+        except Exception as e:
+            ultimo_error = e
+            logger.error("Error conectando a la base de datos %s: %s", db_path, e)
+            break
+
+    print(f"Error conectando a la base de datos {db_path}: {ultimo_error}")
+    return None
 
 def inicializar_base_datos(db_path=None):
     """

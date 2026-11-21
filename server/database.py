@@ -465,7 +465,9 @@ def _crear_engine(db_url: str):
         eng = create_async_engine(
             db_url,
             echo=_echo_sql,
-            connect_args={"timeout": 15, "check_same_thread": False},
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            connect_args={"timeout": 30, "check_same_thread": False},
         )
 
         @event.listens_for(eng.sync_engine, "connect")
@@ -474,12 +476,20 @@ def _crear_engine(db_url: str):
             try:
                 cursor.execute("PRAGMA journal_mode=WAL;")
                 cursor.execute("PRAGMA synchronous=NORMAL;")
-                cursor.execute("PRAGMA busy_timeout=15000;")
+                cursor.execute("PRAGMA busy_timeout=30000;")
             finally:
                 cursor.close()
 
         return eng
-    return create_async_engine(db_url, echo=_echo_sql)
+    return create_async_engine(
+        db_url,
+        echo=_echo_sql,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        pool_size=10,
+        max_overflow=20,
+        pool_timeout=30,
+    )
 
 
 engine = _crear_engine(settings.DATABASE_URL)

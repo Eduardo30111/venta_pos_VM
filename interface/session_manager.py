@@ -85,6 +85,12 @@ class SessionManager:
         self._subprocesos = []  # Lista de dicts: {"proc": Popen, "nombre": str, "pid": int}
         self._ventanas = []     # Lista de referencias a Toplevel
         self._timers = []       # Lista de tuplas: (weakref(widget), after_id)
+        self._modulos = {}      # Mapeo clave_modulo -> widget_toplevel (control de instancia única)
+        self._login_window = None
+
+    def registrar_login_window(self, window):
+        """Registra la ventana de inicio de sesión para retorno in-process sin recrear procesos."""
+        self._login_window = window
 
     def iniciar_sesion(self, usuario, rol="Administrador", user_id=None, token=None):
         """Inicializa una sesión válida en el sistema."""
@@ -139,11 +145,82 @@ class SessionManager:
                 activos.append(item)
         self._subprocesos = activos
 
+    def registrar_modulo(self, clave: str, toplevel_widget):
+        """Registra una ventana principal de módulo garantizando instancia única."""
+        self._limpiar_ventanas_muertas()
+        if not clave or not toplevel_widget:
+            return
+        k = str(clave).strip().lower()
+        self._modulos[k] = toplevel_widget
+        self.registrar_ventana(toplevel_widget)
+
+    def desregistrar_modulo(self, clave: str):
+        """Elimina el registro de un módulo al cerrarse su ventana."""
+        self._modulos.pop(str(clave).strip().lower(), None)
+
+    def obtener_modulo(self, clave: str):
+        """Retorna el widget de la ventana del módulo si existe y sigue viva."""
+        k = str(clave).strip().lower()
+        w = self._modulos.get(k)
+        if w:
+            try:
+                if w.winfo_exists():
+                    return w
+            except Exception:
+                pass
+            self._modulos.pop(k, None)
+        return None
+
+    def enfocar_o_restaurar_modulo(self, clave: str) -> bool:
+        """
+        Restaura, desenfoca o trae al frente la ventana del módulo si ya está abierta o minimizada.
+        Retorna True si la ventana existía y fue restaurada/enfocada, False si no existe.
+        """
+        w = self.obtener_modulo(clave)
+        if not w:
+            return False
+        try:
+            # Compatibilidad Windows / Mac / Linux para restauración de ventanas minimizadas
+            if hasattr(w, "state"):
+                try:
+                    if w.state() == "iconic":
+                        w.state("normal")
+                except Exception:
+                    pass
+            w.deiconify()
+            w.lift()
+            w.focus_force()
+            return True
+        except Exception:
+            return False
+
+    def liberar_todos_los_grabs(self):
+        """Libera de forma segura cualquier grab_set() que pudiera haber quedado bloqueando la UI."""
+        self._limpiar_ventanas_muertas()
+        for w in list(self._ventanas):
+            try:
+                if w and w.winfo_exists():
+                    w.grab_release()
+            except Exception:
+                pass
+
     def registrar_ventana(self, toplevel_widget):
         """Registra una ventana secundaria Toplevel o modal in-process."""
         self._limpiar_ventanas_muertas()
         if toplevel_widget and toplevel_widget not in self._ventanas:
             self._ventanas.append(toplevel_widget)
+            try:
+                toplevel_widget.bind("<Destroy>", lambda e, wid=toplevel_widget: self._on_destroy_ventana(e, wid), add="+")
+            except Exception:
+                pass
+
+    def _on_destroy_ventana(self, event, widget):
+        """Callback al destruirse una ventana para garantizar liberación de grab."""
+        try:
+            if event.widget == widget:
+                widget.grab_release()
+        except Exception:
+            pass
 
     def _limpiar_ventanas_muertas(self):
         """Elimina ventanas que ya fueron destruidas."""
@@ -173,6 +250,7 @@ class SessionManager:
 
     def cerrar_todas_las_ventanas(self):
         """Cierra de forma segura todas las ventanas modales y secundarias in-process."""
+        self.liberar_todos_los_grabs()
         self._limpiar_ventanas_muertas()
         for w in list(self._ventanas):
             try:
@@ -185,6 +263,7 @@ class SessionManager:
             except Exception as e:
                 print(f"Aviso destruyendo ventana secundaria: {e}")
         self._ventanas.clear()
+        self._modulos.clear()
 
     def terminar_subprocesos(self, timeout=1.5):
         """
@@ -221,18 +300,20 @@ class SessionManager:
 
         self._subprocesos.clear()
 
-    def cerrar_sesion(self, root_window=None, lanzar_login=True):
+    def cerrar_sesion(self, root_window=None, lanzar_login=True, login_window=None):
         """
         Cierra completamente la sesión activa:
         1. Marca sesion_activa = False.
         2. Invalida tokens y variables de entorno.
-        3. Cierra todas las ventanas secundarias y modales.
+        3. Cierra todas las ventanas secundarias y modales con liberación de grab.
         4. Termina todos los subprocesos hijos.
         5. Cancela temporizadores de la ventana raíz.
         6. Destruye la ventana raíz si existe.
-        7. Abre la pantalla de inicio de sesión si se solicita.
+        7. Si lanzar_login=True: restaura la ventana de login existente in-process sin matar la app.
+           Si lanzar_login=False: cierra la ventana de login y termina la aplicación limpiamente.
         """
         self.sesion_activa = False
+        win_login = login_window or self._login_window
 
         # 1. Revocar token en servidor y limpiar token.json en disco + variables de entorno
         if api:
@@ -257,7 +338,7 @@ class SessionManager:
         # 4. Terminar subprocesos hijos de la sesión
         self.terminar_subprocesos(timeout=1.5)
 
-        # 5. Destruir ventana raíz
+        # 5. Destruir ventana del dashboard
         if root_window:
             try:
                 if root_window.winfo_exists():
@@ -265,8 +346,26 @@ class SessionManager:
             except Exception as e:
                 print(f"Aviso destruyendo ventana principal: {e}")
 
-        # 6. Lanzar pantalla de login limpia (compatible con PyInstaller frozen y ejecución por script)
+        # 6. Retorno in-process a la pantalla de login o cierre definitivo
         if lanzar_login:
+            if win_login:
+                try:
+                    if win_login.winfo_exists():
+                        if hasattr(win_login, "limpiar_para_nuevo_login"):
+                            win_login.limpiar_para_nuevo_login()
+                        try:
+                            if hasattr(win_login, "state") and win_login.state() == "iconic":
+                                win_login.state("normal")
+                        except Exception:
+                            pass
+                        win_login.deiconify()
+                        win_login.lift()
+                        win_login.focus_force()
+                        return
+                except Exception as e_res:
+                    print(f"Aviso restaurando login in-process: {e_res}")
+
+            # Fallback en caso de inicio sin ventana padre retenida
             try:
                 if getattr(sys, "frozen", False):
                     subprocess.Popen([sys.executable])
@@ -277,6 +376,14 @@ class SessionManager:
                         subprocess.Popen([sys.executable, login_script])
             except Exception as e:
                 print(f"Error relanzando inicio de sesión: {e}")
+        else:
+            # Salir completamente de la aplicación
+            if win_login:
+                try:
+                    if win_login.winfo_exists():
+                        win_login.destroy()
+                except Exception:
+                    pass
 
     def iniciar_vigilante_padre(self, root_window, parent_pid=None, intervalo_ms=1500):
         """

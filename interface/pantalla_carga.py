@@ -181,12 +181,13 @@ def reproducir_bienvenida_asincrona(nombre, forzar=False):
 
     threading.Thread(target=_hilo_tts, daemon=True, name="VmPOS-TTS-Bienvenida").start()
 
-def mostrar_carga(nombre="Usuario", usuario_info=None):
+def mostrar_carga(nombre="Usuario", usuario_info=None, parent=None):
     """
     Muestra la pantalla de carga original de VmPOS con animaciones y bienvenida por voz.
     Args:
         nombre (str): Nombre del usuario (se usará como fallback si no hay usuario_info)
         usuario_info (dict): Información completa del usuario (con claves 'usuario', 'nombre', 'rol')
+        parent (tk.Widget): Ventana padre si existe, para integrarse cleanly como Toplevel
     """
     # Determinar el nombre real del usuario de forma dinámica
     nombre_real = ""
@@ -200,7 +201,12 @@ def mostrar_carga(nombre="Usuario", usuario_info=None):
     reproducir_bienvenida_asincrona(nombre_real)
 
     t = theme_mgr.get_theme_tokens()
-    ventana = tk.Tk()
+    if parent is not None:
+        ventana = tk.Toplevel(parent)
+    elif tk._default_root is not None:
+        ventana = tk.Toplevel(tk._default_root)
+    else:
+        ventana = tk.Tk()
     ventana.title(f"VmPOS - Bienvenido {nombre_real} ✨")
     ventana.geometry("550x350")
     ventana.configure(bg=t["accent"])

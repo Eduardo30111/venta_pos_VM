@@ -96,6 +96,10 @@ def _asegurar_respuesta_ok(resp) -> Any:
 # 2. CATÁLOGO UNIFICADO DE ARTÍCULOS (PRODUCTOS FÍSICOS Y SERVICIOS)
 # ==============================================================================
 
+# Caché en memoria de último catálogo conocido para supervivencia a caídas de red o desconexiones
+_MEMORIA_CATALOGO_CACHE: List[Dict[str, Any]] = []
+
+
 def _obtener_catalogo_sqlite_fallback(
     tipo=None,
     conn=None
@@ -232,6 +236,7 @@ def obtener_catalogo(
     if proveedor and proveedor != "Todos":
         params["proveedor"] = str(proveedor).strip()
 
+    global _MEMORIA_CATALOGO_CACHE
     data = None
     try:
         resp = api.get("/inventario/catalogo", params=params, timeout=3.5)
@@ -239,11 +244,18 @@ def obtener_catalogo(
             res_json = resp.json()
             if isinstance(res_json, list):
                 data = res_json
+                if res_json:
+                    _MEMORIA_CATALOGO_CACHE = list(res_json)
     except Exception:
         pass
 
     if data is None:
         data = _obtener_catalogo_sqlite_fallback(tipo=tipo, conn=conn)
+        if data:
+            _MEMORIA_CATALOGO_CACHE = list(data)
+        elif _MEMORIA_CATALOGO_CACHE:
+            # Resiliencia: si la API y SQLite fallaron o retornaron vacío, recurrir a la memoria previa
+            data = list(_MEMORIA_CATALOGO_CACHE)
 
     # Filtrado minucioso en memoria para asegurar consistencia multi-criterio y búsqueda con tildes
     resultado = []
