@@ -1,7 +1,7 @@
 # AUDITORÍA TÉCNICA, FUNCIONAL Y ARQUITECTÓNICA INTEGRAL
-# SISTEMA DE PUNTO DE VENTA Y GESTIÓN COMERCIAL VmPOS (v4.1.0)
+# SISTEMA DE PUNTO DE VENTA Y GESTIÓN COMERCIAL VmPOS (v4.1.2)
 
-**Versión del Sistema:** v4.1.0  
+**Versión del Sistema:** v4.1.2  
 **Fecha de Auditoría:** Noviembre 2026  
 **Clasificación:** Documentación Técnica, Operativa y de Arquitectura  
 **Estado del Código:** Auditado en repositorio local sin alteraciones de código  

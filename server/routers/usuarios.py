@@ -64,7 +64,10 @@ async def update_usuario(id: int, user_update: UserUpdate, db: AsyncSession = De
     
     update_data = user_update.model_dump(exclude_unset=True)
     if "password" in update_data and update_data["password"]:
-        update_data["password_hash"] = hash_password(update_data.pop("password"))
+        new_pwd = update_data.pop("password")
+        update_data["password_hash"] = hash_password(new_pwd)
+        if new_pwd != "admin123":
+            update_data["requiere_cambio_password"] = False
     elif "password" in update_data:
         update_data.pop("password")
         

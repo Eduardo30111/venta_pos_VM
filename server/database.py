@@ -14,6 +14,14 @@ if "aiosqlite" in settings.DATABASE_URL:
 _echo_sql = os.environ.get("VMPOS_SQL_ECHO", "0") == "1"
 
 
+class MigrationError(RuntimeError):
+    """Excepción lanzada cuando ocurre un error crítico e irrecuperable en una migración de base de datos."""
+    pass
+
+def _is_benign_ddl_error(error: Exception) -> bool:
+    msg = str(error).lower()
+    return "duplicate column" in msg or "already exists" in msg
+
 def _migrar_archivo_sqlite_directo(db_url: str):
     """Aplica migraciones DDL directamente en SQLite antes de inicializar SQLAlchemy."""
     try:
@@ -33,15 +41,19 @@ def _migrar_archivo_sqlite_directo(db_url: str):
             try:
                 c.execute(sql)
             except Exception as e:
-                msg = str(e).lower()
-                if "duplicate column" in msg or "already exists" in msg:
+                if _is_benign_ddl_error(e):
                     return
-                logger.warning("Aviso DDL migración directa (%s): %s", desc or sql[:50], e)
+                logger.critical("Error crítico fatal en migración DDL directa (%s): %s", desc or sql[:50], e)
+                raise MigrationError(f"Error fatal de migración DDL ({desc}): {e}") from e
 
         def _safe_update_direct(c, sql: str, desc: str = ""):
             try:
                 c.execute(sql)
             except Exception as e:
+                msg = str(e).lower()
+                if "no such table" in msg or "database is locked" in msg or "disk i/o error" in msg or "malformed" in msg:
+                    logger.critical("Error crítico fatal en UPDATE migración directa (%s): %s", desc or sql[:50], e)
+                    raise MigrationError(f"Error fatal de UPDATE migración ({desc}): {e}") from e
                 logger.warning("Aviso UPDATE migración directa (%s): %s", desc or sql[:50], e)
 
         try:
@@ -410,8 +422,11 @@ def _migrar_archivo_sqlite_directo(db_url: str):
             conn.commit()
         finally:
             conn.close()
+    except MigrationError:
+        raise
     except Exception as e_mig:
-        logger.warning("Aviso en migración SQLite directa: %s", e_mig)
+        logger.critical("Error fatal en migración SQLite directa: %s", e_mig)
+        raise MigrationError(f"Fallo irrecuperable en migración de base de datos: {e_mig}") from e_mig
 
 
 def asegurar_migraciones_sqlite(db_url_or_path: str = None):

@@ -208,9 +208,102 @@ def abrir_modal_cambio_password_obligatorio(parent, datos_usuario, on_success):
 
     crear_boton(content, "Establecer Nueva Contraseña", confirmar_cambio, tipo="success", icono="💾", tam_fuente=10).pack(fill="x", pady=6)
 
+
+def abrir_modal_activacion_primer_administrador(parent, on_success=None):
+    modal = tk.Toplevel(parent)
+    modal.title("🚀 Activación Inicial de VmPOS — Crear Administrador")
+    t_m = aplicar_tema(modal)
+    modal.configure(bg=t_m["bg_surface"])
+    calcular_geometria_segura(modal, 480, 520, 420, 440)
+    modal.transient(parent)
+    modal.grab_set()
+
+    hdr = tk.Frame(modal, bg=t_m["accent"])
+    hdr.pack(fill="x")
+    tk.Label(hdr, text="🚀 ACTIVACIÓN INICIAL DE VmPOS", font=(FONT_FAMILY, 11, "bold"), bg=t_m["accent"], fg="white").pack(pady=(10, 2))
+    tk.Label(hdr, text="Configure el Administrador Maestro de su Negocio", font=(FONT_FAMILY, 9), bg=t_m["accent"], fg="white").pack(pady=(0, 10))
+
+    content = tk.Frame(modal, bg=t_m["bg_surface"], padx=25, pady=15)
+    content.pack(fill="both", expand=True)
+
+    tk.Label(
+        content,
+        text="¡Bienvenido a VmPOS! Para garantizar la seguridad de su información contable y ventas, debe registrar las credenciales maestras del administrador.\n\n"
+             "No se permiten contraseñas predeterminadas ni accesos universales.",
+        font=(FONT_FAMILY, 9),
+        bg=t_m["bg_surface"],
+        fg=t_m["text_main"],
+        justify="left",
+        wraplength=420
+    ).pack(pady=(0, 15))
+
+    tk.Label(content, text="Nombre del Administrador:", font=(FONT_FAMILY, 9, "bold"), bg=t_m["bg_surface"], fg=t_m["text_main"]).pack(anchor="w")
+    nom_var = tk.StringVar(value="Administrador")
+    e_nom = tk.Entry(content, textvariable=nom_var, font=(FONT_FAMILY, 10), bg=t_m["input_bg"], fg=t_m["input_fg"], bd=1, relief="solid")
+    e_nom.pack(fill="x", pady=(2, 8))
+
+    tk.Label(content, text="Usuario de Acceso:", font=(FONT_FAMILY, 9, "bold"), bg=t_m["bg_surface"], fg=t_m["text_main"]).pack(anchor="w")
+    usr_var = tk.StringVar(value="admin")
+    e_usr = tk.Entry(content, textvariable=usr_var, font=(FONT_FAMILY, 10), bg=t_m["input_bg"], fg=t_m["input_fg"], bd=1, relief="solid")
+    e_usr.pack(fill="x", pady=(2, 8))
+
+    tk.Label(content, text="Contraseña Personalizada (mínimo 6 caracteres):", font=(FONT_FAMILY, 9, "bold"), bg=t_m["bg_surface"], fg=t_m["text_main"]).pack(anchor="w")
+    p1_var = tk.StringVar()
+    e_p1 = tk.Entry(content, textvariable=p1_var, show="*", font=(FONT_FAMILY, 10), bg=t_m["input_bg"], fg=t_m["input_fg"], bd=1, relief="solid")
+    e_p1.pack(fill="x", pady=(2, 8))
+
+    tk.Label(content, text="Confirmar Contraseña:", font=(FONT_FAMILY, 9, "bold"), bg=t_m["bg_surface"], fg=t_m["text_main"]).pack(anchor="w")
+    p2_var = tk.StringVar()
+    e_p2 = tk.Entry(content, textvariable=p2_var, show="*", font=(FONT_FAMILY, 10), bg=t_m["input_bg"], fg=t_m["input_fg"], bd=1, relief="solid")
+    e_p2.pack(fill="x", pady=(2, 12))
+
+    def activar():
+        nom = nom_var.get().strip() or "Administrador"
+        usr = usr_var.get().strip()
+        pw1 = p1_var.get().strip()
+        pw2 = p2_var.get().strip()
+
+        if len(usr) < 3:
+            messagebox.showerror("Usuario Inválido", "El nombre de usuario debe tener al menos 3 caracteres.", parent=modal)
+            return
+        if len(pw1) < 6:
+            messagebox.showerror("Contraseña Débil", "La contraseña debe tener al menos 6 caracteres.", parent=modal)
+            return
+        if pw1.lower() in ("admin123", "123456", "admin", "password", "12345678"):
+            messagebox.showerror("Contraseña Insegura", "No puedes usar contraseñas comunes ni predeterminadas. Elige una clave segura.", parent=modal)
+            return
+        if pw1 != pw2:
+            messagebox.showerror("Contraseñas no coinciden", "Las contraseñas ingresadas no coinciden.", parent=modal)
+            return
+
+        try:
+            try:
+                from interface.usuarios_db import crear_administrador_inicial
+            except ImportError:
+                from usuarios_db import crear_administrador_inicial
+
+            crear_administrador_inicial(usr, pw1, nombre=nom)
+        except Exception as e_reg:
+            messagebox.showerror("Error al Crear Administrador", str(e_reg), parent=modal)
+            return
+
+        usuario_var.set(usr)
+        pass_var.set(pw1)
+        messagebox.showinfo("¡Activación Exitosa!", f"Administrador '{usr}' configurado correctamente.\nYa puede iniciar sesión en VmPOS.", parent=modal)
+        modal.destroy()
+        if on_success:
+            on_success()
+
+    crear_boton(content, "Activar Sistema y Guardar Administrador", activar, tipo="success", icono="🚀", tam_fuente=10).pack(fill="x", pady=6)
+
+
 def _iniciar_flujo_principal(datos_usuario, usuario_actual):
     clave_ingresada = pass_var.get().strip()
-    if clave_ingresada == "admin123":
+    requiere_cambio = bool(
+        datos_usuario.get("requiere_cambio_password") or 
+        (clave_ingresada == "admin123")
+    )
+    if requiere_cambio:
         abrir_modal_cambio_password_obligatorio(
             ventana,
             datos_usuario,
@@ -304,6 +397,36 @@ def validar_usuario(event=None):
     success, message = api.login(usuario, clave)
     
     if not success:
+        # Modo Offline Fallback: Si el servidor central no responde o está en subproceso, autenticar contra SQLite local
+        msg_str = str(message).lower()
+        if "no disponible" in msg_str or "conexión" in msg_str or "timeout" in msg_str or "httpx" in msg_str:
+            try:
+                try:
+                    from interface.usuarios_db import obtener_usuario_por_credenciales
+                except ImportError:
+                    from usuarios_db import obtener_usuario_por_credenciales
+                
+                u_local = obtener_usuario_por_credenciales(usuario, clave)
+                if u_local:
+                    datos_usuario = {
+                        "id": u_local["id"],
+                        "usuario": u_local["usuario"],
+                        "nombre": u_local.get("nombre") or u_local["usuario"],
+                        "rol": u_local["rol"],
+                        "permisos": u_local.get("permisos", "administrador"),
+                        "requiere_cambio_password": u_local.get("requiere_cambio_password", False)
+                    }
+                    usuario_actual = datos_usuario["nombre"].capitalize()
+                    mostrar_alerta_bonita(
+                        "¡Bienvenida! ✨ (Modo Local)",
+                        f"Hola {usuario_actual}!\n\nAcceso local verificado como {datos_usuario['rol']}\nIniciando sistema...",
+                        "success"
+                    )
+                    ventana.after(1500, lambda: _iniciar_flujo_principal(datos_usuario, usuario_actual))
+                    return
+            except Exception as e_off:
+                print(f"Aviso en login offline: {e_off}")
+
         messagebox.showerror("Error", message)
         return
 
@@ -331,7 +454,7 @@ def limpiar_campos(event=None):
 
 ventana = tk.Tk()
 business_mgr.recargar()
-titulo_login = f"{business_mgr.nombre} — {business_mgr.subtitulo} (v4.1.0)" if business_mgr.subtitulo else f"{business_mgr.nombre} — Inicio de Sesión (v4.1.0)"
+titulo_login = f"{business_mgr.nombre} — {business_mgr.subtitulo} (v4.1.2)" if business_mgr.subtitulo else f"{business_mgr.nombre} — Inicio de Sesión (v4.1.2)"
 ventana.title(titulo_login)
 
 t = aplicar_tema(ventana)
@@ -578,7 +701,7 @@ def recargar_identidad_login():
     if not ventana.winfo_exists():
         return
     try:
-        nuevo_titulo = f"{business_mgr.nombre} — {business_mgr.subtitulo} (v4.1.0)" if business_mgr.subtitulo else f"{business_mgr.nombre} — Inicio de Sesión (v4.1.0)"
+        nuevo_titulo = f"{business_mgr.nombre} — {business_mgr.subtitulo} (v4.1.2)" if business_mgr.subtitulo else f"{business_mgr.nombre} — Inicio de Sesión (v4.1.2)"
         ventana.title(nuevo_titulo)
         _renderizar_panel_institucional()
         c_login = business_mgr.color_login or t["accent"]
@@ -654,6 +777,17 @@ def _autoarrancar_o_sincronizar_red():
 threading.Thread(target=_autoarrancar_o_sincronizar_red, daemon=True).start()
 
 if __name__ == "__main__":
+    try:
+        try:
+            from interface.usuarios_db import hay_administrador, crear_tablas_iniciales
+        except ImportError:
+            from usuarios_db import hay_administrador, crear_tablas_iniciales
+        crear_tablas_iniciales()
+        if not hay_administrador():
+            ventana.after(350, lambda: abrir_modal_activacion_primer_administrador(ventana))
+    except Exception as e_act:
+        print(f"Aviso verificando activación inicial: {e_act}")
+
     if sys.platform == "darwin":
         try:
             ventana.update_idletasks()

@@ -18,3 +18,4 @@ class Usuario(Base):
     fecha_registro = Column(DateTime(timezone=True), server_default=func.now())
     ultimo_acceso = Column(DateTime(timezone=True), nullable=True)
     solicitud_liquidacion = Column(DateTime(timezone=True), nullable=True)
+    requiere_cambio_password = Column(Boolean, default=False)

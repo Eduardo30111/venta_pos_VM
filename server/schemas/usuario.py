@@ -12,6 +12,7 @@ class UserBase(BaseModel):
     salario_diario: Optional[float] = 0.0
     porcentaje_comision: Optional[float] = 0.0
     estado: Optional[str] = 'Activo'
+    requiere_cambio_password: Optional[bool] = False
 
 class UserCreate(UserBase):
     password: str
@@ -27,6 +28,7 @@ class UserUpdate(BaseModel):
     salario_diario: Optional[float] = None
     porcentaje_comision: Optional[float] = None
     estado: Optional[str] = None
+    requiere_cambio_password: Optional[bool] = None
 
 class UserResponse(UserBase):
     id: int
@@ -44,3 +46,6 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    requiere_cambio_password: Optional[bool] = False
+    usuario_id: Optional[int] = None
+    rol: Optional[str] = None

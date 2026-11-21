@@ -11,9 +11,11 @@ from interface.usuarios_db import (
 
 class TestSeguridadUsuariosDB(unittest.TestCase):
     def setUp(self):
-        self.test_db = "database/test_usuarios_seg.db"
+        self.test_db = os.path.abspath("database/test_usuarios_seg.db")
+        os.environ["VMPOS_DB_USUARIOS"] = self.test_db
         if os.path.exists(self.test_db):
             os.remove(self.test_db)
+        os.makedirs(os.path.dirname(self.test_db), exist_ok=True)
         conn = sqlite3.connect(self.test_db)
         cur = conn.cursor()
         cur.execute("""
@@ -43,6 +45,7 @@ class TestSeguridadUsuariosDB(unittest.TestCase):
         conn.close()
 
     def tearDown(self):
+        os.environ.pop("VMPOS_DB_USUARIOS", None)
         if os.path.exists(self.test_db):
             os.remove(self.test_db)
 

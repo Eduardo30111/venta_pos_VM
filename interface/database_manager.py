@@ -30,14 +30,20 @@ def _safe_alter_column(cursor, sql: str, desc: str = ""):
         msg = str(e).lower()
         if "duplicate column" in msg or "already exists" in msg:
             return
-        logger.warning("Aviso DDL al agregar columna en SQLite (%s): %s", desc or sql[:50], e)
+        logger.critical("Error fatal en migración DDL SQLite (%s): %s", desc or sql[:50], e)
+        raise RuntimeError(f"Fallo crítico en migración DDL SQLite ({desc}): {e}") from e
     except Exception as e:
-        logger.warning("Error DDL inesperado en SQLite (%s): %s", desc or sql[:50], e)
+        logger.critical("Error DDL inesperado en SQLite (%s): %s", desc or sql[:50], e)
+        raise RuntimeError(f"Error DDL inesperado en SQLite ({desc}): {e}") from e
 
 def _safe_update(cursor, sql: str, desc: str = ""):
     try:
         cursor.execute(sql)
     except Exception as e:
+        msg = str(e).lower()
+        if "no such table" in msg or "database is locked" in msg or "disk i/o error" in msg or "malformed" in msg:
+            logger.critical("Error fatal en UPDATE de migración SQLite (%s): %s", desc or sql[:50], e)
+            raise RuntimeError(f"Fallo crítico en UPDATE SQLite ({desc}): {e}") from e
         logger.warning("Aviso UPDATE en SQLite (%s): %s", desc or sql[:50], e)
 
 def conectar_db(db_path=None):

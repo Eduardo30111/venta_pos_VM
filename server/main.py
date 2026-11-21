@@ -112,8 +112,11 @@ async def _sincronizar_usuarios_locales():
                         dup_doc = await sync_session.execute(select(Usuario).where(Usuario.documento == raw_doc))
                         doc_val = None if dup_doc.scalars().first() else raw_doc
 
-                    raw_pwd = str(d.get("password") or d.get("clave") or "admin123")
+                    raw_pwd = str(d.get("password") or d.get("clave") or "")
+                    if not raw_pwd:
+                        continue
                     pwd_hash = raw_pwd if raw_pwd.startswith("$2") else hash_password(raw_pwd)
+                    req_change = bool(d.get("requiere_cambio_password") or raw_pwd == "admin123")
                     nuevo = Usuario(
                         nombre=str(d.get("nombre") or uname),
                         apellidos=str(d.get("apellidos") or ""),
@@ -125,6 +128,7 @@ async def _sincronizar_usuarios_locales():
                         salario_diario=float(d.get("salario_diario") or 0.0),
                         porcentaje_comision=float(d.get("porcentaje_comision") or 0.0),
                         estado=str(d.get("estado") or "Activo"),
+                        requiere_cambio_password=req_change,
                     )
                     sync_session.add(nuevo)
                     await sync_session.commit()
@@ -419,6 +423,9 @@ async def startup():
         except Exception as e_stmt:
             msg = str(e_stmt).lower()
             if "duplicate column" not in msg and "already exists" not in msg:
+                if any(err_term in msg for err_term in ("disk i/o error", "database is locked", "syntax error", "file is not a database", "malformed", "permission denied")):
+                    logger.critical("Error fatal irrecuperable en DDL de arranque (%s): %s", stmt[:50], e_stmt)
+                    raise RuntimeError(f"Error fatal de base de datos durante arranque ({stmt[:50]}): {e_stmt}") from e_stmt
                 logger.warning("Aviso en DDL de arranque (%s): %s", stmt[:50], e_stmt)
 
     try:
@@ -450,18 +457,22 @@ async def startup():
     await _sincronizar_usuarios_locales()
 
     async with db_mod.SessionLocal() as session:
-        admin = await session.execute(select(Usuario).where(Usuario.usuario == "admin"))
-        if not admin.scalars().first():
+        admin_res = await session.execute(select(Usuario).where(Usuario.rol == "Administrador"))
+        if not admin_res.scalars().first():
+            env_pwd = os.environ.get("VMPOS_ADMIN_PASSWORD")
+            initial_pwd = env_pwd if env_pwd else "admin123"
+            req_change = False if env_pwd else True
             session.add(
                 Usuario(
                     nombre="Admin",
                     apellidos="Principal",
                     documento=None,
                     usuario="admin",
-                    password_hash=hash_password("admin123"),
+                    password_hash=hash_password(initial_pwd),
                     rol="Administrador",
                     tipo_remuneracion="Fija",
                     estado="Activo",
+                    requiere_cambio_password=req_change,
                 )
             )
             await session.commit()
@@ -529,11 +540,11 @@ async def pagina_descargas():
     </head>
     <body>
         <div class="card">
-            <h1>🚀 Descargas VmPOS (v4.1.0)</h1>
+            <h1>🚀 Descargas VmPOS (v4.1.2)</h1>
             <p>Selecciona tu sistema operativo para descargar el instalador directo.</p>
-            <a class="btn" href="/descargar/windows">🪟 Descargar Instalador Windows (.exe) <span class="badge">61.7 MB</span></a>
-            <a class="btn btn-sec" href="/descargar/windows-portable">📦 Descargar Windows Portátil (.zip) <span class="badge">68.3 MB</span></a>
-            <a class="btn" style="background:#0F766E;" href="/descargar/mac">🍏 Descargar Instalador macOS (.dmg) <span class="badge">76.1 MB</span></a>
+            <a class="btn" href="/descargar/windows">🪟 Descargar Instalador Windows (.exe) <span class="badge">Oficial</span></a>
+            <a class="btn btn-sec" href="/descargar/windows-portable">📦 Descargar Windows Portátil (.zip) <span class="badge">Portable</span></a>
+            <a class="btn" style="background:#0F766E;" href="/descargar/mac">🍏 Descargar Instalador macOS (.dmg) <span class="badge">Universal</span></a>
         </div>
     </body>
     </html>
@@ -544,9 +555,10 @@ async def pagina_descargas():
 @app.get("/descargar/windows")
 async def descargar_windows():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(root, "dist", "VmPOS_Setup_v4.1.0.exe")
-    if os.path.exists(path):
-        return FileResponse(path, filename="VmPOS_Setup_v4.1.0.exe", media_type="application/vnd.microsoft.portable-executable")
+    for f_nom in ("VmPOS_Setup_v4.1.2.exe", "VmPOS_Setup_v4.1.0.exe"):
+        path = os.path.join(root, "dist", f_nom)
+        if os.path.exists(path):
+            return FileResponse(path, filename=f_nom, media_type="application/vnd.microsoft.portable-executable")
     raise HTTPException(status_code=404, detail="Instalador de Windows no encontrado")
 
 

@@ -16,28 +16,36 @@ echo "=================================================================="
 echo "🚀 INICIANDO EMPAQUETADO DE VmPOS PARA macOS"
 echo "=================================================================="
 
-# 1. Asegurar entorno virtual y dependencias compatibles con macOS (Tk >= 9.0 obligatorio)
-if [ -x "/Users/eduardosanchez/miniconda3/bin/python3" ]; then
-    PYTHON_BIN="/Users/eduardosanchez/miniconda3/bin/python3"
-elif [ -x "$HOME/miniconda3/bin/python3" ]; then
-    PYTHON_BIN="$HOME/miniconda3/bin/python3"
-elif [ -x "/opt/homebrew/bin/python3" ]; then
-    PYTHON_BIN="/opt/homebrew/bin/python3"
-elif [ -x "/usr/local/bin/python3" ]; then
-    PYTHON_BIN="/usr/local/bin/python3"
+# 1. Asegurar entorno virtual y dependencias compatibles con macOS (Tk >= 8.6 obligatorio)
+if [ -n "$PYTHON" ] && command -v "$PYTHON" > /dev/null 2>&1; then
+    PYTHON_BIN="$PYTHON"
+elif [ -n "$VIRTUAL_ENV" ] && [ -x "$VIRTUAL_ENV/bin/python3" ]; then
+    PYTHON_BIN="$VIRTUAL_ENV/bin/python3"
+elif command -v python3 > /dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
 else
     PYTHON_BIN="python3"
 fi
 
 echo "Usando intérprete Python: $PYTHON_BIN"
-$PYTHON_BIN -c "import tkinter, sys; print(f'Intérprete: Python {sys.version.split()[0]} | TkVersion: {tkinter.TkVersion} (Tcl: {tkinter.TclVersion})')"
 
-TK_MAJOR=$($PYTHON_BIN -c "import tkinter; print(int(str(tkinter.TkVersion).split('.')[0]))" 2>/dev/null || echo "0")
-TK_MINOR=$($PYTHON_BIN -c "import tkinter; print(int(str(tkinter.TkVersion).split('.')[1]))" 2>/dev/null || echo "0")
-if [ "$TK_MAJOR" -lt 8 ] || ([ "$TK_MAJOR" -eq 8 ] && [ "$TK_MINOR" -lt 6 ]); then
-    echo "❌ ERROR: Intérprete Python tiene Tk $TK_MAJOR.$TK_MINOR. Se requiere Tk >= 9.0 (Miniconda) para evitar el fallo gráfico Retina de Cocoa en macOS."
+if ! "$PYTHON_BIN" -c "import tkinter; import _tkinter" 2>/dev/null; then
+    echo "❌ ERROR: El intérprete $PYTHON_BIN no tiene soporte para Tkinter (_tkinter missing)."
+    echo "En macOS con Homebrew, ejecute: brew install python-tk"
     exit 1
 fi
+
+"$PYTHON_BIN" -c "import tkinter, sys; print(f'Intérprete: Python {sys.version.split()[0]} | TkVersion: {tkinter.TkVersion} (Tcl: {tkinter.TclVersion})')"
+
+TK_VER=$("$PYTHON_BIN" -c "import tkinter; print(tkinter.TkVersion)" 2>/dev/null || echo "0.0")
+TK_MAJOR=$(echo "$TK_VER" | cut -d. -f1)
+TK_MINOR=$(echo "$TK_VER" | cut -d. -f2)
+
+if [ "$TK_MAJOR" -lt 8 ] || ([ "$TK_MAJOR" -eq 8 ] && [ "$TK_MINOR" -lt 6 ]); then
+    echo "❌ ERROR: Intérprete Python tiene Tk $TK_VER. Se requiere Tk >= 8.6 para compatibilidad con macOS."
+    exit 1
+fi
+echo "✅ Tkinter verificado correctamente: Tk $TK_VER"
 
 export PYINSTALLER_CONFIG_DIR="$PROJECT_ROOT/build/pyinstaller_cache"
 export MPLCONFIGDIR="$PROJECT_ROOT/build/matplotlib_cache"
@@ -194,6 +202,14 @@ if hdiutil makehybrid -hfs -joliet -iso -default-volume-name "Instalador VmPOS" 
         echo "✅ Instalador DMG generado con éxito en: dist/VmPOS_macOS_Instalador.dmg"
     else
         echo "ℹ️ No se pudo convertir ISO a DMG, usando método estándar."
+    fi
+fi
+
+if [ ! -f "$DMG_OUTPUT" ]; then
+    echo "Generando DMG con método nativo hdiutil create..."
+    hdiutil create -volname "Instalador VmPOS" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG_OUTPUT" > /dev/null 2>&1 || true
+    if [ -f "$DMG_OUTPUT" ]; then
+        echo "✅ Instalador DMG generado con éxito en: dist/VmPOS_macOS_Instalador.dmg"
     fi
 fi
 rm -f "$STAGE_ISO" "$PROJECT_ROOT/VmPOS.spec"

@@ -33,7 +33,14 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
     user.ultimo_acceso = datetime.utcnow()
     await db.commit()
     
-    return {"access_token": access_token, "token_type": "bearer"}
+    req_cambio = bool(getattr(user, "requiere_cambio_password", False) or (request.password == "admin123"))
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "requiere_cambio_password": req_cambio,
+        "usuario_id": user.id,
+        "rol": user.rol,
+    }
 
 @router.post("/logout")
 async def logout(current_user: Usuario = Depends(get_current_user)):

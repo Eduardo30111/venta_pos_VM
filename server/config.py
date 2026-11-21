@@ -55,7 +55,13 @@ def _detectar_database_url_por_defecto() -> str:
         s.settimeout(0.4)
         try:
             if s.connect_ex(("127.0.0.1", 5432)) == 0:
-                return "postgresql+asyncpg://postgres:postgres@localhost:5432/vmpos"
+                pg_user = os.environ.get("POSTGRES_USER", "postgres")
+                pg_pass = os.environ.get("POSTGRES_PASSWORD", "")
+                pg_host = os.environ.get("POSTGRES_HOST", "localhost")
+                pg_port = os.environ.get("POSTGRES_PORT", "5432")
+                pg_db = os.environ.get("POSTGRES_DB", "vmpos")
+                if pg_pass:
+                    return f"postgresql+asyncpg://{pg_user}:{pg_pass}@{pg_host}:{pg_port}/{pg_db}"
         except Exception:
             pass
         finally:
@@ -72,7 +78,7 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
     APP_NAME: str = "VmPOS"
-    APP_VERSION: str = "4.1.0"
+    APP_VERSION: str = "4.1.2"
     SERVER_PORT: int = OFFICIAL_SERVER_PORT
 
     class Config:

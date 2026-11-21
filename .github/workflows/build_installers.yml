@@ -1,4 +1,4 @@
-name: Compilar Instalador Windows y Publicar Release
+name: Compilar Instaladores y Publicar Release Oficial
 
 on:
   workflow_dispatch:
@@ -29,7 +29,7 @@ jobs:
 
       - name: Ejecutar pruebas unitarias de backend e integridad
         run: |
-          python -m unittest tests/test_idempotencia_global.py tests/test_seguridad_rehash.py tests/test_proveedor_phantom_balance.py tests/test_compra_ajuste_stock.py tests/test_auditoria_idempotencia_exhaustiva.py tests/test_seguridad_usuarios_db.py
+          python -m unittest tests/test_idempotencia_global.py tests/test_seguridad_rehash.py tests/test_proveedor_phantom_balance.py tests/test_compra_ajuste_stock.py tests/test_auditoria_idempotencia_exhaustiva.py tests/test_seguridad_usuarios_db.py tests/test_seguridad_activacion_admin.py tests/test_migraciones_excepciones.py
 
   build-macos:
     name: Compilar Instalador macOS (.dmg y .zip)
@@ -51,6 +51,7 @@ jobs:
 
       - name: Compilar VmPOS.app y DMG
         run: |
+          export PYTHON="$(which python3)"
           bash packaging/build_macos.sh
 
       - name: Subir artefactos de macOS a GitHub Actions
@@ -58,17 +59,6 @@ jobs:
         with:
           name: VmPOS-macOS-Instalador
           path: |
-            dist/*.dmg
-            dist/*.zip
-
-      - name: Publicar Release Oficial en GitHub (macOS)
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: |
             dist/*.dmg
             dist/*.zip
 
@@ -122,27 +112,48 @@ jobs:
             dist/*.exe
             dist/*.zip
 
-      - name: Publicar Release Oficial en GitHub
+  publish-release:
+    name: Publicar Release Oficial en GitHub
+    needs: [test-and-verify, build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar artefactos macOS
+        uses: actions/download-artifact@v4
+        with:
+          name: VmPOS-macOS-Instalador
+          path: dist
+
+      - name: Descargar artefactos Windows
+        uses: actions/download-artifact@v4
+        with:
+          name: VmPOS-Windows-Instalador
+          path: dist
+
+      - name: Publicar Release Oficial
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v4.1.0
-          name: "VmPOS v4.1.0 — Sincronización Total Multicaja, Fiados Atómicos y Anti-Duplicados"
+          tag_name: ${{ github.ref_name }}
+          name: "VmPOS ${{ github.ref_name }} — Sincronización Total, Seguridad y Activación Oficial"
           body: |
-            ## 🚀 VmPOS v4.1.0 — Instaladores Oficiales Centralizados
+            ## 🚀 VmPOS ${{ github.ref_name }} — Instaladores Oficiales Centralizados
 
             ### 📦 Descargas Disponibles:
-            - **Windows (Instalador Setup .exe)**: `VmPOS_Setup_v4.1.0.exe` (Instalación limpia, motor FastAPI centralizado, puerto único 8000 y reglas de firewall)
+            - **Windows (Instalador Setup .exe)**: `VmPOS_Setup_${{ github.ref_name }}.exe` (Instalación limpia, motor FastAPI centralizado, puerto único 8000 y reglas de firewall)
             - **Windows (Portable .zip)**: `VmPOS_Windows_Portable.zip` (Descomprimir y usar de inmediato)
             - **macOS (Instalador DMG)**: `VmPOS_macOS_Instalador.dmg` (Arrastrar a Aplicaciones)
+            - **macOS (Paquete .zip)**: `VmPOS_macOS.zip` (Distribución nativa macOS)
 
             ---
-            ### ✨ Novedades Principales v4.1.0:
-            - **Sincronización Total Multicaja en Tiempo Real**: Computadoras Windows y Mac comparten la misma base de datos central sin dependencias de SQLite local para catálogo ni ventas.
+            ### ✨ Novedades Principales ${{ github.ref_name }}:
+            - **Activación Inicial Segura**: Asistente de primer arranque para definir credenciales de administrador personalizadas con validación de fortaleza.
+            - **Eliminación de Contraseña Predeterminada**: Bloqueo estricto y solicitud obligatoria de cambio de contraseña ante claves temporales (`admin123`).
+            - **Sincronización Total Multicaja en Tiempo Real**: Computadoras Windows y macOS comparten la misma base central sin dependencias de SQLite local para catálogo ni ventas.
             - **Integridad Atómica de Fiados y Cartera**: Asociación automática e inmediata de ventas fiadas con saldo_pendiente del cliente y movimientos de cartera.
-            - **Abonos FIFO Con Trazabilidad Contable**: Los abonos descuentan la deuda en estricto orden cronológico, registran el medio de pago real (Efectivo en gaveta vs Transferencia en banco) y no inflan ventas.
-            - **Prevención de Ventas Duplicadas**: Bloqueo asíncrono con `idempotency_key`, protección contra 40+ clics repetidos, concurrencia simultánea y recuperación ante microcortes de red.
+            - **Abonos FIFO Con Trazabilidad Contable**: Descuento cronológico de deuda y medios de pago reales (Efectivo vs Banco).
+            - **Prevención de Ventas Duplicadas**: Bloqueo asíncrono con `idempotency_key`, protección contra clics repetidos, concurrencia simultánea y recuperación ante microcortes de red.
           draft: false
           prerelease: false
           files: |
