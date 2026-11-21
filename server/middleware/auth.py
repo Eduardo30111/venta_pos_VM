@@ -51,10 +51,20 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
     if user_id is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token invalido")
     
-    result = await db.execute(select(Usuario).where(Usuario.id == int(user_id)))
-    user = result.scalars().first()
+    user = None
+    try:
+        user_int = int(user_id)
+        result = await db.execute(select(Usuario).where(Usuario.id == user_int))
+        user = result.scalars().first()
+    except (ValueError, TypeError):
+        pass
+
     if user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+        result = await db.execute(select(Usuario).where(Usuario.usuario == str(user_id)))
+        user = result.scalars().first()
+
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no encontrado o sesión expirada")
     return user
 
 def require_permission(permiso: str):

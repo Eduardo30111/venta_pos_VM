@@ -486,17 +486,18 @@ def trasladar_bodega_a_operario(
         cur = conn.cursor()
 
         # 1. Verificar producto y stock disponible en Bodega
-        cur.execute("SELECT id, codigo, nombre, unidad_medida, stock_bodega, stock_vitrina, stock, costo FROM productos WHERE id = ?", (producto_id,))
+        cur.execute("SELECT id, codigo, nombre, unidad_medida, stock_bodega, stock_vitrina, stock, costo FROM productos WHERE id = ? OR codigo = ? OR codigo = ?", (producto_id, str(producto_id), str(producto_id).zfill(5)))
         prod = cur.fetchone()
         if not prod:
-            raise ValueError(f"No se encontró el producto con ID {producto_id}.")
+            raise ValueError(f"No se encontró el producto con ID o Código '{producto_id}'.")
 
+        p_id_real = prod["id"]
         stock_bodega_ant = float(prod["stock_bodega"] or 0.0)
         if stock_bodega_ant < cantidad_unidades:
             # Sincronización preventiva con Servidor Central por si hubo compras recientes
             try:
                 sincronizar_stock_central_local([prod["codigo"]])
-                cur.execute("SELECT stock_bodega, stock_vitrina, stock, costo FROM productos WHERE id = ?", (producto_id,))
+                cur.execute("SELECT stock_bodega, stock_vitrina, stock, costo FROM productos WHERE id = ?", (p_id_real,))
                 prod_actualizado = cur.fetchone()
                 if prod_actualizado:
                     stock_bodega_ant = float(prod_actualizado["stock_bodega"] or 0.0)
@@ -523,12 +524,12 @@ def trasladar_bodega_a_operario(
                 stock = ?,
                 fecha_modificacion = ?
             WHERE id = ?
-        """, (stock_bodega_des, stock_total_des, f"{f_str} {h_str}", producto_id))
+        """, (stock_bodega_des, stock_total_des, f"{f_str} {h_str}", p_id_real))
 
         # 3. Obtener o crear registro en inventario_operarios de forma tolerante a nombres/alias
         aliases_dest, uid_dest = resolver_identificadores_usuario(usuario_destino)
         placeholders_dest = ", ".join("?" for _ in aliases_dest)
-        params_dest = list(aliases_dest) + ([uid_dest] if uid_dest is not None else [-999999]) + [producto_id, str(prod["codigo"])]
+        params_dest = list(aliases_dest) + ([uid_dest] if uid_dest is not None else [-999999]) + [p_id_real, str(prod["codigo"])]
 
         cur.execute(f"""
             SELECT id, stock_disponible, total_recibido, usuario_nombre
@@ -575,7 +576,7 @@ def trasladar_bodega_a_operario(
                     usuario_id
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, 0.0, 0.0, 'TRASLADO_BODEGA', ?, ?)
             """, (
-                usuario_destino, rol_u, producto_id, prod["codigo"],
+                usuario_destino, rol_u, p_id_real, prod["codigo"],
                 prod["nombre"], prod["unidad_medida"], cantidad_unidades,
                 cantidad_unidades, f"{f_str} {h_str}", uid_dest
             ))
@@ -592,7 +593,7 @@ def trasladar_bodega_a_operario(
                 cantidad, usuario, estado, observaciones
             ) VALUES (?, ?, ?, ?, ?, ?, 'BODEGA', ?, ?, ?, 'Completado', ?)
         """, (
-            num_traslado, f_str, h_str, producto_id, prod["codigo"],
+            num_traslado, f_str, h_str, p_id_real, prod["codigo"],
             prod["nombre"], ubic_dest, cantidad_unidades, usuario_responsable, obs_completa
         ))
 
@@ -606,7 +607,7 @@ def trasladar_bodega_a_operario(
                 valor_total, referencia, usuario, observaciones, estado
             ) VALUES (?, ?, ?, ?, ?, 'TRASLADO_BODEGA_A_OPERARIO', ?, ?, 'BODEGA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Completado')
         """, (
-            f_str, h_str, producto_id, prod["codigo"], prod["nombre"],
+            f_str, h_str, p_id_real, prod["codigo"], prod["nombre"],
             cantidad_unidades, prod["unidad_medida"], ubic_dest,
             stock_bodega_ant, stock_bodega_des, stock_op_ant, stock_op_des,
             float(prod["costo"] or 0.0), round(cantidad_unidades * float(prod["costo"] or 0.0), 2),

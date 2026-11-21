@@ -116,17 +116,20 @@ if getattr(sys, 'frozen', False):
     import shutil
     plantillas = [
         ('ventas.db', 'database', 'database'),
+        ('vmpos_server.db', 'database', 'database'),
         ('usuarios.db', 'database', 'database'),
         ('business_config.json', 'config', 'config'),
         ('printer_config.json', 'config', 'config'),
         ('theme_config.json', 'config', 'config'),
-        ('network_config.json', '', '')
+        ('network_config.json', '', ''),
+        ('network_config.json', 'config', 'config'),
     ]
     for archivo, sub_origen, sub_destino in plantillas:
         ruta_orig = os.path.join(BUNDLE_DIR, sub_origen, archivo) if sub_origen else os.path.join(BUNDLE_DIR, archivo)
         ruta_dest = os.path.join(USER_DATA_DIR, sub_destino, archivo) if sub_destino else os.path.join(USER_DATA_DIR, archivo)
-        if os.path.exists(ruta_orig) and not os.path.exists(ruta_dest):
+        if os.path.exists(ruta_orig) and (not os.path.exists(ruta_dest) or os.path.getsize(ruta_dest) == 0):
             try:
+                os.makedirs(os.path.dirname(ruta_dest), exist_ok=True)
                 shutil.copy2(ruta_orig, ruta_dest)
             except Exception as e:
                 print(f"Aviso copiando plantilla {archivo}: {e}")

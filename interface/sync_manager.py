@@ -396,7 +396,14 @@ class SyncManager:
                 return False, f"Servidor rechazó liquidación de nómina ({resp.status_code}): {resp.text}"
 
             elif tipo == OP_MOV_INVENTARIO:
-                resp = api.post("/inventario/movimientos", json=payload, timeout=10.0)
+                subtipo = payload.get("subtipo")
+                if subtipo == "COMPRA_ENTRADA":
+                    endpoint = "/inventario/compras"
+                elif subtipo == "AJUSTE_CONTEO":
+                    endpoint = "/inventario/ajustes"
+                else:
+                    endpoint = "/inventario/movimientos"
+                resp = api.post(endpoint, json=payload, timeout=10.0)
                 if resp.status_code in (200, 201):
                     return True, ""
                 if getattr(resp, "is_network_error", False):

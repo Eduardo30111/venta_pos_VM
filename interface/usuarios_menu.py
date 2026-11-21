@@ -199,38 +199,51 @@ def seleccionar_usuario(event):
     
     try:
         valores = tabla.item(item_seleccionado, 'values')
-        if not valores: return
+        if not valores:
+            return
         
         id_usuario_seleccionado = int(valores[0])
         
-        # We clean first to make sure fields are empty
-        for campo in ["Usuario", "Password", "Nombre", "Apellidos"]:
+        # Limpiar campos primero
+        for campo in ["Usuario", "Password", "Nombre", "Apellidos", "Documento"]:
             if campo in entradas:
                 entradas[campo].delete(0, tk.END)
                 
         entradas['Usuario'].insert(0, valores[1])
         
-        rol_var.set(valores[2])
-        estado_var.set(valores[3])
-        
-        # As table has ("ID", "Usuario", "Rol", "Estado", "Último Acceso", "Fecha Registro")
-        # We need to query DB to get Nombre, Apellidos, Tipo_nomina, Salario
+        # Columnas de tabla: ("ID"[0], "Usuario"[1], "Nombre"[2], "Documento"[3], "Rol"[4], "Remuneración"[5], "Estado"[6], "Último Acceso"[7], "Registro"[8])
+        rol_tabla = valores[4] if len(valores) > 4 else "Vendedor"
+        estado_tabla = valores[6] if len(valores) > 6 else "Activo"
+        doc_tabla = valores[3] if len(valores) > 3 and valores[3] != "Sin doc" else ""
+
+        if 'Documento' in entradas and doc_tabla:
+            entradas['Documento'].insert(0, doc_tabla)
+
+        # Buscar usuario en el catálogo para cargar datos completos de remuneración
         usuarios_db = obtener_usuarios()
-        for u in usuarios_db:
-            if u['id'] == id_usuario_seleccionado:
-                if 'Nombre' in entradas and u.get('nombre'):
-                    entradas['Nombre'].insert(0, u['nombre'])
-                if 'Apellidos' in entradas and u.get('apellidos'):
-                    entradas['Apellidos'].insert(0, u['apellidos'])
-                    
-                tipo_nom = u.get('tipo_nomina', 'Porcentual')
-                tipo_nomina_var.set(tipo_nom)
+        u_encontrado = next((u for u in usuarios_db if u.get('id') == id_usuario_seleccionado), None)
+        if u_encontrado:
+            if 'Nombre' in entradas and u_encontrado.get('nombre'):
+                entradas['Nombre'].insert(0, u_encontrado['nombre'])
+            if 'Apellidos' in entradas and u_encontrado.get('apellidos'):
+                entradas['Apellidos'].insert(0, u_encontrado['apellidos'])
+            if 'Documento' in entradas and u_encontrado.get('documento'):
+                entradas['Documento'].delete(0, tk.END)
+                entradas['Documento'].insert(0, u_encontrado['documento'])
                 
-                if tipo_nom == 'Fija':
-                    salario_diario_var.set(str(u.get('salario_diario', 0.0)))
-                else:
-                    salario_diario_var.set(str(u.get('comision_porcentaje', 0.0)))
-                break
+            rol_var.set(u_encontrado.get('rol', rol_tabla))
+            estado_var.set(u_encontrado.get('estado', estado_tabla))
+
+            tipo_nom = u_encontrado.get('tipo_remuneracion') or u_encontrado.get('tipo_nomina', 'Porcentual')
+            tipo_nomina_var.set(tipo_nom)
+            
+            if tipo_nom == 'Fija':
+                salario_diario_var.set(str(u_encontrado.get('salario_diario', 0.0)))
+            else:
+                salario_diario_var.set(str(u_encontrado.get('porcentaje_comision') or u_encontrado.get('comision_porcentaje', 0.0)))
+        else:
+            rol_var.set(rol_tabla)
+            estado_var.set(estado_tabla)
         
         print(f"👤 Usuario seleccionado: {valores[1]} (ID: {id_usuario_seleccionado})")
     except Exception as e:
@@ -246,6 +259,7 @@ def guardar_usuario():
     password = entradas['Password'].get().strip()
     nombre = entradas['Nombre'].get().strip() if 'Nombre' in entradas else ""
     apellidos = entradas['Apellidos'].get().strip() if 'Apellidos' in entradas else ""
+    documento = entradas['Documento'].get().strip() if 'Documento' in entradas else ""
     
     rol = rol_var.get()
     estado = estado_var.get()
@@ -273,33 +287,38 @@ def guardar_usuario():
     try:
         if id_usuario_seleccionado:
             print(f"🔄 Actualizando usuario con ID: {id_usuario_seleccionado}")
-            resultado = actualizar_usuario_db(
+            ok, msg = actualizar_usuario_db(
                 id_usuario_seleccionado, 
                 usuario=usuario, 
                 rol=rol, 
                 estado=estado, 
                 password=password if password else None,
-                comision_porcentaje=comision,
+                comision=comision,
                 nombre=nombre,
                 apellidos=apellidos,
-                tipo_nomina=tipo_nom,
-                salario_diario=salario
+                tipo_nom=tipo_nom,
+                salario=salario,
+                documento=documento
             )
-            if resultado:
+            if ok:
                 messagebox.showinfo("Éxito", f"Usuario '{usuario}' actualizado correctamente.", parent=ventana_usuarios)
             else:
-                messagebox.showerror("Error", "No se pudo actualizar el usuario.", parent=ventana_usuarios)
+                messagebox.showerror("Error", f"No se pudo actualizar el usuario:\n{msg}", parent=ventana_usuarios)
+                return
         else:
             if not password:
                 messagebox.showerror("Error", "La contraseña es obligatoria para un nuevo usuario.", parent=ventana_usuarios)
                 entradas['Password'].focus()
                 return
             print(f"➕ Creando nuevo usuario: {usuario}")
-            resultado = insertar_usuario(usuario, password, rol, estado, comision, nombre, apellidos, tipo_nom, salario)
-            if resultado:
+            ok, msg = insertar_usuario(
+                usuario, password, rol, estado, comision, nombre, apellidos, tipo_nom, salario, documento
+            )
+            if ok:
                 messagebox.showinfo("Éxito", f"Usuario '{usuario}' creado correctamente.", parent=ventana_usuarios)
             else:
-                messagebox.showerror("Error", f"No se pudo crear el usuario. Es posible que ya exista.", parent=ventana_usuarios)
+                messagebox.showerror("Error", f"No se pudo crear el usuario:\n{msg}", parent=ventana_usuarios)
+                return
         limpiar_campos()
         actualizar_tabla()
     except Exception as e:

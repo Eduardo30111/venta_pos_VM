@@ -135,6 +135,23 @@ class ItemCompraCreate(BaseModel):
     costo_unidad_compra: float
     subtotal: Optional[float] = 0.0
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalizar_item(cls, data: Any):
+        if isinstance(data, dict):
+            d = dict(data)
+            if "codigo" not in d and "codigo_producto" in d:
+                d["codigo"] = str(d["codigo_producto"] or "")
+            if "producto_id" in d and d["producto_id"] is not None:
+                try:
+                    d["producto_id"] = int(d["producto_id"])
+                except Exception:
+                    d["producto_id"] = None
+            if "factor_conversion" not in d or not d["factor_conversion"]:
+                d["factor_conversion"] = 1.0
+            return d
+        return data
+
 
 class CompraCreate(BaseModel):
     proveedor_id: Optional[int] = None

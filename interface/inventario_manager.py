@@ -798,8 +798,10 @@ def _sincronizar_compra_local_sqlite(
 
         cur.execute("UPDATE compras_inventario SET total_compra = ? WHERE id = ? OR numero_compra = ?", (total_compra, cid, numero_compra))
         conn.commit()
+        return {"numero_compra": numero_compra, "compra_id": cid, "total": total_compra}
     except Exception as e_c_sync:
         print(f"Aviso sincronizando compra localmente: {e_c_sync}")
+        return {"numero_compra": numero_compra, "compra_id": compra_id or 0, "total": 0.0}
     finally:
         if debo_cerrar:
             conn.close()
@@ -894,8 +896,18 @@ def _sincronizar_ajuste_local_sqlite(
                 usuario, usuario, motivo, motivo
             ))
             conn.commit()
+            return {
+                "producto": nom,
+                "ubicacion": ubic,
+                "stock_anterior": s_ant,
+                "stock_nuevo": s_des,
+                "diferencia": dif,
+                "tipo_ajuste": "AJUSTE_POSITIVO" if dif > 0 else "AJUSTE_NEGATIVO"
+            }
+        return {"mensaje": "Artículo no encontrado en base local"}
     except Exception as e_a_sync:
         print(f"Aviso sincronizando ajuste localmente: {e_a_sync}")
+        return {"mensaje": f"Error local: {e_a_sync}"}
     finally:
         if debo_cerrar:
             conn.close()
@@ -920,24 +932,69 @@ def registrar_compra_entrada(
         "observaciones": str(observaciones or ""),
         "items": items or [],
     }
-    resp = api.post("/inventario/compras", json=payload)
-    res = _asegurar_respuesta_ok(resp)
+    res = None
+    es_error_red = False
     try:
-        _sincronizar_compra_local_sqlite(
-            compra_id=res.get("compra_id"),
-            numero_compra=res.get("numero_compra", "COMPRA-NUEVA"),
-            proveedor_id=proveedor_id,
-            proveedor_nombre=proveedor_nombre,
-            doc_referencia=doc_referencia,
-            ubicacion_destino=ubicacion_destino,
+        if api and api.esta_disponible():
+            resp = api.post("/inventario/compras", json=payload)
+            if resp.status_code in (200, 201):
+                res = resp.json()
+            elif getattr(resp, "is_network_error", False) or resp.status_code in (502, 503, 504):
+                es_error_red = True
+            else:
+                # Error de validación de negocio (400, 422, etc.)
+                raise ValueError(_extraer_error_api(resp))
+        else:
+            es_error_red = True
+    except ValueError:
+        raise
+    except Exception as e_api:
+        es_error_red = True
+        print(f"Aviso comunicando compra al servidor central: {e_api}")
+
+    if res:
+        try:
+            _sincronizar_compra_local_sqlite(
+                compra_id=res.get("compra_id"),
+                numero_compra=res.get("numero_compra", "COMPRA-NUEVA"),
+                proveedor_id=proveedor_id,
+                proveedor_nombre=proveedor_nombre,
+                doc_referencia=doc_referencia,
+                ubicacion_destino=ubicacion_destino,
+                usuario=usuario,
+                observaciones=observaciones,
+                items=items,
+                conn=conn
+            )
+        except Exception as e_s:
+            print(f"Aviso sincronizando compra local: {e_s}")
+        return res
+
+    # Modo Offline-First: persistencia local inmediata y encolado transparente
+    num_compra_local = f"CMP-LOCAL-{int(datetime.now().timestamp() * 1000) % 1000000:06d}"
+    res_local = _sincronizar_compra_local_sqlite(
+        compra_id=None,
+        numero_compra=num_compra_local,
+        proveedor_id=proveedor_id,
+        proveedor_nombre=proveedor_nombre,
+        doc_referencia=doc_referencia,
+        ubicacion_destino=ubicacion_destino,
+        usuario=usuario,
+        observaciones=observaciones,
+        items=items,
+        conn=conn
+    )
+    try:
+        from interface.sync_manager import SyncManager, OP_MOV_INVENTARIO
+        SyncManager().encolar_operacion(
+            tipo_operacion=OP_MOV_INVENTARIO,
+            payload={"subtipo": "COMPRA_ENTRADA", **payload, "numero_compra": num_compra_local},
             usuario=usuario,
-            observaciones=observaciones,
-            items=items,
             conn=conn
         )
-    except Exception as e_s:
-        print(f"Aviso sincronizando compra local: {e_s}")
-    return res
+    except Exception as e_q:
+        print(f"Aviso encolando compra en cola_sincronizacion: {e_q}")
+    return res_local
 
 
 def obtener_detalle_compra(compra_id, conn=None) -> Optional[Dict[str, Any]]:
@@ -995,20 +1052,59 @@ def registrar_ajuste_inventario(
         "usuario": str(usuario or "Administrador"),
         "motivo": str(motivo or "Conteo físico"),
     }
-    resp = api.post("/inventario/ajustes", json=payload)
-    res = _asegurar_respuesta_ok(resp)
+    res = None
+    es_error_red = False
     try:
-        _sincronizar_ajuste_local_sqlite(
-            codigo_o_id=codigo_o_id,
-            ubicacion=ubicacion,
-            conteo_fisico=conteo_fisico,
+        if api and api.esta_disponible():
+            resp = api.post("/inventario/ajustes", json=payload)
+            if resp.status_code in (200, 201):
+                res = resp.json()
+            elif getattr(resp, "is_network_error", False) or resp.status_code in (502, 503, 504):
+                es_error_red = True
+            else:
+                raise ValueError(_extraer_error_api(resp))
+        else:
+            es_error_red = True
+    except ValueError:
+        raise
+    except Exception as e_api:
+        es_error_red = True
+        print(f"Aviso comunicando ajuste al servidor central: {e_api}")
+
+    if res:
+        try:
+            _sincronizar_ajuste_local_sqlite(
+                codigo_o_id=codigo_o_id,
+                ubicacion=ubicacion,
+                conteo_fisico=conteo_fisico,
+                usuario=usuario,
+                motivo=motivo,
+                conn=conn
+            )
+        except Exception as e_s:
+            print(f"Aviso sincronizando ajuste local: {e_s}")
+        return res
+
+    # Modo Offline-First: ajuste local inmediato y encolado en cola_sincronizacion
+    res_local = _sincronizar_ajuste_local_sqlite(
+        codigo_o_id=codigo_o_id,
+        ubicacion=ubicacion,
+        conteo_fisico=conteo_fisico,
+        usuario=usuario,
+        motivo=motivo,
+        conn=conn
+    )
+    try:
+        from interface.sync_manager import SyncManager, OP_MOV_INVENTARIO
+        SyncManager().encolar_operacion(
+            tipo_operacion=OP_MOV_INVENTARIO,
+            payload={"subtipo": "AJUSTE_CONTEO", **payload},
             usuario=usuario,
-            motivo=motivo,
             conn=conn
         )
-    except Exception as e_s:
-        print(f"Aviso sincronizando ajuste local: {e_s}")
-    return res
+    except Exception as e_q:
+        print(f"Aviso encolando ajuste en cola_sincronizacion: {e_q}")
+    return res_local
 
 
 # ==============================================================================
