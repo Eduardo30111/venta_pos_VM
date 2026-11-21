@@ -118,11 +118,12 @@ class ClienteService:
 
         async with _ABONO_LOCK:
             if idem_clean:
+                idem_escaped = idem_clean.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 dup_res = await db.execute(
                     select(Abono).where(
                         or_(
                             Abono.idempotency_key == idem_clean,
-                            Abono.idempotency_key.like(f"{idem_clean}:%"),
+                            Abono.idempotency_key.like(f"{idem_escaped}:%", escape="\\"),
                         )
                     )
                 )
@@ -176,21 +177,26 @@ class ClienteService:
             cxc_res = await db.execute(query_cxc)
             cuentas_pendientes = cxc_res.scalars().all()
 
-            saldo_total = round(sum(float(c.saldo_pendiente or 0.0) for c in cuentas_pendientes), 2)
-            if saldo_total <= 0:
+            saldo_objetivo = round(sum(float(c.saldo_pendiente or 0.0) for c in cuentas_pendientes), 2)
+            if saldo_objetivo <= 0:
                 raise HTTPException(status_code=400, detail="El cliente no tiene saldo pendiente por pagar")
 
-            if monto_clean > (saldo_total + 0.009):
+            if monto_clean > (saldo_objetivo + 0.009):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"El abono (${monto_clean:,.0f}) no puede ser superior al saldo pendiente (${saldo_total:,.0f})",
+                    detail=f"El abono (${monto_clean:,.0f}) no puede ser superior al saldo pendiente (${saldo_objetivo:,.0f})",
                 )
 
             ahora = datetime.now()
             f_str = ahora.strftime("%Y-%m-%d")
             h_str = ahora.strftime("%H:%M:%S")
 
-            saldo_anterior = saldo_total
+            # Saldo global del cliente en libro mayor (coherente aun cuando cuenta_id_especifica esté definida)
+            saldo_anterior = (
+                await ClienteService.obtener_saldo_cliente(db, cliente_id)
+                if cuenta_id_especifica
+                else saldo_objetivo
+            )
             monto_restante = monto_clean
             abonos_creados = []
             primer_abono_id = None
@@ -295,6 +301,7 @@ class ClienteService:
                     "metodo": metodo_norm,
                     "recibido_por": usuario_nombre,
                 },
+                auto_commit=False,
             )
 
             return {
@@ -369,6 +376,11 @@ class ClienteService:
                 if cxc.saldo_pendiente <= 0.009:
                     cxc.saldo_pendiente = 0.0
                     cxc.estado = "Pagada"
+                if cxc.venta_id:
+                    v_res = await db.execute(select(Venta).where(Venta.id == cxc.venta_id))
+                    v_obj = v_res.scalars().first()
+                    if v_obj:
+                        v_obj.saldo_pendiente = cxc.saldo_pendiente
                 monto_restante = round(monto_restante - p, 2)
 
             saldo_nuevo = round(max(0.0, saldo_anterior - monto_abs), 2)
@@ -415,6 +427,7 @@ class ClienteService:
             registro_id=str(mov.id),
             valor_anterior={"saldo_anterior": saldo_anterior},
             valor_nuevo={"ajuste": monto_ajuste, "saldo_nuevo": saldo_nuevo, "motivo": motivo},
+            auto_commit=False,
         )
 
         return mov

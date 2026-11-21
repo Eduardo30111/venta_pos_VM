@@ -1186,7 +1186,7 @@ class ContabilidadApp:
             self.sesion_activa_id = activa["id"]
             arq = calcular_arqueo_sesion(activa["id"])
             esp_ef = arq.get("efectivo_esperado", 0.0)
-            esp_bc = arq.get("ventas_transferencia", 0.0)
+            esp_bc = arq.get("transferencias_esperadas", arq.get("ventas_transferencia", 0.0))
             base = arq.get("monto_inicial", 0.0)
 
             self.monto_esperado_efectivo_act = esp_ef
@@ -1328,14 +1328,19 @@ class ContabilidadApp:
         ef_abonos = cf.get("abonos_cartera", 0.0)
         ef_recibido_total = ef_ventas + ef_abonos
 
-        tr_total = rv.get("transferencia", 0.0)
+        tr_ventas = rv.get("transferencia", 0.0)
+        tr_abonos = self.metricas_actuales.get("bancos", {}).get("abonos_transferencia", 0.0)
+        tr_total = tr_ventas + tr_abonos
         fi_total = rv.get("fiado", 0.0)
 
         self.lbl_efectivo_total.config(text=f"${ef_recibido_total:,.0f}")
         self.lbl_efectivo_desglose.config(text=f"Ventas efectivo: ${ef_ventas:,.0f} | Abonos cartera: ${ef_abonos:,.0f}")
 
         self.lbl_transf_total.config(text=f"${tr_total:,.0f}")
-        self.lbl_transf_desglose.config(text=f"{rv.get('pct_transferencia', 0.0):.1f}% de las ventas del período")
+        if tr_abonos > 0:
+            self.lbl_transf_desglose.config(text=f"Ventas: ${tr_ventas:,.0f} | Abonos banco: ${tr_abonos:,.0f}")
+        else:
+            self.lbl_transf_desglose.config(text=f"{rv.get('pct_transferencia', 0.0):.1f}% de las ventas del período")
 
         self.lbl_fiados_total.config(text=f"${fi_total:,.0f}")
         self.lbl_fiados_desglose.config(text=f"{rv.get('pct_fiado', 0.0):.1f}% de las ventas otorgadas a fiado")

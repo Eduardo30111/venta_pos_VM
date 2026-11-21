@@ -18,8 +18,10 @@ from ..schemas.gasto import (
     GastoRecurrenteCreate,
 )
 from ..services.caja_service import CajaService
-from ..middleware.auth import get_current_user
+from ..middleware.auth import get_current_user, require_admin
+from ..middleware.audit import log_audit
 from ..models.usuario import Usuario
+from ..models.caja import SesionCaja
 from ..async_lock import LazyAsyncLock
 
 router = APIRouter(prefix="/gastos", tags=["gastos"])
@@ -128,6 +130,16 @@ async def create_gasto(
                 if not db_gasto.sesion_caja_id and mf.sesion_caja_id:
                     db_gasto.sesion_caja_id = mf.sesion_caja_id
 
+            await log_audit(
+                db=db,
+                modulo="GASTOS",
+                accion="CREAR",
+                entidad_id=db_gasto.id,
+                usuario_id=current_user.id,
+                usuario_nombre=u_nom,
+                valor_nuevo={"concepto": db_gasto.concepto, "valor": float(db_gasto.valor), "metodo_pago": metodo, "estado": estado},
+                auto_commit=False,
+            )
             await db.commit()
             await db.refresh(db_gasto)
             return db_gasto
@@ -153,17 +165,43 @@ async def update_gasto(
     id: int,
     gasto_update: GastoUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ):
     result = await db.execute(select(Gasto).where(Gasto.id == id))
     gasto = result.scalars().first()
     if not gasto:
         raise HTTPException(status_code=404, detail="Gasto no encontrado")
-    if gasto_update.metodo_pago is not None:
-        gasto_update.metodo_pago = _normalizar_metodo_gasto(gasto_update.metodo_pago)
+    if gasto.estado == "Anulado":
+        raise HTTPException(status_code=400, detail="No se puede editar un gasto anulado.")
 
-    for key, value in gasto_update.model_dump(exclude_unset=True).items():
+    cambios = gasto_update.model_dump(exclude_unset=True)
+    if gasto.estado == "Pagado":
+        campos_financieros = {"valor", "metodo_pago", "estado"}
+        alterados = [c for c in campos_financieros if c in cambios and getattr(gasto, c, None) != cambios[c]]
+        if alterados:
+            raise HTTPException(
+                status_code=400,
+                detail="No se puede modificar valor, estado o medio de pago de un gasto ya pagado. Anule el gasto y registre uno nuevo.",
+            )
+
+    if "metodo_pago" in cambios and cambios["metodo_pago"] is not None:
+        cambios["metodo_pago"] = _normalizar_metodo_gasto(cambios["metodo_pago"])
+
+    anterior = {k: getattr(gasto, k, None) for k in cambios.keys()}
+    for key, value in cambios.items():
         setattr(gasto, key, value)
+    u_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
+    await log_audit(
+        db=db,
+        modulo="GASTOS",
+        accion="EDITAR",
+        entidad_id=gasto.id,
+        usuario_id=current_user.id,
+        usuario_nombre=u_nom,
+        valor_anterior=anterior,
+        valor_nuevo=cambios,
+        auto_commit=False,
+    )
     await db.commit()
     await db.refresh(gasto)
     return gasto
@@ -214,6 +252,16 @@ async def pagar_gasto_endpoint(
         hora_str=h_str,
     )
     g.sesion_caja_id = mf.sesion_caja_id
+    await log_audit(
+        db=db,
+        modulo="GASTOS",
+        accion="PAGAR",
+        entidad_id=g.id,
+        usuario_id=current_user.id,
+        usuario_nombre=u_nom,
+        valor_nuevo={"valor": float(g.valor), "metodo_pago": metodo, "sesion_caja_id": g.sesion_caja_id},
+        auto_commit=False,
+    )
     await db.commit()
     return {
         "ok": True,
@@ -231,7 +279,7 @@ async def anular_gasto_endpoint(
     id: int,
     motivo: Optional[str] = Query("Anulación administrativa"),
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ) -> Dict[str, Any]:
     result = await db.execute(select(Gasto).with_for_update().where(Gasto.id == id))
     g = result.scalars().first()
@@ -241,27 +289,68 @@ async def anular_gasto_endpoint(
         return {"ok": True, "id_gasto": g.id, "estado": "Anulado"}
 
     estaba_pagado = g.estado == "Pagado"
+    estado_anterior = g.estado
     g.estado = "Anulado"
     g.observacion = f"{g.observacion or ''} | Anulado: {motivo}".strip(" |")
+    u_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
+
+    sesion_orig_abierta = False
+    if g.sesion_caja_id:
+        res_so = await db.execute(select(SesionCaja).where(SesionCaja.id == g.sesion_caja_id))
+        so = res_so.scalars().first()
+        sesion_orig_abierta = bool(so and so.estado == "Abierta")
+
+    activa = await CajaService.obtener_sesion_activa(db)
+    sesion_destino = g.sesion_caja_id if sesion_orig_abierta else (activa.id if activa else None)
 
     if estaba_pagado and g.metodo_pago == "Efectivo":
-        u_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
-        await CajaService.registrar_movimiento_caja(
-            db=db,
-            tipo="AJUSTE",
-            monto=float(g.valor),
-            usuario=u_nom,
-            referencia_id=f"ANUL-GASTO-{g.id}",
-            descripcion=f"Reversión egreso por anulación Gasto #{g.id}: {motivo}",
-            sesion_id=g.sesion_caja_id,
+        if sesion_orig_abierta:
+            # Misma sesión abierta: anular MF original y compensar gaveta en MovimientoCaja sin duplicar MF
+            await CajaService.registrar_movimiento_caja(
+                db=db,
+                tipo="AJUSTE",
+                monto=float(g.valor),
+                usuario=u_nom,
+                referencia_id=f"ANUL-GASTO-{g.id}",
+                descripcion=f"Reversión egreso por anulación Gasto #{g.id}: {motivo}",
+                sesion_id=sesion_destino,
+                sincronizar_financiero=False,
+            )
+            mf_res = await db.execute(
+                select(MovimientoFinanciero).where(MovimientoFinanciero.referencia_origen == f"GASTO-{g.id}")
+            )
+            for mf in mf_res.scalars().all():
+                mf.estado = "Anulado"
+        else:
+            # Sesión histórica ya cerrada: preservar cierre histórico y registrar reversión en sesión actual
+            await CajaService.registrar_movimiento_caja(
+                db=db,
+                tipo="AJUSTE",
+                monto=float(g.valor),
+                usuario=u_nom,
+                referencia_id=f"ANUL-GASTO-{g.id}",
+                descripcion=f"Reversión en sesión activa de Gasto histórico #{g.id}: {motivo}",
+                sesion_id=sesion_destino,
+                sincronizar_financiero=True,
+            )
+    else:
+        mf_res = await db.execute(
+            select(MovimientoFinanciero).where(MovimientoFinanciero.referencia_origen == f"GASTO-{g.id}")
         )
+        for mf in mf_res.scalars().all():
+            mf.estado = "Anulado"
 
-    mf_res = await db.execute(
-        select(MovimientoFinanciero).where(MovimientoFinanciero.referencia_origen == f"GASTO-{g.id}")
+    await log_audit(
+        db=db,
+        modulo="GASTOS",
+        accion="ANULAR",
+        entidad_id=g.id,
+        usuario_id=current_user.id,
+        usuario_nombre=u_nom,
+        valor_anterior={"estado": estado_anterior, "valor": float(g.valor), "metodo_pago": g.metodo_pago},
+        valor_nuevo={"estado": "Anulado", "motivo": motivo},
+        auto_commit=False,
     )
-    for mf in mf_res.scalars().all():
-        mf.estado = "Anulado"
-
     await db.commit()
     return {"ok": True, "id_gasto": g.id, "estado": "Anulado"}
 
@@ -270,7 +359,7 @@ async def anular_gasto_endpoint(
 async def delete_gasto(
     id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ):
     return await anular_gasto_endpoint(id=id, motivo="Eliminación solicitada", db=db, current_user=current_user)
 
@@ -304,7 +393,7 @@ async def list_recurrentes(
 async def create_recurrente(
     rec: GastoRecurrenteCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ) -> Dict[str, Any]:
     obj = GastoRecurrente(**rec.model_dump())
     db.add(obj)
@@ -318,7 +407,7 @@ async def update_recurrente(
     id: int,
     rec: GastoRecurrenteCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ) -> Dict[str, Any]:
     res = await db.execute(select(GastoRecurrente).where(GastoRecurrente.id == id))
     obj = res.scalars().first()
@@ -334,7 +423,7 @@ async def update_recurrente(
 async def delete_recurrente(
     id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ) -> Dict[str, Any]:
     res = await db.execute(select(GastoRecurrente).where(GastoRecurrente.id == id))
     obj = res.scalars().first()

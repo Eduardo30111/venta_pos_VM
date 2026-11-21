@@ -29,40 +29,18 @@ comision_var = None
 id_usuario_seleccionado = None
 
 def inicializar_sistema_usuarios():
-    """Inicializa el sistema de usuarios creando tablas y datos por defecto."""
+    """Inicializa el sistema de usuarios creando tablas sin sembrar credenciales inseguras."""
     print("🔧 Inicializando sistema de usuarios...")
     crear_tablas_iniciales()
-    inicializar_admin_default()
-    
-    # Verificar si hay usuarios en la base de datos
     usuarios = obtener_usuarios()
-    if len(usuarios) == 0:
-        print("📥 Base de datos vacía, cargando datos de ejemplo...")
-        cargar_datos_ejemplo()
-    else:
-        print(f"✅ Se encontraron {len(usuarios)} usuarios en la base de datos.")
+    print(f"✅ Se encontraron {len(usuarios)} usuarios en la base de datos.")
 
 def cargar_datos_ejemplo():
-    """Carga datos de ejemplo en la base de datos."""
-    usuarios_ejemplo = [
-        {"usuario": "admin", "password": "admin123", "rol": "Administrador", "estado": "Activo"},
-        {"usuario": "eduardo", "password": "2121", "rol": "Administrador", "estado": "Activo"},
-        {"usuario": "andres", "password": "2180", "rol": "Vendedor", "estado": "Activo"},
-        {"usuario": "gerente", "password": "manager", "rol": "Gerente", "estado": "Activo"},
-        {"usuario": "vendedor1", "password": "pass123", "rol": "Vendedor", "estado": "Activo"}
-    ]
-    
-    for user in usuarios_ejemplo:
-        resultado = insertar_usuario(
-            user["usuario"],
-            user["password"],
-            user["rol"],
-            user["estado"]
-        )
-        if resultado:
-            print(f"✅ Usuario '{user['usuario']}' creado correctamente.")
-        else:
-            print(f"⚠️ Usuario '{user['usuario']}' ya existe o hubo un error.")
+    """Deshabilitada por política de seguridad: no se permiten credenciales predeterminadas."""
+    raise RuntimeError(
+        "cargar_datos_ejemplo() está deshabilitada por seguridad. "
+        "Cree los usuarios mediante la interfaz administrativa o la activación inicial."
+    )
 
 def actualizar_tabla():
     """

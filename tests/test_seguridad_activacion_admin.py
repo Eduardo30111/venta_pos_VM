@@ -78,7 +78,7 @@ class TestSeguridadActivacionAdmin(unittest.TestCase):
 
     def test_03_deteccion_admin_default_y_cambio_obligatorio(self):
         """Verifica que si existe un admin de fábrica con admin123, se marque para cambio obligatorio."""
-        inicializar_admin_default()
+        inicializar_admin_default(forzar_legacy=True)
         self.assertTrue(hay_administrador())
 
         u = obtener_usuario_por_credenciales("admin", "admin123")

@@ -162,5 +162,7 @@ class CompraCreate(BaseModel):
     ubicacion_destino: str = "BODEGA"
     usuario: Optional[str] = None
     observaciones: Optional[str] = ""
+    tipo_pago: Optional[str] = None
+    generar_cuenta_por_pagar: bool = False
     idempotency_key: Optional[str] = None
     items: List[ItemCompraCreate]

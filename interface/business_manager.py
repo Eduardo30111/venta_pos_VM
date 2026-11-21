@@ -42,13 +42,14 @@ except ImportError:
     except ImportError:
         _curr = os.path.dirname(os.path.abspath(__file__))
         _root = os.path.abspath(os.path.join(_curr, ".."))
+        USER_DATA_DIR = _root
         CONFIG_DIR = os.path.join(_root, "config")
         DATABASE_DIR = os.path.join(_root, "database")
         DB_VENTAS_PATH = os.path.join(DATABASE_DIR, "ventas.db")
         LOGOS_DIR = os.path.join(_root, "assets", "logos")
         CACHE_DIR = os.path.join(_root, "cache")
 
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+BASE_DIR = USER_DATA_DIR if getattr(sys, "frozen", False) else os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 CONFIG_FILE = os.path.join(CONFIG_DIR, "business_config.json")
 PRINTER_CONFIG_FILE = os.path.join(CONFIG_DIR, "printer_config.json")
 
@@ -441,14 +442,24 @@ class BusinessManager:
             except Exception as e_db:
                 print(f"Aviso actualizando vmpos_server.db directamente: {e_db}")
 
-        # 2. Enviar PUT al endpoint HTTP del servidor central si está en línea
+        # 2. Enviar PUT al endpoint HTTP del servidor central si está en línea (con token JWT de admin)
         try:
+            auth_token = os.environ.get("VMPOS_TOKEN", "").strip()
+            if not auth_token:
+                try:
+                    from client.api_client import api as _api_client
+                    auth_token = getattr(_api_client, "token", "") or ""
+                except Exception:
+                    auth_token = ""
+            headers = {"Content-Type": "application/json", "User-Agent": "VmPOS-BusinessSync/4.0"}
+            if auth_token:
+                headers["Authorization"] = f"Bearer {auth_token}"
             body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             req = urllib.request.Request(
                 f"{base_url}/api/configuracion/negocio",
                 data=body_bytes,
                 method="PUT",
-                headers={"Content-Type": "application/json", "User-Agent": "VmPOS-BusinessSync/4.0"},
+                headers=headers,
             )
             with urllib.request.urlopen(req, timeout=2.5) as resp:
                 return resp.getcode() == 200
@@ -1013,5 +1024,7 @@ class BusinessManager:
         }
 
 
-# Instancia singleton accesible para toda la app
+# Instancia singleton accesible para toda la app (unificada bajo ambos nombres de módulo)
 business_mgr = BusinessManager()
+sys.modules.setdefault("business_manager", sys.modules[__name__])
+sys.modules.setdefault("interface.business_manager", sys.modules[__name__])

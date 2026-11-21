@@ -36,6 +36,9 @@ ESTADO_PENDIENTE = "PENDIENTE"
 ESTADO_SINCRONIZANDO = "SINCRONIZANDO"
 ESTADO_SINCRONIZADO = "SINCRONIZADO"
 ESTADO_ERROR = "ERROR"
+ESTADO_CONFLICTO = "CONFLICTO"
+
+MAX_INTENTOS_AUTO = 8
 
 # Tipos de operaciones soportadas en la cola
 OP_VENTA = "VENTA"
@@ -137,7 +140,7 @@ class SyncManager:
             self.asegurar_tabla_cola(conn=conn)
             cur = conn.cursor()
             cur.execute("""
-                INSERT OR REPLACE INTO cola_sincronizacion (
+                INSERT OR IGNORE INTO cola_sincronizacion (
                     id, empresa, usuario, dispositivo, tipo_operacion,
                     fecha_hora, payload_json, estado_sync, intentos,
                     ultimo_error, id_local, created_at, updated_at
@@ -185,8 +188,8 @@ class SyncManager:
             if cerrar_conn and conn:
                 conn.close()
 
-    def marcar_error_sincronizacion(self, op_id: str, error_msg: str, conn: Optional[sqlite3.Connection] = None):
-        """Registra el fallo de un intento de sincronización incrementando el contador."""
+    def marcar_error_sincronizacion(self, op_id: str, error_msg: str, conn: Optional[sqlite3.Connection] = None, es_conflicto: bool = False):
+        """Registra el fallo de un intento de sincronización; marca CONFLICTO si no es reintentable o supera el máximo."""
         cerrar_conn = False
         if conn is None:
             conn = conectar_db()
@@ -196,11 +199,15 @@ class SyncManager:
         try:
             ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cur = conn.cursor()
+            cur.execute("SELECT intentos FROM cola_sincronizacion WHERE id = ?", (op_id,))
+            row_i = cur.fetchone()
+            nuevos_intentos = int(row_i[0] or 0) + 1 if row_i else 1
+            estado_dest = ESTADO_CONFLICTO if (es_conflicto or nuevos_intentos >= MAX_INTENTOS_AUTO) else ESTADO_ERROR
             cur.execute("""
                 UPDATE cola_sincronizacion
-                SET estado_sync = ?, intentos = intentos + 1, ultimo_error = ?, updated_at = ?
+                SET estado_sync = ?, intentos = ?, ultimo_error = ?, updated_at = ?
                 WHERE id = ?
-            """, (ESTADO_ERROR, str(error_msg)[:300], ahora_str, op_id))
+            """, (estado_dest, nuevos_intentos, str(error_msg)[:300], ahora_str, op_id))
             conn.commit()
             self._ultimo_error_sync = str(error_msg)
             self._notificar_cambio()
@@ -210,9 +217,47 @@ class SyncManager:
             if cerrar_conn and conn:
                 conn.close()
 
+    def _marcar_sincronizando(self, op_id: str):
+        conn = conectar_db()
+        if not conn:
+            return
+        try:
+            ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(
+                "UPDATE cola_sincronizacion SET estado_sync = ?, updated_at = ? WHERE id = ?",
+                (ESTADO_SINCRONIZANDO, ahora_str, op_id),
+            )
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    def recuperar_operaciones_interrumpidas(self, conn: Optional[sqlite3.Connection] = None):
+        """Reencola operaciones que quedaron en SINCRONIZANDO por un cierre abrupto o apagón."""
+        cerrar_conn = False
+        if conn is None:
+            conn = conectar_db()
+            cerrar_conn = True
+        if not conn:
+            return
+        try:
+            ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(
+                "UPDATE cola_sincronizacion SET estado_sync = ?, updated_at = ? "
+                "WHERE estado_sync = ? AND datetime(updated_at) <= datetime('now', 'localtime', '-60 seconds')",
+                (ESTADO_PENDIENTE, ahora_str, ESTADO_SINCRONIZANDO),
+            )
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            if cerrar_conn and conn:
+                conn.close()
+
     def obtener_conteo_pendientes(self, conn: Optional[sqlite3.Connection] = None) -> Dict[str, int]:
         """Retorna el conteo exacto de operaciones según su estado de sincronización."""
-        res = {"pendientes": 0, "sincronizados": 0, "errores": 0, "total": 0}
+        res = {"pendientes": 0, "sincronizados": 0, "errores": 0, "conflictos": 0, "total": 0}
         cerrar_conn = False
         if conn is None:
             conn = conectar_db()
@@ -234,6 +279,8 @@ class SyncManager:
                     res["sincronizados"] += cnt
                 elif estado == ESTADO_ERROR:
                     res["errores"] += cnt
+                elif estado == ESTADO_CONFLICTO:
+                    res["conflictos"] += cnt
                 res["total"] += cnt
             return res
         except Exception:
@@ -311,25 +358,39 @@ class SyncManager:
                 if not api.esta_disponible(forzar=True):
                     return {"status": "servidor_no_disponible", "procesados": 0}
 
+            self.recuperar_operaciones_interrumpidas()
             items = self.obtener_items_pendientes(limite=30)
             if not items:
                 return {"status": "vacio", "procesados": 0}
 
+            ahora_ts = time.time()
             for it in items:
-                procesados += 1
                 op_id = it["id"]
                 tipo = it["tipo_operacion"]
                 payload = it.get("payload", {})
+                intentos_prev = int(it.get("intentos") or 0)
 
-                exito, err_msg = self._despachar_operacion(op_id, tipo, payload)
+                # Backoff exponencial para reintentos en estado ERROR
+                if it.get("estado_sync") == ESTADO_ERROR and intentos_prev > 0:
+                    try:
+                        upd_dt = datetime.strptime(str(it.get("updated_at") or ""), "%Y-%m-%d %H:%M:%S")
+                        espera_seg = min(300, 5 * (2 ** min(intentos_prev - 1, 6)))
+                        if (ahora_ts - upd_dt.timestamp()) < espera_seg:
+                            continue
+                    except Exception:
+                        pass
+
+                procesados += 1
+                self._marcar_sincronizando(op_id)
+                exito, err_msg, es_conflicto = self._despachar_operacion(op_id, tipo, payload)
                 if exito:
                     exitosos += 1
                     self.marcar_como_sincronizada(op_id)
                 else:
                     fallidos += 1
-                    self.marcar_error_sincronizacion(op_id, err_msg)
+                    self.marcar_error_sincronizacion(op_id, err_msg, es_conflicto=es_conflicto)
                     # Si falla por error de conexión global, pausar el ciclo
-                    if "no disponible" in err_msg.lower() or "timeout" in err_msg.lower() or "connect" in err_msg.lower():
+                    if not es_conflicto and ("no disponible" in err_msg.lower() or "timeout" in err_msg.lower() or "connect" in err_msg.lower()):
                         break
 
             self._ultimo_sync_ts = time.time()
@@ -344,56 +405,77 @@ class SyncManager:
                 self._sincronizando_ahora = False
             self._notificar_cambio()
 
-    def _despachar_operacion(self, op_id: str, tipo: str, payload: Dict[str, Any]) -> Tuple[bool, str]:
-        """Envía una operación específica a la API central respetando idempotencia."""
+    @staticmethod
+    def _es_duplicado_idempotente(resp) -> bool:
+        """Retorna True únicamente si el servidor confirmó duplicidad por idempotencia (NUNCA stock insuficiente)."""
+        txt = (getattr(resp, "text", "") or "").lower()
+        if "stock insuficiente" in txt or "existencias insuficientes" in txt:
+            return False
+        if resp.status_code == 409 and ("idempotenc" in txt or "duplicad" in txt or "ya exist" in txt):
+            return True
+        if resp.status_code in (200, 201):
+            return True
+        return False
+
+    def _despachar_operacion(self, op_id: str, tipo: str, payload: Dict[str, Any]) -> Tuple[bool, str, bool]:
+        """
+        Envía una operación específica a la API central respetando idempotencia.
+        Retorna (exito: bool, mensaje_error: str, es_conflicto_permanente: bool).
+        """
         payload["idempotency_key"] = op_id
 
         try:
             if tipo == OP_VENTA:
                 resp = api.post("/ventas", json=payload, timeout=12.0)
-                if resp.status_code in (200, 201):
-                    return True, ""
-                # Si el servidor ya la tenía registrada con esa idempotencia, considerarla exitosa
-                if resp.status_code == 409 or "idempotenc" in resp.text.lower() or "duplicad" in resp.text.lower():
-                    return True, ""
-                # Si el código fue 503/504 es fallo de red
+                if self._es_duplicado_idempotente(resp):
+                    return True, "", False
                 if getattr(resp, "is_network_error", False):
-                    return False, f"Fallo de conexión enviando venta: {resp.text}"
-                return False, f"Servidor rechazó venta ({resp.status_code}): {resp.text}"
+                    return False, f"Fallo de conexión enviando venta: {resp.text}", False
+                # Stock insuficiente, validación 400/404/409 no idempotente -> CONFLICTO para revisión manual
+                es_conf = resp.status_code in (400, 403, 404, 409, 422)
+                return False, f"Servidor rechazó venta ({resp.status_code}): {resp.text}", es_conf
 
             elif tipo == OP_ABONO:
-                cli_id = payload.get("cliente_id") or 1
+                cli_id = payload.get("cliente_id")
+                if not cli_id:
+                    return False, "Abono sin cliente_id válido; requiere resolución manual.", True
                 resp = api.post(f"/clientes/{cli_id}/abonos", json=payload, timeout=10.0)
-                if resp.status_code in (200, 201):
-                    return True, ""
+                if self._es_duplicado_idempotente(resp):
+                    return True, "", False
                 if getattr(resp, "is_network_error", False):
-                    return False, f"Fallo de conexión enviando abono: {resp.text}"
-                return False, f"Servidor rechazó abono ({resp.status_code}): {resp.text}"
+                    return False, f"Fallo de conexión enviando abono: {resp.text}", False
+                es_conf = resp.status_code in (400, 403, 404, 409, 422)
+                return False, f"Servidor rechazó abono ({resp.status_code}): {resp.text}", es_conf
 
             elif tipo == OP_GASTO:
                 resp = api.post("/gastos", json=payload, timeout=10.0)
-                if resp.status_code in (200, 201):
-                    return True, ""
+                if self._es_duplicado_idempotente(resp):
+                    return True, "", False
                 if getattr(resp, "is_network_error", False):
-                    return False, f"Fallo de conexión enviando gasto: {resp.text}"
-                return False, f"Servidor rechazó gasto ({resp.status_code}): {resp.text}"
+                    return False, f"Fallo de conexión enviando gasto: {resp.text}", False
+                es_conf = resp.status_code in (400, 403, 404, 409, 422)
+                return False, f"Servidor rechazó gasto ({resp.status_code}): {resp.text}", es_conf
 
             elif tipo == OP_LIQ_PROVEEDOR:
                 prov_id = payload.get("proveedor_id")
+                if not prov_id:
+                    return False, "Liquidación de proveedor sin proveedor_id válido.", True
                 resp = api.post(f"/proveedores/{prov_id}/liquidar", json=payload, timeout=10.0)
-                if resp.status_code in (200, 201):
-                    return True, ""
+                if self._es_duplicado_idempotente(resp):
+                    return True, "", False
                 if getattr(resp, "is_network_error", False):
-                    return False, f"Fallo de conexión liquidando proveedor: {resp.text}"
-                return False, f"Servidor rechazó liquidación ({resp.status_code}): {resp.text}"
+                    return False, f"Fallo de conexión liquidando proveedor: {resp.text}", False
+                es_conf = resp.status_code in (400, 403, 404, 409, 422)
+                return False, f"Servidor rechazó liquidación ({resp.status_code}): {resp.text}", es_conf
 
             elif tipo == OP_LIQ_NOMINA:
                 resp = api.post("/nomina/liquidaciones", json=payload, timeout=10.0)
-                if resp.status_code in (200, 201):
-                    return True, ""
+                if self._es_duplicado_idempotente(resp):
+                    return True, "", False
                 if getattr(resp, "is_network_error", False):
-                    return False, f"Fallo de conexión liquidando nómina: {resp.text}"
-                return False, f"Servidor rechazó liquidación de nómina ({resp.status_code}): {resp.text}"
+                    return False, f"Fallo de conexión liquidando nómina: {resp.text}", False
+                es_conf = resp.status_code in (400, 403, 404, 409, 422)
+                return False, f"Servidor rechazó liquidación de nómina ({resp.status_code}): {resp.text}", es_conf
 
             elif tipo == OP_MOV_INVENTARIO:
                 subtipo = payload.get("subtipo")
@@ -402,18 +484,19 @@ class SyncManager:
                 elif subtipo == "AJUSTE_CONTEO":
                     endpoint = "/inventario/ajustes"
                 else:
-                    endpoint = "/inventario/movimientos"
+                    endpoint = "/inventario/traslados"
                 resp = api.post(endpoint, json=payload, timeout=10.0)
-                if resp.status_code in (200, 201):
-                    return True, ""
+                if self._es_duplicado_idempotente(resp):
+                    return True, "", False
                 if getattr(resp, "is_network_error", False):
-                    return False, f"Fallo de conexión en inventario: {resp.text}"
-                return False, f"Error en inventario ({resp.status_code}): {resp.text}"
+                    return False, f"Fallo de conexión en inventario: {resp.text}", False
+                es_conf = resp.status_code in (400, 403, 404, 409, 422)
+                return False, f"Error en inventario ({resp.status_code}): {resp.text}", es_conf
 
             else:
-                return True, f"Tipo de operación desconocido: {tipo} (ignorado)"
+                return False, f"Tipo de operación desconocido o no soportado: {tipo}", True
         except Exception as e:
-            return False, str(e)
+            return False, str(e), False
 
     def disparar_sincronizacion_asincrona(self):
         """Inicia una ronda de sincronización en un hilo secundario sin congelar la interfaz."""
@@ -508,5 +591,7 @@ class SyncManager:
         }
 
 
-# Instancia global singleton
+# Instancia global singleton unificada bajo ambos nombres de módulo
 sync_mgr = SyncManager()
+sys.modules.setdefault("sync_manager", sys.modules[__name__])
+sys.modules.setdefault("interface.sync_manager", sys.modules[__name__])

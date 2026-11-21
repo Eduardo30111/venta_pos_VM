@@ -8,7 +8,7 @@ from ..database import get_db
 from ..models.servicio import Servicio
 from ..schemas.servicio import ServicioCreate, ServicioUpdate, ServicioResponse
 from ..schemas.common import PaginatedResponse
-from ..middleware.auth import get_current_user
+from ..middleware.auth import get_current_user, is_admin_role
 from ..models.usuario import Usuario
 from ..middleware.audit import log_audit
 
@@ -81,19 +81,52 @@ async def create_servicio(
         codigo = f"S{max_cod + 1:05d}"
 
     rol = (current_user.rol or "").strip().lower()
+    es_admin = is_admin_role(current_user)
+    if not es_admin and rol != "operario":
+        raise HTTPException(
+            status_code=403,
+            detail="Permisos insuficientes: solo administradores u operarios pueden crear servicios.",
+        )
+
     datos = servicio.model_dump(exclude={"codigo"})
-    if rol == "operario":
+    pct = float(datos.get("porcentaje_comision") or 0.0)
+    if pct < 0.0 or pct > 100.0:
+        raise HTTPException(status_code=400, detail="El porcentaje de comisión debe estar entre 0 y 100.")
+    if datos.get("proveedor_id"):
+        datos["tipo_servicio"] = "TERCERO"
+        datos["genera_comision"] = True
+
+    if rol == "operario" and not es_admin:
         datos["solo_operarios"] = True
         datos["creado_por_operario_id"] = current_user.id
-    elif rol not in ["administrador", "admin", "gerente"]:
+    elif not es_admin:
         datos["solo_operarios"] = False
         datos["creado_por_operario_id"] = None
 
     db_servicio = Servicio(**datos, codigo=codigo)
     db.add(db_servicio)
+    await db.flush()
+    await log_audit(
+        db=db,
+        usuario_id=current_user.id,
+        usuario_nombre=current_user.nombre or current_user.usuario,
+        terminal_id=None,
+        terminal_nombre="Terminal",
+        accion="CREAR",
+        modulo="SERVICIOS",
+        tabla_afectada="servicios",
+        registro_id=str(db_servicio.id),
+        valor_nuevo={
+            "codigo": db_servicio.codigo,
+            "nombre": db_servicio.nombre,
+            "precio": getattr(db_servicio, "precio_venta", getattr(db_servicio, "precio", 0.0)),
+            "porcentaje_comision": db_servicio.porcentaje_comision,
+            "proveedor_id": db_servicio.proveedor_id,
+        },
+        auto_commit=False,
+    )
     await db.commit()
     await db.refresh(db_servicio)
-    await log_audit(db, current_user.id, current_user.nombre, None, None, "CREAR", "SERVICIOS", "servicios", str(db_servicio.id))
     return db_servicio
 
 
@@ -109,18 +142,61 @@ async def update_servicio(
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
     rol = (current_user.rol or "").strip().lower()
-    if rol == "operario" and servicio.creado_por_operario_id not in (None, current_user.id):
-        raise HTTPException(status_code=403, detail="No puede editar un servicio privado de otro usuario")
+    es_admin = is_admin_role(current_user)
+    if not es_admin:
+        if rol != "operario" or servicio.creado_por_operario_id != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Permisos insuficientes: solo puede editar sus propios servicios privados o requiere rol Administrador.",
+            )
+
+    estado_anterior = {
+        "nombre": servicio.nombre,
+        "precio": servicio.precio,
+        "costo_unitario": getattr(servicio, "costo_unitario", 0.0),
+        "porcentaje_comision": servicio.porcentaje_comision,
+        "proveedor_id": servicio.proveedor_id,
+        "estado": servicio.estado,
+    }
 
     cambios = servicio_update.model_dump(exclude_unset=True)
-    if rol == "operario":
+    if "porcentaje_comision" in cambios and cambios["porcentaje_comision"] is not None:
+        pct = float(cambios["porcentaje_comision"])
+        if pct < 0.0 or pct > 100.0:
+            raise HTTPException(status_code=400, detail="El porcentaje de comisión debe estar entre 0 y 100.")
+    if not es_admin:
         cambios.pop("solo_operarios", None)
+        cambios.pop("creado_por_operario_id", None)
     for key, value in cambios.items():
         setattr(servicio, key, value)
+    if servicio.proveedor_id:
+        servicio.tipo_servicio = "TERCERO"
+        servicio.genera_comision = True
 
+    estado_nuevo = {
+        "nombre": servicio.nombre,
+        "precio": servicio.precio,
+        "costo_unitario": getattr(servicio, "costo_unitario", 0.0),
+        "porcentaje_comision": servicio.porcentaje_comision,
+        "proveedor_id": servicio.proveedor_id,
+        "estado": servicio.estado,
+    }
+    await log_audit(
+        db=db,
+        usuario_id=current_user.id,
+        usuario_nombre=current_user.nombre or current_user.usuario,
+        terminal_id=None,
+        terminal_nombre="Terminal",
+        accion="EDITAR",
+        modulo="SERVICIOS",
+        tabla_afectada="servicios",
+        registro_id=str(servicio.id),
+        valor_anterior=estado_anterior,
+        valor_nuevo=estado_nuevo,
+        auto_commit=False,
+    )
     await db.commit()
     await db.refresh(servicio)
-    await log_audit(db, current_user.id, current_user.nombre, None, None, "EDITAR", "SERVICIOS", "servicios", str(servicio.id))
     return servicio
 
 
@@ -135,11 +211,33 @@ async def delete_servicio(
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
     rol = (current_user.rol or "").strip().lower()
-    if rol == "operario" and servicio.creado_por_operario_id != current_user.id:
-        raise HTTPException(status_code=403, detail="No puede eliminar un servicio de otro usuario")
+    es_admin = is_admin_role(current_user)
+    if not es_admin:
+        if rol != "operario" or servicio.creado_por_operario_id != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Permisos insuficientes: solo un administrador o el operario creador puede eliminar este servicio.",
+            )
+    snap = {
+        "codigo": servicio.codigo,
+        "nombre": servicio.nombre,
+        "precio": getattr(servicio, "precio_venta", getattr(servicio, "precio", 0.0)),
+    }
     await db.delete(servicio)
+    await log_audit(
+        db=db,
+        usuario_id=current_user.id,
+        usuario_nombre=current_user.nombre or current_user.usuario,
+        terminal_id=None,
+        terminal_nombre="Terminal",
+        accion="ELIMINAR",
+        modulo="SERVICIOS",
+        tabla_afectada="servicios",
+        registro_id=str(id),
+        valor_anterior=snap,
+        auto_commit=False,
+    )
     await db.commit()
-    await log_audit(db, current_user.id, current_user.nombre, None, None, "ELIMINAR", "SERVICIOS", "servicios", str(id))
     return {"message": "Servicio eliminado exitosamente"}
 
 
@@ -154,8 +252,30 @@ async def change_estado(
     servicio = result.scalars().first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    rol = (current_user.rol or "").strip().lower()
+    es_admin = is_admin_role(current_user)
+    if not es_admin:
+        if rol != "operario" or servicio.creado_por_operario_id != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Permisos insuficientes para cambiar el estado de este servicio.",
+            )
+    estado_ant = servicio.estado
     servicio.estado = estado
+    await log_audit(
+        db=db,
+        usuario_id=current_user.id,
+        usuario_nombre=current_user.nombre or current_user.usuario,
+        terminal_id=None,
+        terminal_nombre="Terminal",
+        accion="ESTADO",
+        modulo="SERVICIOS",
+        tabla_afectada="servicios",
+        registro_id=str(servicio.id),
+        valor_anterior={"estado": estado_ant},
+        valor_nuevo={"estado": estado},
+        auto_commit=False,
+    )
     await db.commit()
     await db.refresh(servicio)
-    await log_audit(db, current_user.id, current_user.nombre, None, None, "ESTADO", "SERVICIOS", "servicios", str(servicio.id))
     return servicio

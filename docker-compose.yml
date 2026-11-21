@@ -9,9 +9,14 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Variable POSTGRES_PASSWORD obligatoria no definida en entorno o .env}
       POSTGRES_DB: ${POSTGRES_DB:-vmpos}
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-vmpos}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   vmpos-api:
@@ -23,12 +28,17 @@ services:
       - "${VMPOS_API_PORT:-8000}:8000"
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@vmpos-db:5432/${POSTGRES_DB:-vmpos}
-      - VMPOS_SECRET_KEY=${VMPOS_SECRET_KEY:-}
+      - VMPOS_SECRET_KEY=${VMPOS_SECRET_KEY:?Variable VMPOS_SECRET_KEY obligatoria en producción (mín. 32 caracteres)}
+      - VMPOS_ADMIN_USER=${VMPOS_ADMIN_USER:-admin}
+      - VMPOS_ADMIN_PASSWORD=${VMPOS_ADMIN_PASSWORD:-}
     volumes:
       - ./server:/app/server
+      - vmpos_config:/app/config
     depends_on:
-      - vmpos-db
+      vmpos-db:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   postgres_data:
+  vmpos_config:

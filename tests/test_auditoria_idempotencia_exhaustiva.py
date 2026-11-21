@@ -178,6 +178,17 @@ class TestAuditoriaIdempotenciaExhaustiva(unittest.TestCase):
                 self.assertEqual(len(ids_liq_prov), 1, f"Se crearon múltiples liquidaciones de proveedor: {ids_liq_prov}")
 
                 # 9. LIQUIDACION NOMINA: 10 peticiones concurrentes simultáneas
+                import sqlite3
+                from datetime import datetime
+                _conn_nom = sqlite3.connect(self.test_db)
+                _c_nom = _conn_nom.cursor()
+                _c_nom.execute("""
+                    INSERT INTO asistencias (usuario_id, fecha, estado, salario_generado, registrado_por, created_at)
+                    VALUES (1, ?, 'Presente', 50000.0, 1, CURRENT_TIMESTAMP)
+                """, (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),))
+                _conn_nom.commit()
+                _conn_nom.close()
+
                 idem_nom = f"idem-concurrente-nom-{ts}"
                 payload_nom = {
                     "usuario_id": 1,

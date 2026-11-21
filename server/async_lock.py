@@ -24,3 +24,7 @@ class LazyAsyncLock:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         return await self._get_lock().__aexit__(exc_type, exc_val, exc_tb)
+
+
+# Lock compartido para serializar operaciones concurrentes de inventario, ventas, compras y traslados
+SHARED_INVENTORY_LOCK = LazyAsyncLock()

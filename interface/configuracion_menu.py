@@ -96,42 +96,50 @@ def verificar_integridad_db(db_path):
         return False
 
 
-def crear_backup():
-    """Crea una copia de seguridad timestamped de la base de datos ventas.db"""
+def crear_backup(silencioso: bool = False) -> bool:
+    """
+    Crea una copia de seguridad consistente (SQLite Online Backup API + SHA-256 + integrity_check)
+    de ventas.db, usuarios.db, vmpos_server.db y configuración en BACKUPS_DIR.
+    Retorna True si el respaldo fue creado y verificado, False en caso contrario.
+    """
     db_path = DB_VENTAS_PATH
     if not os.path.exists(db_path):
-        messagebox.showerror("❌ Error", f"La base de datos '{db_path}' no existe.")
-        return
+        if not silencioso:
+            messagebox.showerror("❌ Error", f"La base de datos '{db_path}' no existe.")
+        return False
 
     try:
-        backup_dir = os.path.abspath("./backups")
-        os.makedirs(backup_dir, exist_ok=True)
-        fecha = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_filename = f"backup_vmpos_{fecha}.db"
-        backup_path = os.path.join(backup_dir, backup_filename)
+        try:
+            from interface.backup_manager import crear_respaldo_completo
+        except ImportError:
+            from backup_manager import crear_respaldo_completo
 
-        shutil.copy2(db_path, backup_path)
-
-        if os.path.exists(backup_path):
-            tam_kb = round(os.path.getsize(backup_path) / 1024, 1)
+        info = crear_respaldo_completo(etiqueta="auto" if silencioso else "manual")
+        backup_dir = info["backup_dir"]
+        tam_kb = round(info["total_bytes"] / 1024, 1)
+        if not silencioso:
             respuesta = messagebox.askyesno(
                 "💾 Copia de Seguridad Exitosa",
-                f"¡Copia de seguridad generada con éxito!\n\n"
-                f"📁 Archivo: {backup_filename}\n"
-                f"📊 Tamaño: {tam_kb} KB\n"
-                f"📍 Carpeta: {backup_dir}\n\n"
+                f"¡Copia de seguridad verificada con éxito (WAL-safe + SHA-256)!\n\n"
+                f"📁 Respaldo: {info['backup_name']}\n"
+                f"🗄️ Bases incluidas: {', '.join(info['databases'])}\n"
+                f"📊 Tamaño total: {tam_kb} KB\n"
+                f"📍 Carpeta: {os.path.dirname(backup_dir)}\n\n"
                 f"¿Deseas abrir la carpeta de copias de seguridad?"
             )
             if respuesta:
                 abrir_archivo_o_carpeta(backup_dir)
-        else:
-            raise Exception("El archivo de copia de seguridad no se creó.")
+        return True
     except Exception as e:
-        messagebox.showerror("❌ Error", f"Error al generar la copia de seguridad:\n{str(e)}")
+        if not silencioso:
+            messagebox.showerror("❌ Error", f"Error al generar la copia de seguridad:\n{str(e)}")
+        else:
+            print(f"ERROR creando respaldo preventivo: {e}")
+        return False
 
 
 def restaurar_base_datos():
-    """Restaura o vacía los datos transaccionales con backup de seguridad previo, preservando la configuración del negocio."""
+    """Restaura o vacía los datos transaccionales con backup preventivo obligatorio y verificado, preservando la configuración del negocio."""
     db_path = DB_VENTAS_PATH
     if not os.path.exists(db_path):
         messagebox.showerror("❌ Error", f"La base de datos '{db_path}' no existe.")
@@ -155,13 +163,19 @@ def restaurar_base_datos():
         confirm = messagebox.askyesno(
             "⚠️ Restaurar Base de Datos",
             "¿Estás seguro de que deseas vaciar los registros transaccionales del sistema?\n\n"
-            "⚠️ Se creará una copia de seguridad automática antes de proceder y se conservará la configuración del negocio.\n\n"
+            "⚠️ Se creará y verificará una copia de seguridad automática antes de proceder y se conservará la configuración del negocio.\n\n"
             "¿Deseas continuar?"
         )
         if not confirm:
             return
 
-        crear_backup()
+        if not crear_backup(silencioso=True):
+            messagebox.showerror(
+                "❌ Operación Abortada",
+                "No fue posible generar y verificar la copia de seguridad preventiva.\n"
+                "Por protección de sus datos, no se modificó la base de datos."
+            )
+            return
 
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA foreign_keys = OFF")
@@ -176,7 +190,7 @@ def restaurar_base_datos():
         conn.commit()
         conn.close()
 
-        messagebox.showinfo("✅ Restauración Completa", "La base de datos transaccional ha sido vaciada exitosamente.\nSe guardó una copia de respaldo.")
+        messagebox.showinfo("✅ Restauración Completa", "La base de datos transaccional ha sido vaciada exitosamente.\nSe guardó una copia de respaldo verificada.")
     except Exception as e:
         messagebox.showerror("❌ Error", f"Fallo durante la restauración: {e}")
 

@@ -8,6 +8,7 @@ Regla de oro: Total Facturado != Dinero Real en Caja.
 - Transferencias y Fiados no alteran la gaveta física.
 """
 
+import json
 import sqlite3
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -334,8 +335,9 @@ def registrar_abono_cartera(
                 json={
                     "monto": float(monto),
                     "metodo": metodo,
+                    "observacion": observaciones or "",
                     "notas": observaciones or "",
-                    "sesion_id": sesion_id,
+                    "sesion_caja_id": sesion_id,
                     "idempotency_key": f"ABONO-MGR-{uuid.uuid4()}",
                 },
                 timeout=5.0,
@@ -428,8 +430,8 @@ def registrar_abono_cartera(
                     break
                 vid = vf["id_venta"]
                 sp_actual = vf["saldo_pendiente"]
-                sp_val = float(sp_actual) if (sp_actual is not None and float(sp_actual) > 0) else float(vf["total_venta"] or 0.0)
-                if sp_val <= 0.001:
+                sp_val = float(sp_actual) if sp_actual is not None else float(vf["total_venta"] or 0.0)
+                if sp_val <= 0.009:
                     continue
                 descuento_v = min(remanente_ab, sp_val)
                 nuevo_sp_v = round(max(0.0, sp_val - descuento_v), 2)
@@ -1117,6 +1119,12 @@ def anular_venta_completa(
         if venta_dict.get("estado") == "Anulada":
             raise ValueError(f"La venta #{id_venta} ya se encuentra anulada.")
 
+        if venta_dict.get("metodo_pago") == "Fiado":
+            sp_v = venta_dict.get("saldo_pendiente")
+            tot_v = float(venta_dict.get("total_venta") or 0.0)
+            if sp_v is not None and (tot_v - float(sp_v)) > 0.01:
+                raise ValueError("No se puede anular: el cliente ya ha realizado abonos a esta deuda.")
+
         ahora = datetime.now()
         fecha_str = ahora.strftime("%Y-%m-%d")
         hora_str = ahora.strftime("%H:%M:%S")
@@ -1217,7 +1225,7 @@ def anular_venta_completa(
                     ) VALUES (?, ?, 'DEVOLUCION_VENTA', ?, ?, 'Efectivo', 'CAJA_FISICA', ?, ?, ?, 'Activo', ?)
                 """, (
                     fecha_str, hora_str, f"Devolución en efectivo Venta #{id_venta}: {motivo}",
-                    total_venta, usuario_admin, f"VENTA-{id_venta}", sesion_id, motivo
+                    total_venta, usuario_admin, f"ANULACION-VENTA-{id_venta}", sesion_id, motivo
                 ))
             except Exception:
                 pass
@@ -1232,7 +1240,7 @@ def anular_venta_completa(
                     ) VALUES (?, ?, 'DEVOLUCION_VENTA', ?, ?, 'Transferencia', 'BANCO_TRANSFERENCIA', ?, ?, ?, 'Activo', ?)
                 """, (
                     fecha_str, hora_str, f"Reversión recaudo transferencia Venta #{id_venta}: {motivo}",
-                    total_venta, usuario_admin, f"VENTA-{id_venta}", sesion_id, motivo
+                    total_venta, usuario_admin, f"ANULACION-VENTA-{id_venta}", sesion_id, motivo
                 ))
             except Exception:
                 pass
@@ -1258,7 +1266,7 @@ def anular_venta_completa(
                     ) VALUES (?, ?, 'AJUSTE_AUTORIZADO', ?, ?, 'Fiado', 'CARTERA_CLIENTES', ?, ?, ?, 'Activo', ?)
                 """, (
                     fecha_str, hora_str, f"Anulación crédito Venta #{id_venta}: {motivo}",
-                    total_venta, usuario_admin, f"VENTA-{id_venta}", sesion_id, motivo
+                    total_venta, usuario_admin, f"ANULACION-VENTA-{id_venta}", sesion_id, motivo
                 ))
             except Exception:
                 pass
@@ -1285,7 +1293,7 @@ def anular_venta_completa(
                             ) VALUES (?, ?, 'DEVOLUCION_VENTA', ?, ?, 'Efectivo', 'CAJA_FISICA', ?, ?, ?, 'Activo', ?)
                         """, (
                             fecha_str, hora_str, f"Devolución efectivo Venta #{id_venta} (Mixto): {motivo}",
-                            m_val, usuario_admin, f"VENTA-{id_venta}", sesion_id, motivo
+                            m_val, usuario_admin, f"ANULACION-VENTA-{id_venta}", sesion_id, motivo
                         ))
                         if sesion_id:
                             cur.execute("PRAGMA table_info(movimientos_caja)")
@@ -1320,7 +1328,7 @@ def anular_venta_completa(
                             ) VALUES (?, ?, 'DEVOLUCION_VENTA', ?, ?, 'Transferencia', 'BANCO_TRANSFERENCIA', ?, ?, ?, 'Activo', ?)
                         """, (
                             fecha_str, hora_str, f"Reversión recaudo transferencia Venta #{id_venta} (Mixto): {motivo}",
-                            m_val, usuario_admin, f"VENTA-{id_venta}", sesion_id, motivo
+                            m_val, usuario_admin, f"ANULACION-VENTA-{id_venta}", sesion_id, motivo
                         ))
                     elif m_p == "Fiado":
                         if doc_cliente:
@@ -1337,7 +1345,7 @@ def anular_venta_completa(
                             ) VALUES (?, ?, 'AJUSTE_AUTORIZADO', ?, ?, 'Fiado', 'CARTERA_CLIENTES', ?, ?, ?, 'Activo', ?)
                         """, (
                             fecha_str, hora_str, f"Anulación crédito Venta #{id_venta} (Mixto): {motivo}",
-                            m_val, usuario_admin, f"VENTA-{id_venta}", sesion_id, motivo
+                            m_val, usuario_admin, f"ANULACION-VENTA-{id_venta}", sesion_id, motivo
                         ))
             except Exception as e_mix:
                 print(f"Aviso revirtiendo venta mixta: {e_mix}")

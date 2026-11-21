@@ -20,6 +20,7 @@ from ..models.inventario import (
     DetalleCompra,
 )
 from ..models.usuario import Usuario
+from ..models.finanzas import CuentaPorPagar
 from ..schemas.inventario import (
     ArticuloCatalogoCreate,
     ArticuloCatalogoUpdate,
@@ -27,15 +28,16 @@ from ..schemas.inventario import (
     AjusteInventarioCreate,
     CompraCreate,
 )
-from ..middleware.auth import get_current_user
+from ..middleware.auth import get_current_user, require_admin, require_roles, is_admin_role
 from ..middleware.audit import log_audit
-from ..async_lock import LazyAsyncLock
+from ..services.venta_service import VentaService
+from ..async_lock import SHARED_INVENTORY_LOCK
 
 router = APIRouter(prefix="/inventario", tags=["inventario"])
 
-_COMPRA_LOCK = LazyAsyncLock()
-_TRASLADO_LOCK = LazyAsyncLock()
-_AJUSTE_LOCK = LazyAsyncLock()
+_COMPRA_LOCK = SHARED_INVENTORY_LOCK
+_TRASLADO_LOCK = SHARED_INVENTORY_LOCK
+_AJUSTE_LOCK = SHARED_INVENTORY_LOCK
 
 UNIDADES_DISCRETAS = {"Unidad", "Caja", "Paquete", "Docena", "Servicio"}
 
@@ -335,6 +337,13 @@ async def crear_articulo_endpoint(
     codigo = str(datos.codigo or "").strip()
     nombre = str(datos.nombre or "").strip()
     tipo = str(datos.tipo_producto or "Fisico").strip()
+    rol_norm = (current_user.rol or "").strip().lower()
+    if not is_admin_role(current_user):
+        if not (rol_norm == "operario" and tipo == "Servicio"):
+            raise HTTPException(
+                status_code=403,
+                detail="Operación restringida: solo un administrador puede crear productos físicos o servicios globales.",
+            )
     if not codigo:
         raise HTTPException(status_code=400, detail="El código SKU es obligatorio.")
     if not nombre:
@@ -558,6 +567,14 @@ async def actualizar_articulo_endpoint(
     if not obj:
         raise HTTPException(status_code=404, detail=f"Artículo '{id_o_codigo}' no encontrado.")
 
+    rol_norm = (current_user.rol or "").strip().lower()
+    if not is_admin_role(current_user):
+        if not (tipo_actual == "Servicio" and rol_norm == "operario" and obj.creado_por_operario_id == current_user.id):
+            raise HTTPException(
+                status_code=403,
+                detail="Operación restringida: solo un administrador puede editar artículos del catálogo.",
+            )
+
     usuario_nom = (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
 
     if "codigo_barras" in cambios and cambios["codigo_barras"]:
@@ -654,12 +671,25 @@ async def cambiar_estado_articulo_endpoint(
     estado: str = Query(...),
     tipo_producto: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ):
     tipo_actual, obj = await _resolver_articulo_existente(db, id_o_codigo, tipo_producto)
     if not obj:
         raise HTTPException(status_code=404, detail=f"Artículo '{id_o_codigo}' no encontrado.")
+    est_ant = obj.estado
     obj.estado = estado
+    usuario_nom = (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+    await log_audit(
+        db=db,
+        modulo="INVENTARIO",
+        accion="ESTADO_ARTICULO",
+        entidad_id=obj.id,
+        usuario_id=current_user.id,
+        usuario_nombre=usuario_nom,
+        valor_anterior={"codigo": obj.codigo, "estado": est_ant},
+        valor_nuevo={"codigo": obj.codigo, "estado": estado},
+        auto_commit=False,
+    )
     await db.commit()
     return {"ok": True, "codigo": obj.codigo, "estado": obj.estado}
 
@@ -757,7 +787,7 @@ async def obtener_vitrina_endpoint(
 async def ejecutar_traslado_endpoint(
     req: TrasladoCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_roles("administrador", "admin", "gerente", "cajero", "vendedor")),
 ):
     idem_key = (getattr(req, "idempotency_key", None) or "").strip() or None
     async with _TRASLADO_LOCK:
@@ -847,7 +877,7 @@ async def ejecutar_traslado_endpoint(
             ahora = datetime.now()
             f_str = ahora.strftime("%Y-%m-%d")
             h_str = ahora.strftime("%H:%M:%S")
-            usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+            usuario_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
             st_nuevo = round(sb_des + sv_des, 4)
             costo_u = float(prod.precio_costo or 0.0)
 
@@ -899,6 +929,24 @@ async def ejecutar_traslado_endpoint(
                     estado="Completado",
                     idempotency_key=f"mov:{idem_key}" if idem_key else None,
                 )
+            )
+            await log_audit(
+                db=db,
+                modulo="INVENTARIO",
+                accion="TRASLADO",
+                entidad_id=prod.id,
+                usuario_id=current_user.id,
+                usuario_nombre=usuario_nom,
+                valor_anterior={"stock_bodega": sb_ant, "stock_vitrina": sv_ant},
+                valor_nuevo={
+                    "numero_traslado": num_traslado,
+                    "origen": origen,
+                    "destino": destino,
+                    "cantidad": cant_float,
+                    "stock_bodega": sb_des,
+                    "stock_vitrina": sv_des,
+                },
+                auto_commit=False,
             )
             await db.commit()
             return {
@@ -976,7 +1024,7 @@ async def listar_traslados_endpoint(
 async def registrar_ajuste_endpoint(
     req: AjusteInventarioCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ):
     idem_key = (getattr(req, "idempotency_key", None) or "").strip() or None
     async with _AJUSTE_LOCK:
@@ -1048,7 +1096,7 @@ async def registrar_ajuste_endpoint(
             ahora = datetime.now()
             f_str = ahora.strftime("%Y-%m-%d")
             h_str = ahora.strftime("%H:%M:%S")
-            usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+            usuario_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
             unidad = prod.unidad_medida or "Unidad"
             costo_u = float(prod.precio_costo or 0.0)
 
@@ -1088,6 +1136,17 @@ async def registrar_ajuste_endpoint(
                     estado="Completado",
                     idempotency_key=idem_key,
                 )
+            )
+            await log_audit(
+                db=db,
+                modulo="INVENTARIO",
+                accion="AJUSTE_FISICO",
+                entidad_id=prod.id,
+                usuario_id=user_id,
+                usuario_nombre=usuario_nom,
+                valor_anterior={"ubicacion": ubicacion, "stock_anterior": stock_actual_ub},
+                valor_nuevo={"ubicacion": ubicacion, "stock_nuevo": conteo_flt, "diferencia": delta, "motivo": req.motivo},
+                auto_commit=False,
             )
             await db.commit()
             return {
@@ -1353,7 +1412,7 @@ async def _revertir_items_compra_central(
 async def registrar_compra_endpoint(
     req: CompraCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ):
     idem_key = (getattr(req, "idempotency_key", None) or "").strip() or None
     async with _COMPRA_LOCK:
@@ -1379,7 +1438,7 @@ async def registrar_compra_endpoint(
             ahora = datetime.now()
             f_str = ahora.strftime("%Y-%m-%d")
             h_str = ahora.strftime("%H:%M:%S")
-            usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+            usuario_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
             num_compra = await _generar_numero_compra_central(db)
 
             prov_id = req.proveedor_id
@@ -1415,8 +1474,54 @@ async def registrar_compra_endpoint(
                 db, compra.id, num_compra, req.items, ubic, user_id, usuario_nom, f_str, h_str
             )
             compra.total_compra = total_compra
+
+            # Integración opcional con Cuentas por Pagar a Proveedores (compras a crédito)
+            es_credito_compra = bool(getattr(req, "generar_cuenta_por_pagar", False)) or (
+                str(getattr(req, "tipo_pago", "") or "").strip().lower() in ("credito", "crédito", "fiado")
+            )
+            cxp_id_generada = None
+            if es_credito_compra and prov_id and total_compra > 0:
+                cxp_cmp = CuentaPorPagar(
+                    proveedor_id=prov_id,
+                    venta_id=None,
+                    numero_venta=num_compra,
+                    codigo_servicio=req.doc_referencia or num_compra,
+                    nombre_servicio=f"Compra inventario {num_compra}",
+                    precio_venta=total_compra,
+                    porcentaje_comision=0.0,
+                    monto_comision=0.0,
+                    concepto=f"Compra {num_compra}" + (f" ({req.doc_referencia})" if req.doc_referencia else ""),
+                    monto=total_compra,
+                    monto_pagado=0.0,
+                    saldo_pendiente=total_compra,
+                    estado="Pendiente",
+                    fecha=f_str,
+                    hora=h_str,
+                    usuario=usuario_nom,
+                )
+                db.add(cxp_cmp)
+                await db.flush()
+                cxp_id_generada = cxp_cmp.id
+                await VentaService._recalcular_acumulados_proveedor(db, prov_id)
+
+            await log_audit(
+                db=db,
+                modulo="INVENTARIO",
+                accion="CREAR_COMPRA",
+                entidad_id=compra.id,
+                usuario_id=user_id,
+                usuario_nombre=usuario_nom,
+                valor_nuevo={
+                    "numero_compra": num_compra,
+                    "proveedor_id": prov_id,
+                    "total": total_compra,
+                    "ubicacion_destino": ubic,
+                    "cxp_id": cxp_id_generada,
+                },
+                auto_commit=False,
+            )
             await db.commit()
-            return {"numero_compra": num_compra, "compra_id": compra.id, "total": total_compra}
+            return {"numero_compra": num_compra, "compra_id": compra.id, "total": total_compra, "cxp_id": cxp_id_generada}
         except IntegrityError:
             await db.rollback()
             if idem_key:
@@ -1521,41 +1626,86 @@ async def editar_compra_endpoint(
     compra_id: int,
     req: CompraCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ):
     if not req.items:
         raise HTTPException(status_code=400, detail="La compra debe tener al menos un artículo.")
-    c = (await db.execute(select(CompraInventario).with_for_update().where(CompraInventario.id == compra_id))).scalars().first()
-    if not c:
-        raise HTTPException(status_code=404, detail="La compra seleccionada ya no existe.")
+    async with _COMPRA_LOCK:
+        c = (await db.execute(select(CompraInventario).with_for_update().where(CompraInventario.id == compra_id))).scalars().first()
+        if not c:
+            raise HTTPException(status_code=404, detail="La compra seleccionada ya no existe.")
 
-    ahora = datetime.now()
-    f_str = ahora.strftime("%Y-%m-%d")
-    h_str = ahora.strftime("%H:%M:%S")
-    usuario_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
-    ubic_nueva = (req.ubicacion_destino or "BODEGA").strip().upper()
-    if ubic_nueva not in ("BODEGA", "VITRINA"):
-        ubic_nueva = "BODEGA"
+        cxp_res = await db.execute(
+            select(CuentaPorPagar).with_for_update().where(
+                CuentaPorPagar.numero_venta == c.numero_compra,
+                CuentaPorPagar.venta_id.is_(None),
+            )
+        )
+        cxps_compra = cxp_res.scalars().all()
+        provs_recalc = set()
+        for cxp_c in cxps_compra:
+            if cxp_c.estado == "Pagada" or float(cxp_c.monto_pagado or 0.0) > 0.01:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No se puede editar la compra {c.numero_compra}: ya tiene pagos aplicados al proveedor.",
+                )
+            provs_recalc.add(cxp_c.proveedor_id)
 
-    await _revertir_items_compra_central(
-        db, compra_id, c.numero_compra, (c.ubicacion_destino or "BODEGA").upper(),
-        current_user.id, usuario_nom, f_str, h_str, motivo="Edición: reversión de"
-    )
-    await db.execute(delete(DetalleCompra).where(DetalleCompra.compra_id == compra_id))
+        ahora = datetime.now()
+        f_str = ahora.strftime("%Y-%m-%d")
+        h_str = ahora.strftime("%H:%M:%S")
+        usuario_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
+        ubic_nueva = (req.ubicacion_destino or "BODEGA").strip().upper()
+        if ubic_nueva not in ("BODEGA", "VITRINA"):
+            ubic_nueva = "BODEGA"
 
-    nuevo_total = await _aplicar_items_compra_central(
-        db, compra_id, c.numero_compra, req.items, ubic_nueva,
-        current_user.id, usuario_nom, f_str, h_str, etiqueta="Edición: nueva entrada de"
-    )
-    c.proveedor_id = req.proveedor_id
-    c.proveedor_nombre = req.proveedor_nombre or "Sin Proveedor"
-    c.documento_referencia = req.doc_referencia or ""
-    c.ubicacion_destino = ubic_nueva
-    c.total_compra = nuevo_total
-    if req.observaciones is not None:
-        c.observaciones = req.observaciones
-    await db.commit()
-    return {"numero_compra": c.numero_compra, "compra_id": c.id, "total": nuevo_total}
+        total_anterior = float(c.total_compra or 0.0)
+        await _revertir_items_compra_central(
+            db, compra_id, c.numero_compra, (c.ubicacion_destino or "BODEGA").upper(),
+            current_user.id, usuario_nom, f_str, h_str, motivo="Edición: reversión de"
+        )
+        await db.execute(delete(DetalleCompra).where(DetalleCompra.compra_id == compra_id))
+
+        nuevo_total = await _aplicar_items_compra_central(
+            db, compra_id, c.numero_compra, req.items, ubic_nueva,
+            current_user.id, usuario_nom, f_str, h_str, etiqueta="Edición: nueva entrada de"
+        )
+        c.proveedor_id = req.proveedor_id
+        c.proveedor_nombre = req.proveedor_nombre or "Sin Proveedor"
+        c.documento_referencia = req.doc_referencia or ""
+        c.ubicacion_destino = ubic_nueva
+        c.total_compra = nuevo_total
+        if req.observaciones is not None:
+            c.observaciones = req.observaciones
+
+        # Sincronizar CXP de la compra si existía
+        for cxp_c in cxps_compra:
+            if req.proveedor_id:
+                cxp_c.proveedor_id = req.proveedor_id
+                cxp_c.precio_venta = nuevo_total
+                cxp_c.monto = nuevo_total
+                cxp_c.saldo_pendiente = nuevo_total
+                provs_recalc.add(req.proveedor_id)
+            else:
+                cxp_c.estado = "Anulada"
+                cxp_c.saldo_pendiente = 0.0
+        await db.flush()
+        for pid_r in provs_recalc:
+            await VentaService._recalcular_acumulados_proveedor(db, pid_r)
+
+        await log_audit(
+            db=db,
+            modulo="INVENTARIO",
+            accion="EDITAR_COMPRA",
+            entidad_id=c.id,
+            usuario_id=current_user.id,
+            usuario_nombre=usuario_nom,
+            valor_anterior={"total_compra": total_anterior},
+            valor_nuevo={"total_compra": nuevo_total, "ubicacion_destino": ubic_nueva},
+            auto_commit=False,
+        )
+        await db.commit()
+        return {"numero_compra": c.numero_compra, "compra_id": c.id, "total": nuevo_total}
 
 
 @router.delete("/compras/{compra_id}")
@@ -1563,26 +1713,61 @@ async def eliminar_compra_endpoint(
     compra_id: int,
     usuario: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ):
-    c = (await db.execute(select(CompraInventario).with_for_update().where(CompraInventario.id == compra_id))).scalars().first()
-    if not c:
-        raise HTTPException(status_code=404, detail="La compra seleccionada ya no existe.")
+    async with _COMPRA_LOCK:
+        c = (await db.execute(select(CompraInventario).with_for_update().where(CompraInventario.id == compra_id))).scalars().first()
+        if not c:
+            raise HTTPException(status_code=404, detail="La compra seleccionada ya no existe.")
 
-    ahora = datetime.now()
-    f_str = ahora.strftime("%Y-%m-%d")
-    h_str = ahora.strftime("%H:%M:%S")
-    usuario_nom = usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
-    num_compra = c.numero_compra
+        cxp_res = await db.execute(
+            select(CuentaPorPagar).with_for_update().where(
+                CuentaPorPagar.numero_venta == c.numero_compra,
+                CuentaPorPagar.venta_id.is_(None),
+            )
+        )
+        cxps_compra = cxp_res.scalars().all()
+        provs_recalc = set()
+        for cxp_c in cxps_compra:
+            if cxp_c.estado == "Pagada" or float(cxp_c.monto_pagado or 0.0) > 0.01:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No se puede eliminar la compra {c.numero_compra}: ya tiene pagos aplicados al proveedor.",
+                )
+            provs_recalc.add(cxp_c.proveedor_id)
 
-    await _revertir_items_compra_central(
-        db, compra_id, num_compra, (c.ubicacion_destino or "BODEGA").upper(),
-        current_user.id, usuario_nom, f_str, h_str, motivo="Eliminación de compra"
-    )
-    await db.execute(delete(DetalleCompra).where(DetalleCompra.compra_id == compra_id))
-    await db.delete(c)
-    await db.commit()
-    return {"numero_compra": num_compra}
+        ahora = datetime.now()
+        f_str = ahora.strftime("%Y-%m-%d")
+        h_str = ahora.strftime("%H:%M:%S")
+        usuario_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
+        num_compra = c.numero_compra
+        total_ant = float(c.total_compra or 0.0)
+
+        await _revertir_items_compra_central(
+            db, compra_id, num_compra, (c.ubicacion_destino or "BODEGA").upper(),
+            current_user.id, usuario_nom, f_str, h_str, motivo="Eliminación de compra"
+        )
+        for cxp_c in cxps_compra:
+            cxp_c.estado = "Anulada"
+            cxp_c.saldo_pendiente = 0.0
+        await db.execute(delete(DetalleCompra).where(DetalleCompra.compra_id == compra_id))
+        await db.delete(c)
+        await db.flush()
+        for pid_r in provs_recalc:
+            await VentaService._recalcular_acumulados_proveedor(db, pid_r)
+
+        await log_audit(
+            db=db,
+            modulo="INVENTARIO",
+            accion="ELIMINAR_COMPRA",
+            entidad_id=compra_id,
+            usuario_id=current_user.id,
+            usuario_nombre=usuario_nom,
+            valor_anterior={"numero_compra": num_compra, "total_compra": total_ant},
+            auto_commit=False,
+        )
+        await db.commit()
+        return {"numero_compra": num_compra}
 
 
 @router.get("/kardex")

@@ -14,7 +14,8 @@ from ..models.finanzas import CuentaPorPagar, Gasto
 from ..schemas.proveedor import ProveedorCreate, ProveedorUpdate, ProveedorResponse
 from ..services.caja_service import CajaService
 from ..services.venta_service import VentaService
-from ..middleware.auth import get_current_user
+from ..middleware.auth import get_current_user, require_admin
+from ..middleware.audit import log_audit
 from ..models.usuario import Usuario
 from ..async_lock import LazyAsyncLock
 
@@ -54,10 +55,14 @@ async def list_proveedores(
                     func.coalesce(func.sum(CuentaPorPagar.monto_comision), 0.0),
                     func.coalesce(func.sum(CuentaPorPagar.monto_pagado), 0.0),
                     func.coalesce(func.sum(CuentaPorPagar.saldo_pendiente), 0.0),
-                ).where(CuentaPorPagar.proveedor_id == p.id, CuentaPorPagar.estado != "Anulada")
+                    func.count(CuentaPorPagar.id),
+                ).where(
+                    CuentaPorPagar.proveedor_id == p.id,
+                    CuentaPorPagar.estado.notin_(["Anulada", "Pendiente_Caja"]),
+                )
             )
             row = res_cxp.first()
-            if row:
+            if row and int(row[4] or 0) > 0:
                 p.total_ventas = float(row[0] or 0.0)
                 p.total_comisiones = float(row[1] or 0.0)
                 p.total_pagado = float(row[2] or 0.0)
@@ -139,6 +144,24 @@ async def get_proveedor(
     proveedor = result.scalars().first()
     if not proveedor:
         raise HTTPException(status_code=404, detail="Proveedor no encontrado")
+    res_cxp = await db.execute(
+        select(
+            func.coalesce(func.sum(CuentaPorPagar.precio_venta), 0.0),
+            func.coalesce(func.sum(CuentaPorPagar.monto_comision), 0.0),
+            func.coalesce(func.sum(CuentaPorPagar.monto_pagado), 0.0),
+            func.coalesce(func.sum(CuentaPorPagar.saldo_pendiente), 0.0),
+            func.count(CuentaPorPagar.id),
+        ).where(
+            CuentaPorPagar.proveedor_id == proveedor.id,
+            CuentaPorPagar.estado.notin_(["Anulada", "Pendiente_Caja"]),
+        )
+    )
+    row = res_cxp.first()
+    if row and int(row[4] or 0) > 0:
+        proveedor.total_ventas = float(row[0] or 0.0)
+        proveedor.total_comisiones = float(row[1] or 0.0)
+        proveedor.total_pagado = float(row[2] or 0.0)
+        proveedor.saldo_acumulado = float(row[3] or 0.0)
     return proveedor
 
 
@@ -146,7 +169,7 @@ async def get_proveedor(
 async def create_proveedor(
     proveedor: ProveedorCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ):
     nom = (proveedor.nombre or "").strip()
     if not nom:
@@ -161,6 +184,17 @@ async def create_proveedor(
     datos["documento_nit"] = (datos.get("documento_nit") or "").strip()
     db_prov = Proveedor(**datos)
     db.add(db_prov)
+    await db.flush()
+    await log_audit(
+        db=db,
+        modulo="PROVEEDORES",
+        accion="CREAR",
+        entidad_id=db_prov.id,
+        usuario_id=current_user.id,
+        usuario_nombre=current_user.nombre or current_user.usuario,
+        valor_nuevo={"nombre": db_prov.nombre, "documento_nit": db_prov.documento_nit},
+        auto_commit=False,
+    )
     await db.commit()
     await db.refresh(db_prov)
     return db_prov
@@ -171,14 +205,27 @@ async def update_proveedor(
     id: int,
     prov_update: ProveedorUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ):
     result = await db.execute(select(Proveedor).where(Proveedor.id == id))
     proveedor = result.scalars().first()
     if not proveedor:
         raise HTTPException(status_code=404, detail="Proveedor no encontrado")
-    for key, value in prov_update.model_dump(exclude_unset=True).items():
+    cambios = prov_update.model_dump(exclude_unset=True)
+    anterior = {k: getattr(proveedor, k, None) for k in cambios.keys()}
+    for key, value in cambios.items():
         setattr(proveedor, key, value)
+    await log_audit(
+        db=db,
+        modulo="PROVEEDORES",
+        accion="EDITAR",
+        entidad_id=proveedor.id,
+        usuario_id=current_user.id,
+        usuario_nombre=current_user.nombre or current_user.usuario,
+        valor_anterior=anterior,
+        valor_nuevo=cambios,
+        auto_commit=False,
+    )
     await db.commit()
     await db.refresh(proveedor)
     return proveedor
@@ -189,13 +236,25 @@ async def change_estado(
     id: int,
     estado: str,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ):
     result = await db.execute(select(Proveedor).where(Proveedor.id == id))
     proveedor = result.scalars().first()
     if not proveedor:
         raise HTTPException(status_code=404, detail="Proveedor no encontrado")
+    est_ant = proveedor.estado
     proveedor.estado = estado
+    await log_audit(
+        db=db,
+        modulo="PROVEEDORES",
+        accion="ESTADO",
+        entidad_id=proveedor.id,
+        usuario_id=current_user.id,
+        usuario_nombre=current_user.nombre or current_user.usuario,
+        valor_anterior={"estado": est_ant},
+        valor_nuevo={"estado": estado},
+        auto_commit=False,
+    )
     await db.commit()
     await db.refresh(proveedor)
     return proveedor
@@ -246,7 +305,7 @@ async def _sincronizar_cxp_retroactivas_server(db: AsyncSession, proveedor_id: i
         res_det = await db.execute(
             select(DetalleVenta, Venta)
             .join(Venta, DetalleVenta.venta_id == Venta.id)
-            .where(Venta.estado != "Anulada")
+            .where(Venta.estado != "Anulada", Venta.estado != "Pendiente_Caja")
         )
         detalles = res_det.all()
 
@@ -277,12 +336,13 @@ async def _sincronizar_cxp_retroactivas_server(db: AsyncSession, proveedor_id: i
             cant = float(dv.cantidad or 1.0)
             pct_c = float(getattr(item_match, "porcentaje_comision", 0.0) or 0.0)
 
-            if costo_u > 0:
-                m_pagar = round(costo_u * cant, 2)
-                m_com = max(0.0, round(sub - m_pagar, 2))
-            elif pct_c > 0:
+            # Precedencia unificada con VentaService: si hay porcentaje de comisión configurado, aplicar primero
+            if pct_c > 0:
                 m_com = round(sub * (pct_c / 100.0), 2)
                 m_pagar = max(0.0, round(sub - m_com, 2))
+            elif costo_u > 0:
+                m_pagar = round(costo_u * cant, 2)
+                m_com = max(0.0, round(sub - m_pagar, 2))
             else:
                 m_com = 0.0
                 m_pagar = sub
@@ -379,7 +439,8 @@ async def get_liquidaciones_proveedor(
             "hora": l.hora,
             "monto_pagado": float(l.monto_pagado or 0.0),
             "metodo_pago": l.metodo_pago,
-            "comprobante": l.comprobante or "",
+            "referencia": l.referencia or "",
+            "comprobante": l.referencia or "",
             "usuario": l.usuario or "",
             "observaciones": l.observaciones or "",
             "estado": l.estado,
@@ -393,7 +454,7 @@ async def liquidar_proveedor(
     id: int,
     req: LiquidarProveedorRequest = Body(...),
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ) -> Dict[str, Any]:
     # Idempotencia estricta para pagos de liquidaciones a proveedores
     idem_clean = (getattr(req, "idempotency_key", None) or "").strip() or None
@@ -424,24 +485,19 @@ async def liquidar_proveedor(
                 prov = res_p_nom.scalars().first()
 
             if not prov:
-                prov = Proveedor(
-                    id=id,
-                    nombre=req.proveedor_nombre.strip() if req.proveedor_nombre else f"Proveedor #{id}",
-                    documento_nit=req.documento_nit or "",
-                    saldo_acumulado=float(req.monto or 0.0),
-                    estado="Activo"
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Proveedor #{id} no encontrado. Registre el proveedor antes de liquidar.",
                 )
-                db.add(prov)
-                await db.flush()
 
-            await _sincronizar_cxp_retroactivas_server(db, id)
+            await _sincronizar_cxp_retroactivas_server(db, prov.id)
 
-            p_str = str(id)
+            p_str = str(prov.id)
             res_cxp = await db.execute(
                 select(CuentaPorPagar)
                 .with_for_update()
                 .where(
-                    (CuentaPorPagar.proveedor_id == id) |
+                    (CuentaPorPagar.proveedor_id == prov.id) |
                     (cast(CuentaPorPagar.proveedor_id, String) == p_str) |
                     (cast(CuentaPorPagar.proveedor_id, String).like(f"{p_str} - %")),
                     CuentaPorPagar.estado.in_(["Pendiente", "Parcial"]),
@@ -544,7 +600,24 @@ async def liquidar_proveedor(
             )
             db.add(liq)
             await db.flush()
-            await VentaService._recalcular_acumulados_proveedor(db, prov.id)
+            if pendientes:
+                await VentaService._recalcular_acumulados_proveedor(db, prov.id)
+            await log_audit(
+                db=db,
+                modulo="PROVEEDORES",
+                accion="LIQUIDAR",
+                entidad_id=liq.id,
+                usuario_id=current_user.id,
+                usuario_nombre=u_nom,
+                valor_anterior={"proveedor_id": prov.id, "saldo_anterior": saldo_total},
+                valor_nuevo={
+                    "liquidacion_id": liq.id,
+                    "monto_pagado": monto_pagar,
+                    "metodo_pago": metodo,
+                    "saldo_restante": float(prov.saldo_acumulado or 0.0),
+                },
+                auto_commit=False,
+            )
             await db.commit()
 
             return {

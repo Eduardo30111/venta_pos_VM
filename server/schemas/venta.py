@@ -194,6 +194,7 @@ class VentaResponse(BaseModel):
     saldo_pendiente: Optional[float] = 0.0
     estado: str
     observaciones: Optional[str] = None
+    snapshot_negocio: Optional[Any] = None
     motivo_anulacion: Optional[str] = None
     anulada_por: Optional[str] = None
     anulada_at: Optional[str] = None

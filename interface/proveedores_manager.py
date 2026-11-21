@@ -1323,9 +1323,10 @@ def liquidar_proveedor_db(
         saldo_esperado_arg = 0.0
 
     if conn is None and api is not None:
+        import uuid
+        idem_prov = kwargs.get("idempotency_key") or f"LIQ-PROV-{proveedor_id}-{uuid.uuid4()}"
         endpoints_to_try = [
             f"/proveedores/{proveedor_id}/liquidar",
-            f"/nomina/proveedores/{proveedor_id}/liquidar",
         ]
         ultimo_error_api = None
         for ep in endpoints_to_try:
@@ -1333,7 +1334,7 @@ def liquidar_proveedor_db(
                 resp = api.post(
                     ep,
                     json={
-                        "monto": float(monto) if monto is not None else None,
+                        "monto": float(monto) if (monto is not None and float(monto) > 0) else None,
                         "metodo_pago": metodo_pago,
                         "comprobante": referencia or "",
                         "referencia": referencia or "",
@@ -1341,6 +1342,7 @@ def liquidar_proveedor_db(
                         "sesion_caja_id": sesion_caja_id,
                         "proveedor_nombre": prov_nom_arg,
                         "documento_nit": doc_nit_arg,
+                        "idempotency_key": idem_prov,
                     },
                     timeout=7.0,
                 )
@@ -1348,17 +1350,18 @@ def liquidar_proveedor_db(
                     res_api = resp.json()
                     res_api["exito"] = True
                     res_api["ok"] = True
-                    res_api["monto_pagado"] = float(res_api.get("total_pagado") or res_api.get("monto_pagado") or monto or 0.0)
+                    monto_real_api = float(res_api.get("total_pagado") or res_api.get("monto_pagado") or monto or 0.0)
+                    res_api["monto_pagado"] = monto_real_api
                     res_api["saldo_restante"] = float(res_api.get("saldo_restante", 0.0))
                     recibo_sv = res_api.get("numero_recibo") or f"LQ-{res_api.get('liquidacion_id', res_api.get('gasto_id', 1)):05d}"
                     res_api["numero_recibo"] = recibo_sv
                     try:
                         conn_loc = conectar_db()
                         cur_loc = conn_loc.cursor()
-                        _sincronizar_liquidacion_local_sqlite(cur_loc, proveedor_id, float(monto or 0.0), metodo_pago, referencia, usuario, observaciones, recibo_sv)
+                        _sincronizar_liquidacion_local_sqlite(cur_loc, proveedor_id, monto_real_api, metodo_pago, referencia, usuario, observaciones, recibo_sv)
                         conn_loc.commit()
                         conn_loc.close()
-                    except Exception as e_sl:
+                    except Exception:
                         pass
                     return res_api
                 else:
@@ -1367,6 +1370,9 @@ def liquidar_proveedor_db(
                     except Exception:
                         det = resp.text
                     ultimo_error_api = det
+                    # Ante rechazo explícito de validación/negocio/permisos (4xx), NO reintentar otro endpoint
+                    if 400 <= resp.status_code < 500:
+                        break
             except Exception as e_api_post:
                 ultimo_error_api = str(e_api_post)
 
@@ -1650,12 +1656,11 @@ def liquidar_proveedor_db(
                     "observaciones": observaciones,
                     "numero_recibo": numero_recibo,
                 },
-                empresa="PRINCIPAL",
                 usuario=usuario,
-                id_local=str(id_liq)
+                id_local=str(id_liq),
             )
         except Exception as e_q:
-            pass
+            print(f"Aviso encolando liquidación de proveedor para sincronización: {e_q}")
 
         if cerrar_conn:
             conn.commit()

@@ -41,6 +41,7 @@ scratch/
 *backup*.db
 database/*.db*
 config/network_config.json
+config/business_config.json
 assets/logos/
 
 # Sistema operativo

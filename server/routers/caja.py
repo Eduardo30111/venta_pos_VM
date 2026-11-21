@@ -3,20 +3,25 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import or_
+from sqlalchemy import or_, and_
 from sqlalchemy.exc import IntegrityError
 from typing import Optional, List, Dict, Any
 
 from ..database import get_db
 from ..models.caja import SesionCaja, MovimientoCaja, MovimientoFinanciero
 from ..services.caja_service import CajaService
-from ..middleware.auth import get_current_user
+from ..middleware.auth import get_current_user, require_admin, require_roles, is_admin_role
+from ..middleware.audit import log_audit
 from ..models.usuario import Usuario
 from ..async_lock import LazyAsyncLock
 
 router = APIRouter(prefix="/caja", tags=["caja"])
 
 _CAJA_LOCK = LazyAsyncLock()
+
+
+def _nombre_usuario_autenticado(current_user: Usuario) -> str:
+    return f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
 
 
 class AbrirCajaRequest(BaseModel):
@@ -87,9 +92,9 @@ async def get_sesion_activa(
 async def post_abrir_caja(
     req: AbrirCajaRequest = Body(...),
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_roles("administrador", "admin", "gerente", "cajero", "vendedor")),
 ) -> Dict[str, Any]:
-    u_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+    u_nom = _nombre_usuario_autenticado(current_user)
     sesion = await CajaService.abrir_sesion(
         db=db,
         usuario=u_nom,
@@ -97,6 +102,16 @@ async def post_abrir_caja(
         terminal_id=req.terminal_id,
         terminal_nombre=req.terminal_nombre,
         arqueo_apertura=req.arqueo_apertura,
+    )
+    await log_audit(
+        db=db,
+        modulo="CAJA",
+        accion="ABRIR_CAJA",
+        entidad_id=sesion.id,
+        usuario_id=current_user.id,
+        usuario_nombre=u_nom,
+        valor_nuevo={"sesion_id": sesion.id, "monto_inicial": float(sesion.monto_inicial or 0.0)},
+        auto_commit=False,
     )
     await db.commit()
     await db.refresh(sesion)
@@ -120,9 +135,9 @@ async def post_cerrar_sesion(
     sesion_id: int,
     req: CerrarCajaRequest = Body(...),
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_roles("administrador", "admin", "gerente", "cajero", "vendedor")),
 ) -> Dict[str, Any]:
-    u_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+    u_nom = _nombre_usuario_autenticado(current_user)
     res = await CajaService.cerrar_sesion(
         db=db,
         sesion_id=sesion_id,
@@ -133,6 +148,22 @@ async def post_cerrar_sesion(
         monto_transferencias_verificado=req.monto_transferencias_verificado,
         arqueo_cierre=req.arqueo_cierre,
         arqueo_cierre_json=req.arqueo_cierre_json,
+    )
+    await log_audit(
+        db=db,
+        modulo="CAJA",
+        accion="CERRAR_CAJA",
+        entidad_id=sesion_id,
+        usuario_id=current_user.id,
+        usuario_nombre=u_nom,
+        valor_nuevo={
+            "efectivo_esperado": res.get("efectivo_esperado"),
+            "monto_real_contado": res.get("monto_real_contado"),
+            "diferencia": res.get("diferencia"),
+            "transferencias_esperadas": res.get("transferencias_esperadas"),
+            "transferencias_verificadas": res.get("transferencias_verificadas"),
+        },
+        auto_commit=False,
     )
     await db.commit()
     return res
@@ -191,7 +222,10 @@ async def get_movimientos_sesion(
 
     cond = MovimientoFinanciero.sesion_caja_id == sesion_id
     if f_ap:
-        cond = or_(MovimientoFinanciero.sesion_caja_id == sesion_id, MovimientoFinanciero.fecha == f_ap)
+        cond = or_(
+            MovimientoFinanciero.sesion_caja_id == sesion_id,
+            and_(MovimientoFinanciero.sesion_caja_id.is_(None), MovimientoFinanciero.fecha == f_ap),
+        )
 
     res_mf = await db.execute(
         select(MovimientoFinanciero)
@@ -248,10 +282,16 @@ async def post_movimiento_caja(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ) -> Dict[str, Any]:
+    tipo_up = (req.tipo or "").strip().upper()
+    if tipo_up in ("AJUSTE", "RETIRO", "INGRESO_EXTRAORDINARIO") and not is_admin_role(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Operación restringida: solo un administrador puede registrar ajustes o retiros de caja.",
+        )
     idem_clean = (getattr(req, "idempotency_key", None) or "").strip() or None
     async with _CAJA_LOCK:
         try:
-            u_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+            u_nom = _nombre_usuario_autenticado(current_user)
             mov = await CajaService.registrar_movimiento_caja(
                 db=db,
                 tipo=req.tipo,
@@ -263,6 +303,16 @@ async def post_movimiento_caja(
                 sesion_id=req.sesion_id,
                 sincronizar_financiero=req.sincronizar_financiero,
                 idempotency_key=idem_clean,
+            )
+            await log_audit(
+                db=db,
+                modulo="CAJA",
+                accion=f"MOVIMIENTO_{tipo_up or 'MANUAL'}",
+                entidad_id=mov.id,
+                usuario_id=current_user.id,
+                usuario_nombre=u_nom,
+                valor_nuevo={"tipo": req.tipo, "monto": req.monto, "descripcion": req.descripcion},
+                auto_commit=False,
             )
             await db.commit()
             return {"ok": True, "id": mov.id}
@@ -282,10 +332,16 @@ async def post_movimiento_financiero(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ) -> Dict[str, Any]:
+    tipo_up = (req.tipo or "").strip().upper()
+    if tipo_up in ("AJUSTE_AUTORIZADO", "RETIRO_CAJA", "INGRESO_EXTRAORDINARIO") and not is_admin_role(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Operación restringida: solo un administrador puede registrar ajustes, retiros o ingresos extraordinarios.",
+        )
     idem_clean = (getattr(req, "idempotency_key", None) or "").strip() or None
     async with _CAJA_LOCK:
         try:
-            u_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+            u_nom = _nombre_usuario_autenticado(current_user)
             mf = await CajaService.registrar_movimiento_financiero(
                 db=db,
                 tipo=req.tipo,
@@ -301,6 +357,16 @@ async def post_movimiento_financiero(
                 sincronizar_caja=req.sincronizar_caja,
                 terminal=req.terminal or "CAJA-01",
                 idempotency_key=idem_clean,
+            )
+            await log_audit(
+                db=db,
+                modulo="CAJA",
+                accion=f"MOV_FIN_{tipo_up or 'MANUAL'}",
+                entidad_id=mf.id,
+                usuario_id=current_user.id,
+                usuario_nombre=u_nom,
+                valor_nuevo={"tipo": req.tipo, "monto": req.monto, "cuenta": req.cuenta_afectada, "concepto": req.concepto},
+                auto_commit=False,
             )
             await db.commit()
             return {"ok": True, "id": mf.id}
@@ -318,7 +384,7 @@ async def post_movimiento_financiero(
 async def post_ingreso_autorizado(
     req: IngresoAutorizadoRequest = Body(...),
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ) -> Dict[str, Any]:
     if req.monto <= 0:
         raise HTTPException(status_code=400, detail="El monto del ingreso autorizado debe ser mayor a cero.")
@@ -327,7 +393,7 @@ async def post_ingreso_autorizado(
             status_code=400,
             detail="Debe indicar un motivo o justificación del ingreso (mínimo 3 caracteres).",
         )
-    u_nom = req.usuario or (f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario)
+    u_nom = _nombre_usuario_autenticado(current_user)
     mf = await CajaService.registrar_movimiento_financiero(
         db=db,
         tipo="INGRESO_EXTRAORDINARIO",
@@ -340,6 +406,16 @@ async def post_ingreso_autorizado(
         sesion_id=req.sesion_id,
         observaciones=req.motivo.strip(),
         sincronizar_caja=True,
+    )
+    await log_audit(
+        db=db,
+        modulo="CAJA",
+        accion="INGRESO_AUTORIZADO",
+        entidad_id=mf.id,
+        usuario_id=current_user.id,
+        usuario_nombre=u_nom,
+        valor_nuevo={"monto": req.monto, "motivo": req.motivo.strip()},
+        auto_commit=False,
     )
     await db.commit()
     return {"ok": True, "id": mf.id}

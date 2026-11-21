@@ -304,8 +304,10 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                             f"${float(d.get('subtotal', 0.0)):,.0f}"
                         ))
                     if estado == "Anulada" and v_data.get("motivo_anulacion"):
+                        quien_anulo = v_data.get("anulada_por") or v_data.get("anulado_por") or "Admin"
+                        cuando_anulo = v_data.get("anulada_at") or v_data.get("fecha_anulacion") or ""
                         lbl_info_anulacion.config(
-                            text=f"🚫 ANULADA por {v_data.get('anulado_por', 'Admin')} el {v_data.get('fecha_anulacion', '')}\nMotivo: {v_data.get('motivo_anulacion')}"
+                            text=f"🚫 ANULADA por {quien_anulo} el {cuando_anulo}\nMotivo: {v_data.get('motivo_anulacion')}"
                         )
                     detalles_cargados = True
             except Exception:
@@ -382,11 +384,12 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                         op = v.get("operario_nombre") or "Administrador"
                         doc = v.get("cliente_documento") or "Consumidor Final"
                         pags = v.get("pagos") or []
-                        met = pags[0].get("metodo") if pags else "Efectivo"
+                        met = v.get("metodo_pago_principal") or (pags[0].get("metodo") if pags else "Efectivo")
                         tot = float(v.get("total") or 0.0)
                         est = v.get("estado") or "Completada"
 
-                        ventas_totales_sum += tot
+                        if filtro_est != "Todos" or est not in ("Anulada", "Pendiente_Caja"):
+                            ventas_totales_sum += tot
                         ventas_contador += 1
 
                         tree.insert("", "end", values=(
@@ -438,7 +441,8 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                             continue
 
                     tot_item = float(r['total_venta'] or 0.0)
-                    ventas_totales_sum += tot_item
+                    if filtro_est != "Todos" or est not in ("Anulada", "Pendiente_Caja"):
+                        ventas_totales_sum += tot_item
                     ventas_contador += 1
 
                     tree.insert("", "end", values=(
@@ -721,10 +725,20 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                 if resp.status_code == 200:
                     raw_logs = resp.json()
                     for lg in raw_logs:
-                        vn = lg.get("valor_nuevo") or {}
-                        va = lg.get("valor_anterior") or {}
-                        m_n = vn.get("nuevo_total", vn.get("total", 0.0)) if isinstance(vn, dict) else 0.0
-                        m_a = va.get("total_anterior", va.get("total", 0.0)) if isinstance(va, dict) else 0.0
+                        vn = lg.get("valor_nuevo")
+                        va = lg.get("valor_anterior")
+                        if isinstance(vn, dict):
+                            m_n = float(vn.get("nuevo_total", vn.get("total", 0.0)) or 0.0)
+                        elif isinstance(vn, (int, float)):
+                            m_n = float(vn)
+                        else:
+                            m_n = 0.0
+                        if isinstance(va, dict):
+                            m_a = float(va.get("total_anterior", va.get("total", 0.0)) or 0.0)
+                        elif isinstance(va, (int, float)):
+                            m_a = float(va)
+                        else:
+                            m_a = 0.0
                         tree_a.insert("", "end", values=(
                             lg.get("id"),
                             lg.get("accion") or lg.get("evento", "Edición"),

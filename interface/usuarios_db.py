@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Archivo: usuarios_db.py
-Módulo para la gestión de la base de datos de usuarios del sistema VmPOS.
+Módulo para la gestión de la base de datos local de usuarios del sistema VmPOS.
 """
 
 import sqlite3
@@ -29,15 +29,31 @@ except ImportError:
 # Módulos disponibles en el sistema
 MODULOS_DISPONIBLES = [
     "ventas",
-    "inventario", 
+    "inventario",
     "usuarios",
     "reportes",
-    "configuracion"
+    "configuracion",
 ]
+
+CLAVES_INSEGURAS = frozenset({
+    "admin123",
+    "123456",
+    "12345",
+    "1234567",
+    "12345678",
+    "123456789",
+    "admin",
+    "password",
+    "qwerty",
+    "vmpos",
+    "vmpos123",
+    "000000",
+})
+
 
 def hash_password(password):
     """
-    Genera un hash seguro bcrypt rounds=12.
+    Genera un hash seguro bcrypt rounds=12 (truncado consistente a 72 bytes UTF-8).
     Si el módulo 'bcrypt' no está disponible, genera un RuntimeError controlado
     para impedir de forma absoluta la creación o almacenamiento de contraseñas inseguras.
     """
@@ -48,38 +64,42 @@ def hash_password(password):
             "El componente de seguridad 'bcrypt' es obligatorio para generar o modificar "
             "contraseñas en VmPOS. Instale la dependencia con: pip install bcrypt"
         )
+    pwd_bytes = str(password).encode("utf-8")[:72]
     salt = bcrypt.gensalt(rounds=12)
-    return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+    return bcrypt.hashpw(pwd_bytes, salt).decode("utf-8")
+
 
 def verificar_password(password_plana, hash_almacenado):
     """
-    Verifica una contraseña contra hash bcrypt ($2b$, $2a$), sha256 o texto plano legado.
+    Verifica una contraseña contra hash bcrypt ($2b$, $2a$, $2y$), sha256 o texto plano legado.
     Utiliza comparación en tiempo constante para evitar ataques de temporización.
     """
     if not password_plana or not hash_almacenado:
         return False
     hash_str = str(hash_almacenado).strip()
-    if hash_str.startswith("$2b$") or hash_str.startswith("$2a$"):
+    if hash_str.startswith(("$2b$", "$2a$", "$2y$")):
         if _HAS_BCRYPT:
             try:
-                return bcrypt.checkpw(password_plana.encode("utf-8"), hash_str.encode("utf-8"))
+                pwd_bytes = str(password_plana).encode("utf-8")[:72]
+                return bcrypt.checkpw(pwd_bytes, hash_str.encode("utf-8"))
             except Exception:
                 return False
         return False
     if len(hash_str) == 64:
-        calc_sha = hashlib.sha256(password_plana.encode("utf-8")).hexdigest()
+        calc_sha = hashlib.sha256(str(password_plana).encode("utf-8")).hexdigest()
         return hmac.compare_digest(calc_sha, hash_str)
-    return hmac.compare_digest(password_plana, hash_str)
+    return hmac.compare_digest(str(password_plana), hash_str)
+
 
 def validar_password_fuerte(password: str) -> tuple:
     """Valida que la contraseña cumpla los requisitos mínimos de seguridad y no sea genérica."""
     if not password or len(password.strip()) < 6:
         return False, "La contraseña debe tener al menos 6 caracteres."
     p_lower = password.strip().lower()
-    claves_inseguras = ("admin123", "123456", "admin", "password", "12345678", "12345")
-    if p_lower in claves_inseguras:
+    if p_lower in CLAVES_INSEGURAS:
         return False, "La contraseña ingresada es predeterminada o insegura. Elija una clave personalizada y robusta."
     return True, ""
+
 
 def conectar_usuarios_db():
     """Establece conexión a la base de datos de usuarios con WAL y timeout seguro."""
@@ -94,20 +114,22 @@ def conectar_usuarios_db():
         pass
     return conn
 
+
 def _is_benign_ddl_error(error_msg: str) -> bool:
     msg = str(error_msg).lower()
     return "duplicate column" in msg or "already exists" in msg
 
+
 def crear_tablas_iniciales():
     """
     Crea las tablas necesarias en la base de datos si no existen y aplica migraciones DDL.
-    Lanza RuntimeError si ocurre un fallo fatal de base de datos.
+    Lanza RuntimeError si ocurre cualquier fallo fatal de base de datos (fail-closed).
     """
+    conn = None
     try:
         conn = conectar_usuarios_db()
         cursor = conn.cursor()
-        
-        # Crear tabla de usuarios
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS usuarios (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,8 +150,7 @@ def crear_tablas_iniciales():
                 requiere_cambio_password INTEGER DEFAULT 0
             )
         ''')
-        
-        # Crear tabla de permisos (para funcionalidades futuras)
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS permisos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,10 +160,9 @@ def crear_tablas_iniciales():
                 FOREIGN KEY (usuario_id) REFERENCES usuarios (id) ON DELETE CASCADE
             )
         ''')
-        
+
         conn.commit()
 
-        # Migraciones (agregar columnas si no existen con control estricto de excepciones)
         migraciones = [
             ("ALTER TABLE usuarios ADD COLUMN comision_porcentaje REAL DEFAULT 0", "comision_porcentaje"),
             ("ALTER TABLE usuarios ADD COLUMN comisiones_acumuladas REAL DEFAULT 0", "comisiones_acumuladas"),
@@ -156,37 +176,48 @@ def crear_tablas_iniciales():
             except sqlite3.OperationalError as e_ddl:
                 if not _is_benign_ddl_error(str(e_ddl)):
                     logger.critical("Error fatal en migración DDL de usuarios (%s): %s", campo, e_ddl)
-                    conn.close()
                     raise RuntimeError(f"Fallo crítico en migración DDL de usuarios ({campo}): {e_ddl}") from e_ddl
 
         conn.commit()
-        conn.close()
         logger.info("Tablas de usuarios creadas/verificadas correctamente.")
         return True
-        
+    except RuntimeError:
+        raise
     except Exception as e:
-        logger.error(f"Error al crear tablas: {e}")
-        if isinstance(e, RuntimeError):
-            raise
-        return False
+        logger.critical("Error fatal al crear/verificar tablas de usuarios: %s", e)
+        raise RuntimeError(f"Error crítico inicializando base de datos de usuarios: {e}") from e
+    finally:
+        if conn is not None:
+            conn.close()
+
 
 def hay_administrador() -> bool:
-    """Verifica si existe al menos un usuario con rol de Administrador activo en el sistema."""
+    """
+    Verifica si existe al menos un usuario con rol de Administrador activo en el sistema.
+    Política fail-closed: ante cualquier error de acceso o corrupción de la base de datos,
+    lanza RuntimeError en lugar de retornar False (evita activar erróneamente el alta inicial).
+    """
+    conn = None
     try:
         conn = conectar_usuarios_db()
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM usuarios WHERE rol = 'Administrador' AND estado = 'Activo'")
-        existe = cursor.fetchone() is not None
-        conn.close()
-        return existe
+        cursor.execute(
+            "SELECT COUNT(id) FROM usuarios WHERE LOWER(rol) IN ('administrador', 'admin') AND LOWER(estado) = 'activo'"
+        )
+        row = cursor.fetchone()
+        return bool(row and int(row[0] or 0) > 0)
     except Exception as e:
-        logger.error(f"Error al verificar existencia de administrador: {e}")
-        return False
+        logger.critical("Error crítico verificando existencia de administrador: %s", e)
+        raise RuntimeError(f"No se pudo verificar el estado de administradores en usuarios.db: {e}") from e
+    finally:
+        if conn is not None:
+            conn.close()
+
 
 def crear_administrador_inicial(usuario, password, nombre="Administrador", apellidos="Principal"):
     """
-    Crea el primer administrador en una instalación nueva.
-    Valida fortaleza de contraseña y evita claves predeterminadas universales.
+    Crea el primer administrador en una instalación nueva (operación estricta de un solo uso).
+    Valida fortaleza de contraseña, bloquea si ya existe un administrador y evita claves universales.
     """
     valido, mensaje = validar_password_fuerte(password)
     if not valido:
@@ -199,8 +230,21 @@ def crear_administrador_inicial(usuario, password, nombre="Administrador", apell
     conn = conectar_usuarios_db()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT id FROM usuarios WHERE usuario = ?", (u_limpio,))
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            "SELECT COUNT(id) FROM usuarios WHERE LOWER(rol) IN ('administrador', 'admin')"
+        )
+        ya_hay_admin = int((cursor.fetchone() or [0])[0] or 0) > 0
+        if ya_hay_admin:
+            conn.rollback()
+            raise PermissionError(
+                "El sistema ya cuenta con un administrador configurado. "
+                "La activación inicial es de un solo uso."
+            )
+
+        cursor.execute("SELECT id FROM usuarios WHERE LOWER(usuario) = LOWER(?)", (u_limpio,))
         if cursor.fetchone():
+            conn.rollback()
             raise ValueError(f"El usuario '{u_limpio}' ya existe en el sistema.")
 
         password_hash = hash_password(password.strip())
@@ -213,54 +257,81 @@ def crear_administrador_inicial(usuario, password, nombre="Administrador", apell
         conn.commit()
         logger.info("Administrador inicial '%s' creado exitosamente.", u_limpio)
         return True
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()
 
-def insertar_usuario(usuario, password, rol, estado="Activo", comision_porcentaje=0.0, nombre="", apellidos="", tipo_nomina="Porcentual", salario_diario=0.0):
+
+def insertar_usuario(
+    usuario,
+    password,
+    rol,
+    estado="Activo",
+    comision_porcentaje=0.0,
+    nombre="",
+    apellidos="",
+    tipo_nomina="Porcentual",
+    salario_diario=0.0,
+):
     try:
         conn = conectar_usuarios_db()
         cursor = conn.cursor()
-        
-        # Verificar si el usuario ya existe
+
         cursor.execute("SELECT id FROM usuarios WHERE usuario = ?", (usuario,))
         if cursor.fetchone():
-            print(f"⚠️ El usuario '{usuario}' ya existe.")
+            logger.warning("El usuario '%s' ya existe.", usuario)
             conn.close()
             return False
-            
-        # Insertar nuevo usuario
+
         password_hash = hash_password(password)
         cursor.execute('''
-            INSERT INTO usuarios (usuario, password, rol, estado, fecha_registro, fecha_modificacion, comision_porcentaje, comisiones_acumuladas, nombre, apellidos, tipo_nomina, salario_diario, requiere_cambio_password)
+            INSERT INTO usuarios (
+                usuario, password, rol, estado, fecha_registro, fecha_modificacion,
+                comision_porcentaje, comisiones_acumuladas, nombre, apellidos,
+                tipo_nomina, salario_diario, requiere_cambio_password
+            )
             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 0)
-        ''', (usuario, password_hash, rol, estado, datetime.now(), datetime.now(), comision_porcentaje, nombre, apellidos, tipo_nomina, salario_diario))
-        
+        ''', (
+            usuario,
+            password_hash,
+            rol,
+            estado,
+            datetime.now(),
+            datetime.now(),
+            comision_porcentaje,
+            nombre,
+            apellidos,
+            tipo_nomina,
+            salario_diario,
+        ))
+
         conn.commit()
         conn.close()
-        print(f"✅ Usuario '{usuario}' creado correctamente.")
         return True
-        
     except Exception as e:
-        print(f"❌ Error al insertar usuario: {e}")
+        logger.error("Error al insertar usuario: %s", e)
         return False
 
+
 def obtener_usuarios():
-    """
-    Obtiene todos los usuarios de la base de datos.
-    
-    Returns:
-        list: Lista de diccionarios con información de usuarios
-    """
+    """Obtiene todos los usuarios de la base de datos local."""
     try:
         conn = conectar_usuarios_db()
         cursor = conn.cursor()
-        
+
         cursor.execute('''
-            SELECT id, usuario, rol, estado, ultimo_acceso, fecha_registro, comision_porcentaje, comisiones_acumuladas, solicitud_liquidacion, requiere_cambio_password
+            SELECT id, usuario, rol, estado, ultimo_acceso, fecha_registro,
+                   comision_porcentaje, comisiones_acumuladas, solicitud_liquidacion,
+                   requiere_cambio_password
             FROM usuarios
             ORDER BY fecha_registro DESC
         ''')
-        
+
         usuarios = []
         for row in cursor.fetchall():
             usuarios.append({
@@ -273,17 +344,29 @@ def obtener_usuarios():
                 'comision_porcentaje': row[6] if row[6] is not None else 0.0,
                 'comisiones_acumuladas': row[7] if row[7] is not None else 0.0,
                 'solicitud_liquidacion': row[8],
-                'requiere_cambio_password': bool(row[9]) if len(row) > 9 else False
+                'requiere_cambio_password': bool(row[9]) if len(row) > 9 else False,
             })
-        
+
         conn.close()
         return usuarios
-        
     except Exception as e:
-        print(f"❌ Error al obtener usuarios: {e}")
+        logger.error("Error al obtener usuarios: %s", e)
         return []
 
-def actualizar_usuario_db(id_usuario, usuario=None, rol=None, estado=None, password=None, comision_porcentaje=None, nombre=None, apellidos=None, tipo_nomina=None, salario_diario=None, requiere_cambio_password=None):
+
+def actualizar_usuario_db(
+    id_usuario,
+    usuario=None,
+    rol=None,
+    estado=None,
+    password=None,
+    comision_porcentaje=None,
+    nombre=None,
+    apellidos=None,
+    tipo_nomina=None,
+    salario_diario=None,
+    requiere_cambio_password=None,
+):
     """
     Actualiza la información de un usuario existente.
     Si se actualiza la contraseña a un valor seguro no predeterminado, desactiva requiere_cambio_password.
@@ -291,37 +374,31 @@ def actualizar_usuario_db(id_usuario, usuario=None, rol=None, estado=None, passw
     try:
         conn = conectar_usuarios_db()
         cursor = conn.cursor()
-        
+
         campos_actualizar = []
         valores = []
-        
+
         if usuario:
             campos_actualizar.append("usuario = ?")
             valores.append(usuario)
-        
         if rol:
             campos_actualizar.append("rol = ?")
             valores.append(rol)
-        
         if estado:
             campos_actualizar.append("estado = ?")
             valores.append(estado)
-        
         if password:
             campos_actualizar.append("password = ?")
             valores.append(hash_password(password))
-            if requiere_cambio_password is None and password != "admin123":
+            if requiere_cambio_password is None and password.strip().lower() not in CLAVES_INSEGURAS:
                 campos_actualizar.append("requiere_cambio_password = ?")
                 valores.append(0)
-
         if requiere_cambio_password is not None:
             campos_actualizar.append("requiere_cambio_password = ?")
             valores.append(1 if requiere_cambio_password else 0)
-
         if comision_porcentaje is not None:
             campos_actualizar.append("comision_porcentaje = ?")
             valores.append(comision_porcentaje)
-
         if nombre is not None:
             campos_actualizar.append("nombre = ?")
             valores.append(nombre)
@@ -334,69 +411,58 @@ def actualizar_usuario_db(id_usuario, usuario=None, rol=None, estado=None, passw
         if salario_diario is not None:
             campos_actualizar.append("salario_diario = ?")
             valores.append(salario_diario)
-        
-        # Siempre actualizar fecha de modificación
+
         campos_actualizar.append("fecha_modificacion = ?")
         valores.append(datetime.now())
-        
-        # Agregar ID al final para la condición WHERE
         valores.append(id_usuario)
-        
+
         if campos_actualizar:
             consulta = f"UPDATE usuarios SET {', '.join(campos_actualizar)} WHERE id = ?"
             cursor.execute(consulta, valores)
             conn.commit()
-        
+
         conn.close()
-        print(f"✅ Usuario con ID {id_usuario} actualizado correctamente.")
         return True
-        
     except Exception as e:
-        print(f"❌ Error al actualizar usuario: {e}")
+        logger.error("Error al actualizar usuario: %s", e)
         return False
 
+
 def eliminar_usuario_db(id_usuario):
-    """
-    Elimina un usuario de la base de datos.
-    """
+    """Elimina un usuario de la base de datos local."""
     try:
         conn = conectar_usuarios_db()
         cursor = conn.cursor()
-        
         cursor.execute("DELETE FROM usuarios WHERE id = ?", (id_usuario,))
         conn.commit()
         conn.close()
-        
-        print(f"✅ Usuario con ID {id_usuario} eliminado correctamente.")
         return True
-        
     except Exception as e:
-        print(f"❌ Error al eliminar usuario: {e}")
+        logger.error("Error al eliminar usuario: %s", e)
         return False
+
 
 def obtener_usuario_por_credenciales(usuario, password):
     """
     Verifica las credenciales de un usuario y retorna su información.
-    Soporta contraseñas con hash bcrypt, sha256 y texto plano legado.
-    Realiza rehash automático a bcrypt si la contraseña verificada era legada.
-    Detecta si requiere cambio obligatorio de contraseña.
-    Tolerante a cualquier esquema de columnas existente.
+    Soporta contraseñas con hash bcrypt, sha256 y texto plano legado con rehash automático a bcrypt.
+    Aplica mínimo privilegio por defecto ('Operario') si el rol falta.
     """
     try:
         conn = conectar_usuarios_db()
         cursor = conn.cursor()
-        
+
         cursor.execute("PRAGMA table_info(usuarios)")
         cols = [r[1] for r in cursor.fetchall()]
-        
+
         cursor.execute("SELECT * FROM usuarios WHERE usuario = ? AND estado = 'Activo'", (usuario,))
         resultado = cursor.fetchone()
-        
+
         if resultado:
             row = dict(zip(cols, resultado))
             uid = row.get("id")
             u_nom = row.get("usuario")
-            rol = row.get("rol", "Administrador")
+            rol = row.get("rol") or "Operario"
             estado = row.get("estado", "Activo")
             u_acc = row.get("ultimo_acceso")
             f_reg = row.get("fecha_registro")
@@ -408,22 +474,22 @@ def obtener_usuario_por_credenciales(usuario, password):
             req_cambio = bool(row.get("requiere_cambio_password", 0))
 
             if verificar_password(password, pass_guardada):
-                # Rehash automático a bcrypt si era plano o SHA-256
                 pass_str = str(pass_guardada or "")
-                if not (pass_str.startswith("$2b$") or pass_str.startswith("$2a$")) and _HAS_BCRYPT:
+                if not pass_str.startswith(("$2b$", "$2a$", "$2y$")) and _HAS_BCRYPT:
                     nuevo_hash = hash_password(password)
-                    cursor.execute("UPDATE usuarios SET password = ?, fecha_modificacion = ? WHERE id = ?", (nuevo_hash, datetime.now(), uid))
+                    cursor.execute(
+                        "UPDATE usuarios SET password = ?, fecha_modificacion = ? WHERE id = ?",
+                        (nuevo_hash, datetime.now(), uid),
+                    )
 
-                # Actualizar último acceso
-                cursor.execute('''
-                    UPDATE usuarios SET ultimo_acceso = ?
-                    WHERE id = ?
-                ''', (datetime.now(), uid))
+                cursor.execute(
+                    "UPDATE usuarios SET ultimo_acceso = ? WHERE id = ?",
+                    (datetime.now(), uid),
+                )
                 conn.commit()
-                
-                # Flag obligatorio de cambio de contraseña si usa admin123 o tiene la columna activa
-                debe_cambiar = bool(req_cambio or (password == "admin123"))
-                
+
+                debe_cambiar = bool(req_cambio or (str(password).strip().lower() == "admin123"))
+
                 usuario_info = {
                     'id': uid,
                     'usuario': u_nom,
@@ -433,21 +499,21 @@ def obtener_usuario_por_credenciales(usuario, password):
                     'estado': estado,
                     'ultimo_acceso': u_acc,
                     'fecha_registro': f_reg,
-                    'permisos': rol.lower(),
+                    'permisos': str(rol).lower(),
                     'comision_porcentaje': com_pct if com_pct is not None else 0.0,
                     'comisiones_acumuladas': com_acum if com_acum is not None else 0.0,
-                    'requiere_cambio_password': debe_cambiar
+                    'requiere_cambio_password': debe_cambiar,
                 }
-                
+
                 conn.close()
                 return usuario_info
-        
+
         conn.close()
         return None
-        
     except Exception as e:
-        logger.error(f"Error al verificar credenciales: {e}")
+        logger.error("Error al verificar credenciales: %s", e)
         return None
+
 
 def pedir_liquidacion(id_usuario):
     """Registra la hora en que el empleado pidió liquidación."""
@@ -459,15 +525,15 @@ def pedir_liquidacion(id_usuario):
         conn.close()
         return True
     except Exception as e:
-        print(f"❌ Error al pedir liquidación: {e}")
+        logger.error("Error al pedir liquidación: %s", e)
         return False
+
 
 def liquidar_comisiones(id_usuario):
     """Pone en cero las comisiones y limpia la solicitud."""
     try:
         conn = conectar_usuarios_db()
         cursor = conn.cursor()
-        
         cursor.execute("SELECT comisiones_acumuladas FROM usuarios WHERE id = ?", (id_usuario,))
         resultado = cursor.fetchone()
         comisiones = resultado[0] if resultado else 0.0
@@ -477,72 +543,68 @@ def liquidar_comisiones(id_usuario):
         conn.close()
         return comisiones
     except Exception as e:
-        print(f"❌ Error al liquidar: {e}")
+        logger.error("Error al liquidar comisiones: %s", e)
         return 0.0
 
+
 def obtener_permisos_por_usuario(usuario_id):
-    """
-    Obtiene los permisos específicos de un usuario.
-    """
+    """Obtiene los permisos específicos de un usuario."""
     try:
         conn = conectar_usuarios_db()
         cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT modulo, permiso
-            FROM permisos
-            WHERE usuario_id = ?
-        ''', (usuario_id,))
-        
+        cursor.execute(
+            "SELECT modulo, permiso FROM permisos WHERE usuario_id = ?",
+            (usuario_id,),
+        )
         permisos = cursor.fetchall()
         conn.close()
         return permisos
-        
     except Exception as e:
-        print(f"❌ Error al obtener permisos: {e}")
+        logger.error("Error al obtener permisos: %s", e)
         return []
 
-def inicializar_admin_default():
+
+def inicializar_admin_default(forzar_legacy: bool = False):
     """
-    Crea un usuario administrador por defecto si no existe ningún administrador.
-    Si se crea por compatibilidad de fábrica con 'admin123', se marca estrictamente
-    con requiere_cambio_password = 1 para forzar la personalización en el primer inicio.
+    DESHABILITADO POR POLÍTICA DE SEGURIDAD:
+    No crea credenciales universales ('admin/admin123') en operación normal.
+    Únicamente permite aprovisionamiento automatizado si se suministra una contraseña fuerte
+    explícita en la variable de entorno VMPOS_ADMIN_PASSWORD y no existe ningún administrador,
+    o en entornos de pruebas aislados con forzar_legacy=True (marcado con requiere_cambio_password=1).
+    En instalaciones interactivas debe usarse crear_administrador_inicial().
     """
-    try:
+    if hay_administrador():
+        return False
+
+    if forzar_legacy:
         conn = conectar_usuarios_db()
         cursor = conn.cursor()
-        
-        cursor.execute("SELECT id FROM usuarios WHERE rol = 'Administrador'")
-        if not cursor.fetchone():
-            password_hash = hash_password("admin123")
-            cursor.execute('''
-                INSERT INTO usuarios (usuario, password, rol, estado, fecha_registro, fecha_modificacion, nombre, apellidos, requiere_cambio_password)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-            ''', ("admin", password_hash, "Administrador", "Activo", datetime.now(), datetime.now(), "Administrador", "Inicial"))
-            conn.commit()
-            logger.info("Usuario administrador inicial creado con cambio obligatorio: admin/admin123")
-        
+        p_hash = hash_password("admin123")
+        cursor.execute('''
+            INSERT INTO usuarios (
+                usuario, password, rol, estado, fecha_registro, fecha_modificacion,
+                nombre, apellidos, requiere_cambio_password
+            ) VALUES ('admin', ?, 'Administrador', 'Activo', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'Admin', 'Legacy', 1)
+        ''', (p_hash,))
+        conn.commit()
         conn.close()
-        
-    except Exception as e:
-        logger.error(f"Error al inicializar administrador: {e}")
+        return True
 
-def migrar_usuarios_existentes():
-    usuarios_sistema = [
-        {"usuario": "eduardo", "password": "2121", "rol": "Administrador"},
-        {"usuario": "andres", "password": "2180", "rol": "Vendedor"}
-    ]
-    
-    for user in usuarios_sistema:
-        insertar_usuario(
-            user["usuario"],
-            user["password"], 
-            user["rol"],
-            "Activo"
+    env_pwd = (os.environ.get("VMPOS_ADMIN_PASSWORD") or "").strip()
+    env_usr = (os.environ.get("VMPOS_ADMIN_USER") or "admin").strip() or "admin"
+    if not env_pwd:
+        raise RuntimeError(
+            "La creación automática de 'admin/admin123' está deshabilitada por seguridad. "
+            "Use el asistente de activación inicial (crear_administrador_inicial) "
+            "o defina VMPOS_ADMIN_PASSWORD con una contraseña segura."
         )
+    return crear_administrador_inicial(env_usr, env_pwd, nombre="Administrador", apellidos="Principal")
+
 
 if __name__ == "__main__":
-    print("🚀 Inicializando base de datos de usuarios...")
+    print("🚀 Inicializando esquema de base de datos de usuarios...")
     crear_tablas_iniciales()
-    inicializar_admin_default()
-    print("✅ Base de datos de usuarios lista.")
+    if hay_administrador():
+        print("✅ Base de datos de usuarios lista (administrador existente verificado).")
+    else:
+        print("ℹ️ Sistema sin administrador inicial. Ejecute la aplicación para completar la activación segura.")

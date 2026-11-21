@@ -233,13 +233,13 @@ def inicializar_tablas_nomina() -> bool:
                 except sqlite3.OperationalError:
                     pass
 
-            # Inicializar saldo_pendiente en ventas fiadas históricas que aún no lo tengan asignado
+            # Inicializar saldo_pendiente únicamente en ventas fiadas legadas donde sea NULL (nunca reabrir saldos ya pagados = 0.0)
             cur_v.execute("""
                 UPDATE ventas
                 SET saldo_pendiente = total_venta
                 WHERE metodo_pago = 'Fiado'
                   AND estado != 'Anulada'
-                  AND (saldo_pendiente IS NULL OR saldo_pendiente = 0.0)
+                  AND saldo_pendiente IS NULL
                   AND EXISTS (
                       SELECT 1 FROM clientes c
                       WHERE (c.cedula = ventas.documento_cliente OR CAST(c.id AS TEXT) = ventas.documento_cliente)
@@ -1191,7 +1191,7 @@ def revertir_devengos_por_venta_anulada(
                             tipo_concepto, concepto, monto, monto_pagado, referencia_origen,
                             id_venta, id_detalle_venta, tipo_item, item_nombre,
                             base_calculo, porcentaje_aplicado, estado, responsable, motivo
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'REVERSO_ANULACION', ?, ?, 0.0, ?, ?, ?, ?, ?, ?, ?, 'REVERTIDO', ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'REVERSO_ANULACION', ?, ?, 0.0, ?, ?, ?, ?, ?, ?, ?, 'Pendiente', ?, ?)
                     """, (
                         cod_rev, uid, d["usuario_nombre"], d.get("rol", ""), fecha_str, hora_str, periodo_str,
                         f"Reverso por anulación de Venta #{id_venta} ({d['concepto']})",
@@ -2167,6 +2167,7 @@ def conciliar_ventas_existentes(fecha_referencia: Optional[str] = None) -> int:
                     "id_detalle": int(d_r[0]),
                     "item_id": 0,
                     "item_tipo": tipo_p,
+                    "tipo_item": tipo_p,
                     "item_nombre": str(d_r[2] or "Ítem"),
                     "precio_vendido": float(d_r[3] or 0.0),
                     "cantidad": int(d_r[4] or 1),
@@ -2521,13 +2522,6 @@ def obtener_historial_pagos_nomina(
             params.append(fecha_inicio)
         elif fecha_fin:
             conds.append("SUBSTR(p.fecha_pago, 1, 10) <= ?")
-            params.append(fecha_fin)
-            params.extend([fecha_inicio, fecha_fin])
-        elif fecha_inicio:
-            conds.append("p.fecha_pago >= ?")
-            params.append(fecha_inicio)
-        elif fecha_fin:
-            conds.append("p.fecha_pago <= ?")
             params.append(fecha_fin)
         if usuario_id is not None:
             conds.append("p.usuario_id = ?")

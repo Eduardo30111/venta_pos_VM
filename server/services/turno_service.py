@@ -86,7 +86,13 @@ class TurnoService:
         return nuevo
 
     @staticmethod
-    async def obtener_o_crear_ciclo_hoy(db: AsyncSession, usuario_id: int, terminal_id: int = 1, orden_inicial: Optional[List[int]] = None) -> CicloTurno:
+    async def obtener_o_crear_ciclo_hoy(
+        db: AsyncSession,
+        usuario_id: int,
+        terminal_id: int = 1,
+        orden_inicial: Optional[List[int]] = None,
+        auto_commit: bool = True,
+    ) -> CicloTurno:
         hoy = date.today()
         # Buscar ciclo abierto hoy
         stmt = select(CicloTurno).where(CicloTurno.fecha == hoy, CicloTurno.estado == "Abierto")
@@ -105,8 +111,10 @@ class TurnoService:
         db.add(ciclo)
         await db.flush()
 
-        # La cola se construye de forma incremental: solo entra el operario
-        # que inició la sesión; los demás se agregan al acceder a su perfil.
+        # Respetar orden_inicial explícito si fue provisto; de lo contrario, agregar al usuario actual
+        if orden_inicial:
+            for uid in orden_inicial:
+                await TurnoService._agregar_operario_si_corresponde(db, ciclo, int(uid))
         await TurnoService._agregar_operario_si_corresponde(db, ciclo, usuario_id)
 
         # Registrar evento de inicio de ciclo
@@ -121,8 +129,11 @@ class TurnoService:
             terminal_id=terminal_id
         ))
 
-        await db.commit()
-        await db.refresh(ciclo)
+        if auto_commit:
+            await db.commit()
+            await db.refresh(ciclo)
+        else:
+            await db.flush()
         return ciclo
 
     @staticmethod
@@ -141,9 +152,10 @@ class TurnoService:
             if usuario and TurnoService._es_operario(usuario):
                 ciclo = await TurnoService.obtener_o_crear_ciclo_hoy(db, usuario_id=usuario_id)
 
-        if usuario_id:
-            await TurnoService._agregar_operario_si_corresponde(db, ciclo, usuario_id)
-            await db.commit()
+        if ciclo and usuario_id:
+            agregado = await TurnoService._agregar_operario_si_corresponde(db, ciclo, usuario_id)
+            if agregado is not None:
+                await db.commit()
 
         ahora_utc = datetime.now(timezone.utc)
 
@@ -310,7 +322,9 @@ class TurnoService:
         stmt = select(CicloTurno).where(CicloTurno.fecha == hoy, CicloTurno.estado == "Abierto")
         ciclo = (await db.execute(stmt)).scalars().first()
         if not ciclo:
-            ciclo = await TurnoService.obtener_o_crear_ciclo_hoy(db, usuario_id, terminal_id)
+            ciclo = await TurnoService.obtener_o_crear_ciclo_hoy(
+                db, usuario_id, terminal_id, auto_commit=False
+            )
 
         # 3. Bloquear la cola para este ciclo con row-level lock (with_for_update)
         q_stmt = select(ColaTurno).join(Usuario, ColaTurno.usuario_id == Usuario.id).where(
@@ -445,8 +459,9 @@ class TurnoService:
             # TURNO ESPECIAL:
             # REGLA FUNDAMENTAL: NO altera ni avanza la cola normal.
             # El operario que estaba EN_TURNO sigue EN_TURNO.
-            # El operario que atendió turno especial conserva su estado DISPONIBLE u OCUPADO.
-            if op_item.estado not in ["ALMUERZO", "PAUSADO"]:
+            # El operario que atendió turno especial conserva su estado actual (EN_TURNO/DISPONIBLE/OCUPADO/etc.).
+            estado_previo_esp = op_item.estado
+            if op_item.estado not in ["EN_TURNO", "DISPONIBLE", "OCUPADO", "ALMUERZO", "PAUSADO"]:
                 op_item.estado = "DISPONIBLE"
 
             db.add(EventoTurno(
@@ -456,7 +471,7 @@ class TurnoService:
                 tipo_evento="TURNO_ESPECIAL",
                 posicion_anterior=op_item.posicion,
                 posicion_nueva=op_item.posicion,
-                estado_anterior=op_item.estado,
+                estado_anterior=estado_previo_esp,
                 estado_nuevo=op_item.estado,
                 motivo=motivo_especial or f"Atención turno especial por solicitud de cliente (Venta {venta.numero})",
                 terminal_id=terminal_id
@@ -474,7 +489,9 @@ class TurnoService:
         stmt = select(CicloTurno).where(CicloTurno.fecha == hoy, CicloTurno.estado == "Abierto")
         ciclo = (await db.execute(stmt)).scalars().first()
         if not ciclo:
-            ciclo = await TurnoService.obtener_o_crear_ciclo_hoy(db, usuario_id, terminal_id)
+            ciclo = await TurnoService.obtener_o_crear_ciclo_hoy(
+                db, usuario_id, terminal_id, auto_commit=False
+            )
 
         # Bloquear cola con lock pesimista
         q_stmt = select(ColaTurno).join(Usuario, ColaTurno.usuario_id == Usuario.id).where(
@@ -730,7 +747,7 @@ class TurnoService:
         for offset in range(1, total_ops + 1):
             cand_pos = ((op_item.posicion - 1 + offset) % total_ops) + 1
             cand = next((c for c in cola_items if c.posicion == cand_pos), None)
-            if cand and cand.id != op_item.id and cand.estado not in ["ALMUERZO", "PAUSADO"]:
+            if cand and cand.id != op_item.id and cand.estado not in ["ALMUERZO", "PAUSADO", "OCUPADO"]:
                 siguiente_op = cand
                 break
 

@@ -1,0 +1,20 @@
+{
+    "nombre_negocio": "VmPOS",
+    "razon_social": "",
+    "subtitulo_negocio": "Sistema de Punto de Venta Profesional",
+    "tipo_documento_fiscal": "NIT",
+    "nit": "",
+    "regimen_fiscal": "",
+    "direccion": "",
+    "ciudad": "",
+    "telefono": "",
+    "email": "",
+    "eslogan": "¡Gracias por su compra!",
+    "encabezado_recibo": "",
+    "tipo_comprobante": "FACTURA DE VENTA POS",
+    "prefijo_comprobante": "",
+    "color_barra": "#0284C7",
+    "color_login": "#1E40AF",
+    "logo_path": "",
+    "logo_thermal_path": ""
+}

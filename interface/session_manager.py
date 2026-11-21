@@ -234,23 +234,30 @@ class SessionManager:
         """
         self.sesion_activa = False
 
-        # Invalidar autenticación
+        # 1. Revocar token en servidor y limpiar token.json en disco + variables de entorno
         if api:
-            api.token = None
+            try:
+                if hasattr(api, "logout"):
+                    api.logout()
+                elif hasattr(api, "clear_token"):
+                    api.clear_token()
+                else:
+                    api.token = None
+            except Exception:
+                api.token = None
         for env_k in ["VMPOS_TOKEN", "VMPOS_USUARIO", "VMPOS_ROL", "VMPOS_USER_ID"]:
             os.environ.pop(env_k, None)
 
-        # Cerrar ventanas modales / Toplevels
+        # 2. Cancelar temporizadores ANTES de destruir ventanas (evita callbacks huérfanos TclError)
+        self.cancelar_timers(root_window)
+
+        # 3. Cerrar ventanas modales / Toplevels
         self.cerrar_todas_las_ventanas()
 
-        # Terminar subprocesos hijos de la sesión
+        # 4. Terminar subprocesos hijos de la sesión
         self.terminar_subprocesos(timeout=1.5)
 
-        # Cancelar temporizadores
-        if root_window:
-            self.cancelar_timers(root_window)
-
-        # Destruir ventana raíz
+        # 5. Destruir ventana raíz
         if root_window:
             try:
                 if root_window.winfo_exists():
@@ -258,13 +265,16 @@ class SessionManager:
             except Exception as e:
                 print(f"Aviso destruyendo ventana principal: {e}")
 
-        # Lanzar pantalla de login limpia
+        # 6. Lanzar pantalla de login limpia (compatible con PyInstaller frozen y ejecución por script)
         if lanzar_login:
             try:
-                base_dir = os.path.dirname(os.path.abspath(__file__))
-                login_script = os.path.join(base_dir, "inicio_sesion.py")
-                if os.path.exists(login_script):
-                    subprocess.Popen([sys.executable, login_script])
+                if getattr(sys, "frozen", False):
+                    subprocess.Popen([sys.executable])
+                else:
+                    base_dir = os.path.dirname(os.path.abspath(__file__))
+                    login_script = os.path.join(base_dir, "inicio_sesion.py")
+                    if os.path.exists(login_script):
+                        subprocess.Popen([sys.executable, login_script])
             except Exception as e:
                 print(f"Error relanzando inicio de sesión: {e}")
 
@@ -303,5 +313,7 @@ class SessionManager:
             pass
 
 
-# Instancia singleton global
+# Instancia singleton global unificada bajo ambos nombres de módulo
 session_mgr = SessionManager()
+sys.modules.setdefault("session_manager", sys.modules[__name__])
+sys.modules.setdefault("interface.session_manager", sys.modules[__name__])

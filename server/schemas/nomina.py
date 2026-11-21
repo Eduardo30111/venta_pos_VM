@@ -39,6 +39,8 @@ class LiquidacionCreate(BaseModel):
     periodo_inicio: Optional[datetime] = None
     periodo_fin: Optional[datetime] = None
     observaciones: Optional[str] = None
+    metodo_pago: Optional[str] = "Efectivo"
+    sesion_caja_id: Optional[int] = None
     idempotency_key: Optional[str] = None
 
 class LiquidacionResponse(BaseModel):
@@ -50,6 +52,7 @@ class LiquidacionResponse(BaseModel):
     total_comisiones: float
     total_salario_fijo: float
     total_liquidado: float
+    metodo_pago: Optional[str] = "Efectivo"
     estado: str
     observaciones: Optional[str] = None
     created_at: datetime

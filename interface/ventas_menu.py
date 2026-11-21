@@ -98,7 +98,6 @@ def guardar_venta_sqlite(
                 sesion_id = abrir_sesion_caja(
                     usuario=operario_nombre or "Administrador",
                     monto_inicial=0.0,
-                    observaciones="Apertura automática de seguridad por venta",
                     conn=conn
                 )
             except Exception:
@@ -4434,7 +4433,16 @@ class App:
                         "pagos": pagos,
                         "recibido": recibido_payload,
                         "cambio": cambio_payload,
-                        "saldo_pendiente": float(total) if str(metodo_pago) == "Fiado" else 0.0,
+                        "saldo_pendiente": round(
+                            sum(
+                                float(p.get("monto") or 0.0)
+                                for p in (pagos or [])
+                                if str(p.get("metodo") or "").strip().lower() == "fiado"
+                            ),
+                            2,
+                        )
+                        if pagos
+                        else (float(total) if str(metodo_pago) == "Fiado" else 0.0),
                         "vendedor": operario_nombre,
                         "snapshot_negocio": snapshot_actual,
                     }

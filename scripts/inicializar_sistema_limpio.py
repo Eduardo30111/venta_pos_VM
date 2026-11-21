@@ -5,20 +5,17 @@ Archivo: scripts/inicializar_sistema_limpio.py
 Inicializador de base de datos de producción limpia para VmPOS.
 - Elimina cualquier dato de prueba o demostración.
 - Genera esquema completo y canónico de base de datos.
-- Crea el usuario Administrador único: 'admin' / 'admin123' con cambio forzado.
+- No crea credenciales predeterminadas: requiere activación inicial segura
+  o aprovisionamiento explícito mediante VMPOS_ADMIN_PASSWORD (con hash bcrypt).
 """
 
 import os
 import sys
 import sqlite3
-import hashlib
-from datetime import datetime
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _PROJECT_ROOT)
 
-def hash_pass(p: str) -> str:
-    return hashlib.sha256(p.encode("utf-8")).hexdigest()
 
 def inicializar_limpio():
     print("=" * 70)
@@ -43,33 +40,29 @@ def inicializar_limpio():
     # 2. Base de datos de Usuarios
     print(f"[*] Inicializando base de datos de usuarios en {usuarios_db_path}...")
     try:
-        from interface.usuarios_db import crear_tablas_iniciales
+        from interface.usuarios_db import crear_tablas_iniciales, crear_administrador_inicial
         crear_tablas_iniciales()
 
         conn_u = sqlite3.connect(usuarios_db_path)
         cur_u = conn_u.cursor()
-
-        # Limpiar usuarios anteriores y dejar únicamente el administrador inicial
         cur_u.execute("DELETE FROM usuarios")
-        cur_u.execute("""
-            INSERT INTO usuarios (
-                usuario, password, rol, estado, nombre, apellidos,
-                fecha_registro, fecha_modificacion, debe_cambiar_password
-            )
-            VALUES (?, ?, 'Administrador', 'Activo', 'Administrador', 'Principal', ?, ?, 1)
-        """, ("admin", hash_pass("admin123"), datetime.now(), datetime.now()))
-
         conn_u.commit()
         conn_u.close()
-        print("  -> Usuario único 'admin' creado con contraseña inicial 'admin123' (Cambio forzado en primer acceso).")
+
+        env_admin_pwd = (os.environ.get("VMPOS_ADMIN_PASSWORD") or "").strip()
+        env_admin_user = (os.environ.get("VMPOS_ADMIN_USER") or "admin").strip()
+        if env_admin_pwd:
+            crear_administrador_inicial(env_admin_user, env_admin_pwd, nombre="Administrador Principal")
+            print(f"  -> Administrador '{env_admin_user}' aprovisionado de forma segura (bcrypt) desde VMPOS_ADMIN_PASSWORD.")
+        else:
+            print("  -> Base de usuarios limpia y sin credenciales predeterminadas.")
+            print("  -> En el primer inicio de VmPOS se abrirá el asistente de activación del Administrador Maestro.")
     except Exception as e:
         print(f"  ❌ Error inicializando usuarios_db: {e}")
 
     print("=" * 70)
     print(" INSTALACIÓN LIMPIA COMPLETADA EXITOSAMENTE")
-    print(" Credenciales de acceso:")
-    print("   Usuario:     admin")
-    print("   Contraseña:  admin123")
+    print(" Seguridad: Sin contraseñas predeterminadas ni usuarios genéricos.")
     print("=" * 70)
 
 if __name__ == "__main__":

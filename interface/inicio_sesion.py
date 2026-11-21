@@ -175,33 +175,65 @@ def abrir_modal_cambio_password_obligatorio(parent, datos_usuario, on_success):
     def confirmar_cambio():
         p1 = pass1_var.get().strip()
         p2 = pass2_var.get().strip()
-        if len(p1) < 6:
-            messagebox.showerror("Contraseña Débil", "La nueva contraseña debe tener al menos 6 caracteres.", parent=modal)
+        try:
+            try:
+                from interface.usuarios_db import validar_password_fuerte, actualizar_usuario_db
+            except ImportError:
+                from usuarios_db import validar_password_fuerte, actualizar_usuario_db
+        except Exception as e_imp:
+            messagebox.showerror("Error Interno", f"No se pudo cargar el validador de seguridad: {e_imp}", parent=modal)
             return
-        if p1 == "admin123":
-            messagebox.showerror("Contraseña Insegura", "No puedes usar la contraseña por defecto. Elige una contraseña diferente.", parent=modal)
+
+        ok_pwd, msg_pwd = validar_password_fuerte(p1)
+        if not ok_pwd:
+            messagebox.showerror("Contraseña Insegura", msg_pwd, parent=modal)
             return
         if p1 != p2:
             messagebox.showerror("Contraseñas no coinciden", "Las contraseñas ingresadas no coinciden. Verifícalas.", parent=modal)
             return
 
         uid = datos_usuario.get("id", 1)
-        # Actualizar en API
-        try:
-            api.put(f"/usuarios/{uid}", json={"password": p1})
-        except Exception:
-            pass
+        actualizado_api = False
+        actualizado_local = False
+        error_api = None
 
-        # Actualizar en SQLite
-        try:
+        # 1. Actualizar en API si hay sesión activa con token
+        if getattr(api, "token", None):
             try:
-                from interface.usuarios_db import actualizar_usuario_db
-            except ImportError:
-                from usuarios_db import actualizar_usuario_db
-            actualizar_usuario_db(uid, password=p1)
+                clave_actual = pass_var.get().strip()
+                resp_cp = api.post("/auth/change-password", json={
+                    "current_password": clave_actual,
+                    "new_password": p1,
+                })
+                if resp_cp.status_code == 200:
+                    actualizado_api = True
+                else:
+                    try:
+                        det = resp_cp.json().get("detail", resp_cp.text)
+                    except Exception:
+                        det = getattr(resp_cp, "text", f"HTTP {resp_cp.status_code}")
+                    error_api = f"El servidor rechazó el cambio de contraseña ({resp_cp.status_code}): {det}"
+            except Exception as e_api:
+                error_api = f"No se pudo comunicar el cambio al servidor: {e_api}"
+
+        # Si estamos autenticados por API y falló la actualización remota, NO continuar
+        if getattr(api, "token", None) and not actualizado_api:
+            messagebox.showerror("Error en Servidor", error_api or "No se pudo confirmar el cambio de contraseña en el servidor.", parent=modal)
+            return
+
+        # 2. Actualizar en SQLite local (mantener consistencia en modo servidor / local)
+        try:
+            if actualizar_usuario_db(uid, password=p1, requiere_cambio_password=0):
+                actualizado_local = True
         except Exception as e_sql:
             print(f"Aviso actualizando SQLite de usuarios: {e_sql}")
 
+        if not actualizado_api and not actualizado_local:
+            messagebox.showerror("Error", "No se pudo guardar la nueva contraseña. Intente nuevamente.", parent=modal)
+            return
+
+        datos_usuario["requiere_cambio_password"] = False
+        pass_var.set(p1)
         messagebox.showinfo("Éxito", "Contraseña personalizada establecida correctamente.\n¡Bienvenido a VmPOS!", parent=modal)
         modal.destroy()
         on_success()
@@ -266,26 +298,41 @@ def abrir_modal_activacion_primer_administrador(parent, on_success=None):
         if len(usr) < 3:
             messagebox.showerror("Usuario Inválido", "El nombre de usuario debe tener al menos 3 caracteres.", parent=modal)
             return
-        if len(pw1) < 6:
-            messagebox.showerror("Contraseña Débil", "La contraseña debe tener al menos 6 caracteres.", parent=modal)
+        try:
+            try:
+                from interface.usuarios_db import crear_administrador_inicial, validar_password_fuerte
+            except ImportError:
+                from usuarios_db import crear_administrador_inicial, validar_password_fuerte
+        except Exception as e_imp:
+            messagebox.showerror("Error Interno", f"No se pudo cargar la librería de usuarios: {e_imp}", parent=modal)
             return
-        if pw1.lower() in ("admin123", "123456", "admin", "password", "12345678"):
-            messagebox.showerror("Contraseña Insegura", "No puedes usar contraseñas comunes ni predeterminadas. Elige una clave segura.", parent=modal)
+
+        ok_pwd, msg_pwd = validar_password_fuerte(pw1)
+        if not ok_pwd:
+            messagebox.showerror("Contraseña Insegura", msg_pwd, parent=modal)
             return
         if pw1 != pw2:
             messagebox.showerror("Contraseñas no coinciden", "Las contraseñas ingresadas no coinciden.", parent=modal)
             return
 
+        # 1. Provisionar en SQLite local (operación estrictamente única con bloqueo BEGIN IMMEDIATE)
         try:
-            try:
-                from interface.usuarios_db import crear_administrador_inicial
-            except ImportError:
-                from usuarios_db import crear_administrador_inicial
-
             crear_administrador_inicial(usr, pw1, nombre=nom)
         except Exception as e_reg:
             messagebox.showerror("Error al Crear Administrador", str(e_reg), parent=modal)
             return
+
+        # 2. Provisionar también en el servidor central si está accesible (endpoint one-time)
+        try:
+            resp_bs = api.post("/auth/bootstrap-admin", json={
+                "usuario": usr,
+                "password": pw1,
+                "nombre": nom,
+            })
+            if resp_bs.status_code not in (200, 201, 403):
+                print(f"Aviso bootstrap-admin servidor ({resp_bs.status_code}): {resp_bs.text}")
+        except Exception as e_bs:
+            print(f"Aviso sincronizando bootstrap-admin con servidor: {e_bs}")
 
         usuario_var.set(usr)
         pass_var.set(pw1)
@@ -408,13 +455,15 @@ def validar_usuario(event=None):
                 
                 u_local = obtener_usuario_por_credenciales(usuario, clave)
                 if u_local:
+                    rol_local = str(u_local.get("rol") or "Operario")
+                    perm_default = "administrador" if rol_local.strip().lower() in ("administrador", "admin", "gerente") else "operario"
                     datos_usuario = {
                         "id": u_local["id"],
                         "usuario": u_local["usuario"],
                         "nombre": u_local.get("nombre") or u_local["usuario"],
-                        "rol": u_local["rol"],
-                        "permisos": u_local.get("permisos", "administrador"),
-                        "requiere_cambio_password": u_local.get("requiere_cambio_password", False)
+                        "rol": rol_local,
+                        "permisos": u_local.get("permisos") or perm_default,
+                        "requiere_cambio_password": bool(u_local.get("requiere_cambio_password", False))
                     }
                     usuario_actual = datos_usuario["nombre"].capitalize()
                     mostrar_alerta_bonita(
@@ -777,16 +826,38 @@ def _autoarrancar_o_sincronizar_red():
 threading.Thread(target=_autoarrancar_o_sincronizar_red, daemon=True).start()
 
 if __name__ == "__main__":
+    # Verificación fail-closed de activación inicial (solo en nodo servidor / standalone)
     try:
         try:
-            from interface.usuarios_db import hay_administrador, crear_tablas_iniciales
+            from interface.network_manager import obtener_config_red
         except ImportError:
-            from usuarios_db import hay_administrador, crear_tablas_iniciales
-        crear_tablas_iniciales()
-        if not hay_administrador():
-            ventana.after(350, lambda: abrir_modal_activacion_primer_administrador(ventana))
-    except Exception as e_act:
-        print(f"Aviso verificando activación inicial: {e_act}")
+            from network_manager import obtener_config_red
+        _cfg_red_init = obtener_config_red()
+        _modo_red_init = str(_cfg_red_init.get("modo", "servidor")).strip().lower()
+    except Exception:
+        _modo_red_init = "servidor"
+
+    if _modo_red_init != "cliente":
+        try:
+            try:
+                from interface.usuarios_db import hay_administrador, crear_tablas_iniciales
+            except ImportError:
+                from usuarios_db import hay_administrador, crear_tablas_iniciales
+            crear_tablas_iniciales()
+            if not hay_administrador():
+                ventana.after(350, lambda: abrir_modal_activacion_primer_administrador(ventana))
+        except Exception as e_act:
+            # Fail-closed: ante fallo de base de datos, informar error explícito y NUNCA abrir activación
+            print(f"ERROR CRÍTICO verificando base de datos de usuarios: {e_act}")
+            ventana.after(
+                350,
+                lambda msg=str(e_act): messagebox.showerror(
+                    "Error de Base de Datos de Usuarios",
+                    f"No fue posible verificar la integridad de la base de datos de usuarios.\n\n"
+                    f"Detalle: {msg}\n\n"
+                    f"Por seguridad, la activación inicial permanece bloqueada hasta restaurar la base de datos."
+                ),
+            )
 
     if sys.platform == "darwin":
         try:

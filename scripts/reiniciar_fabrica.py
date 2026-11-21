@@ -3,9 +3,8 @@
 """
 Script de Restauración de Fábrica para VmPOS.
 Limpia todas las ventas de prueba, clientes de prueba, compras, deudas, abonos y sesiones de caja,
-dejando el sistema 100% limpio como nuevo de fábrica con el usuario administrador por defecto:
-- Usuario: admin
-- Contraseña: admin123
+dejando el sistema 100% limpio como nuevo de fábrica listo para el proceso de activación inicial segura
+(o aprovisionando un administrador inicial únicamente si se provee VMPOS_ADMIN_PASSWORD por entorno).
 """
 
 import os
@@ -95,23 +94,20 @@ if os.path.exists(usuarios_db):
             pass
 
     try:
-        # Eliminar todos los usuarios excepto 'admin'
-        cur.execute("DELETE FROM usuarios WHERE usuario != 'admin';")
-        # Asegurar usuario admin
-        cur.execute("SELECT id FROM usuarios WHERE usuario = 'admin';")
-        row = cur.fetchone()
-        if not row:
-            cur.execute("""
-                INSERT INTO usuarios (usuario, password, rol, estado, nombre)
-                VALUES ('admin', 'admin123', 'Administrador', 'Activo', 'Administrador');
-            """)
-            print("  ✓ Creado usuario administrador predeterminado (admin / admin123)")
+        # Limpiar usuarios existentes para obligar a la activación inicial segura sin credenciales universales
+        cur.execute("DELETE FROM usuarios;")
+        conn.commit()
+        env_admin_pwd = (os.environ.get("VMPOS_ADMIN_PASSWORD") or "").strip()
+        env_admin_user = (os.environ.get("VMPOS_ADMIN_USER") or "admin").strip()
+        if env_admin_pwd:
+            sys.path.insert(0, PROJECT_ROOT)
+            from interface.usuarios_db import crear_administrador_inicial
+            conn.close()
+            crear_administrador_inicial(env_admin_user, env_admin_pwd, nombre="Administrador")
+            conn = sqlite3.connect(usuarios_db)
+            print(f"  ✓ Administrador '{env_admin_user}' creado con hash bcrypt desde VMPOS_ADMIN_PASSWORD.")
         else:
-            cur.execute("""
-                UPDATE usuarios SET password = 'admin123', rol = 'Administrador', estado = 'Activo'
-                WHERE usuario = 'admin';
-            """)
-            print("  ✓ Usuario 'admin' restablecido con contraseña: admin123")
+            print("  ✓ Tabla de usuarios vaciada. Al iniciar VmPOS se solicitará crear el Administrador Maestro.")
     except Exception as e:
         print(f"  ⚠️ Error en usuarios: {e}")
 
@@ -131,6 +127,6 @@ print("\n[3/3] network_config.json restablecido a Servidor Local (127.0.0.1:8000
 
 print("\n" + "=" * 70)
 print("  🎉 ¡RESTAURACIÓN DE FÁBRICA COMPLETADA CON ÉXITO!")
-print("  El sistema está limpio como recién instalado.")
-print("  Usuario: admin | Contraseña: admin123")
+print("  El sistema está limpio y sin contraseñas predeterminadas.")
+print("  Inicie VmPOS para ejecutar el asistente de activación del Administrador.")
 print("=" * 70)

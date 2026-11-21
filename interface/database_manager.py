@@ -40,11 +40,8 @@ def _safe_update(cursor, sql: str, desc: str = ""):
     try:
         cursor.execute(sql)
     except Exception as e:
-        msg = str(e).lower()
-        if "no such table" in msg or "database is locked" in msg or "disk i/o error" in msg or "malformed" in msg:
-            logger.critical("Error fatal en UPDATE de migración SQLite (%s): %s", desc or sql[:50], e)
-            raise RuntimeError(f"Fallo crítico en UPDATE SQLite ({desc}): {e}") from e
-        logger.warning("Aviso UPDATE en SQLite (%s): %s", desc or sql[:50], e)
+        logger.critical("Error fatal en UPDATE de migración SQLite (%s): %s", desc or sql[:50], e)
+        raise RuntimeError(f"Fallo crítico en UPDATE SQLite ({desc}): {e}") from e
 
 def conectar_db(db_path=None):
     """
@@ -574,11 +571,11 @@ def inicializar_base_datos(db_path=None):
             "movimientos_caja", "movimientos_financieros"
         ]:
             _safe_alter_column(cursor, f"ALTER TABLE {tabla_idem} ADD COLUMN idempotency_key TEXT", f"{tabla_idem}.idempotency_key")
-            try:
-                cursor.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{tabla_idem}_idempotency_key ON {tabla_idem}(idempotency_key)")
-            except Exception as e_idx:
-                if "already exists" not in str(e_idx).lower():
-                    logger.warning("Aviso creando índice uq_%s_idempotency_key: %s", tabla_idem, e_idx)
+            _safe_alter_column(
+                cursor,
+                f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{tabla_idem}_idempotency_key ON {tabla_idem}(idempotency_key)",
+                f"uq_{tabla_idem}_idempotency_key",
+            )
 
         # 23. Tabla de Cola de Sincronización Offline Persistente
         cursor.execute("""
@@ -693,21 +690,26 @@ def inicializar_base_datos(db_path=None):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_pagos_venta_id ON pagos_venta(id_venta)")
 
         conn.commit()
+        conn.close()
+        conn = None
 
         # Migración y sincronización exhaustiva de columnas para compatibilidad absoluta
         try:
             from server.database import asegurar_migraciones_sqlite
-            asegurar_migraciones_sqlite(f"sqlite:///{DB_VENTAS_PATH}")
-        except Exception as e_mig_sqlite:
-            logger.warning("Aviso sincronizando migraciones adicionales SQLite en database_manager: %s", e_mig_sqlite)
+        except ImportError:
+            asegurar_migraciones_sqlite = None
+
+        if asegurar_migraciones_sqlite is not None:
+            asegurar_migraciones_sqlite(f"sqlite:///{os.path.abspath(db_path)}")
 
         print("✅ Base de datos ventas.db inicializada correctamente.")
         return True
     except Exception as e:
-        print(f"❌ Error al crear tablas en ventas.db: {e}")
-        return False
+        logger.critical("Error fatal al crear/migrar tablas en %s: %s", db_path, e)
+        raise RuntimeError(f"Error fatal inicializando base de datos ({db_path}): {e}") from e
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 if __name__ == "__main__":
     inicializar_base_datos()

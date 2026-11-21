@@ -30,6 +30,7 @@ class Liquidacion(Base):
     total_salario_fijo = Column(Float, nullable=False)
     total_liquidado = Column(Float, nullable=False)
     estado = Column(String, default="Pendiente") # Pendiente/Liquidado/Anulado
+    metodo_pago = Column(String, default="Efectivo") # Efectivo/Transferencia
     liquidado_por = Column(Integer, ForeignKey("usuarios.id"), nullable=True)
     observaciones = Column(String, nullable=True)
     idempotency_key = Column(String, unique=True, index=True, nullable=True)
@@ -43,5 +44,6 @@ class Asistencia(Base):
     estado = Column(String, nullable=False) # Presente/Ausente/Permiso
     registrado_por = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
     salario_generado = Column(Float, default=0.0)
+    liquidacion_id = Column(Integer, ForeignKey("liquidaciones.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (UniqueConstraint('usuario_id', 'fecha', name='_usuario_fecha_uc'),)

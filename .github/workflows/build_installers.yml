@@ -7,7 +7,7 @@ on:
     tags: [ "v*" ]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test-and-verify:
@@ -27,9 +27,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install httpx pydantic pydantic_settings fastapi uvicorn "sqlalchemy[asyncio]" greenlet aiosqlite asyncpg "python-jose[cryptography]" bcrypt python-multipart reportlab pillow
 
-      - name: Ejecutar pruebas unitarias de backend e integridad
+      - name: Ejecutar suite completa de pruebas de backend, seguridad, E2E y respaldo
         run: |
-          python -m unittest tests/test_idempotencia_global.py tests/test_seguridad_rehash.py tests/test_proveedor_phantom_balance.py tests/test_compra_ajuste_stock.py tests/test_auditoria_idempotencia_exhaustiva.py tests/test_seguridad_usuarios_db.py tests/test_seguridad_activacion_admin.py tests/test_migraciones_excepciones.py
+          python -m unittest tests/test_idempotencia_global.py tests/test_seguridad_rehash.py tests/test_proveedor_phantom_balance.py tests/test_compra_ajuste_stock.py tests/test_auditoria_idempotencia_exhaustiva.py tests/test_seguridad_usuarios_db.py tests/test_seguridad_activacion_admin.py tests/test_migraciones_excepciones.py tests/test_escenarios_empresariales_e2e.py tests/test_seguridad_rbac_y_auditoria.py tests/test_backup_y_restauracion.py
 
   build-macos:
     name: Compilar Instalador macOS (.dmg y .zip)
@@ -54,13 +54,20 @@ jobs:
           export PYTHON="$(which python3)"
           bash packaging/build_macos.sh
 
+      - name: Verificar artefactos generados en macOS
+        run: |
+          test -s dist/VmPOS_macOS_Instalador.dmg
+          test -s dist/VmPOS_macOS.zip
+          ls -lh dist/VmPOS_macOS_Instalador.dmg dist/VmPOS_macOS.zip
+
       - name: Subir artefactos de macOS a GitHub Actions
         uses: actions/upload-artifact@v4
         with:
           name: VmPOS-macOS-Instalador
+          if-no-files-found: error
           path: |
-            dist/*.dmg
-            dist/*.zip
+            dist/VmPOS_macOS_Instalador.dmg
+            dist/VmPOS_macOS.zip
 
   build-windows:
     name: Compilar Instalador Windows (.exe)
@@ -97,23 +104,26 @@ jobs:
           name: windows-build-log
           path: build.log
 
-      - name: Comprimir versión portable Windows
+      - name: Verificar artefactos generados en Windows
         shell: pwsh
         run: |
-          if (Test-Path "dist/VmPOS") {
-            Compress-Archive -Path "dist/VmPOS\*" -DestinationPath "dist/VmPOS_Windows_Portable.zip" -Force
-          }
+          if (-not (Test-Path "dist/VmPOS_Setup_v4.1.2.exe")) { throw "Falta dist/VmPOS_Setup_v4.1.2.exe" }
+          if (-not (Test-Path "dist/VmPOS_Windows_Portable.zip")) { throw "Falta dist/VmPOS_Windows_Portable.zip" }
+          Get-Item dist/VmPOS_Setup_v4.1.2.exe, dist/VmPOS_Windows_Portable.zip | Select-Object Name, Length
 
       - name: Subir artefactos de Windows a GitHub Actions
         uses: actions/upload-artifact@v4
         with:
           name: VmPOS-Windows-Instalador
+          if-no-files-found: error
           path: |
-            dist/*.exe
-            dist/*.zip
+            dist/VmPOS_Setup_v4.1.2.exe
+            dist/VmPOS_Windows_Portable.zip
 
   publish-release:
     name: Publicar Release Oficial en GitHub
+    permissions:
+      contents: write
     needs: [test-and-verify, build-macos, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest

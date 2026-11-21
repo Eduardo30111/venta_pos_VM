@@ -62,6 +62,8 @@ print("\n[1.5/4] Verificando importacion de todos los modulos principales...")
 MODULOS_VERIFICAR = [
     "interface.config",
     "interface.business_manager",
+    "interface.backup_manager",
+    "interface.sync_manager",
     "interface.network_manager",
     "interface.network_dialog",
     "interface.receipt_manager",
@@ -129,23 +131,37 @@ if os.path.exists(old_spec):
     except Exception as e:
         print(f"  [AVISO] Aviso spec: {e}")
 
-# 3. Compilación con PyInstaller
+# 3. Compilación con PyInstaller (staging limpio SIN bases reales ni secretos)
 print("\n[3/4] Compilando VmPOS.exe con PyInstaller...")
 
 sep = ";" if sys.platform.startswith("win") else ":"
 
+stage_config = os.path.join(PROJECT_ROOT, "build", "stage_config")
+stage_database = os.path.join(PROJECT_ROOT, "build", "stage_database")
+os.makedirs(stage_config, exist_ok=True)
+os.makedirs(stage_database, exist_ok=True)
+
+for cfg_tpl in (
+    "printer_config.json",
+    "theme_config.json",
+    "barcode_label_config.json",
+    "business_config.example.json",
+):
+    src_tpl = os.path.join(PROJECT_ROOT, "config", cfg_tpl)
+    if os.path.isfile(src_tpl):
+        shutil.copy2(src_tpl, os.path.join(stage_config, cfg_tpl))
+
+with open(os.path.join(stage_database, ".keep"), "w", encoding="utf-8") as kf:
+    kf.write("")
+
 add_data = [
     f"assets{sep}assets",
-    f"config{sep}config",
-    f"database{sep}database",
+    f"{stage_config}{sep}config",
+    f"{stage_database}{sep}database",
     f"interface{sep}interface",
     f"client{sep}client",
     f"server{sep}server",
 ]
-
-net_config = os.path.join(PROJECT_ROOT, "network_config.json")
-if os.path.exists(net_config):
-    add_data.append(f"network_config.json{sep}.")
 
 hidden_imports = [
     "reportlab",
@@ -179,6 +195,8 @@ hidden_imports = [
     "server.routers.configuracion",
     "interface.config",
     "interface.business_manager",
+    "interface.backup_manager",
+    "interface.sync_manager",
     "interface.network_manager",
     "interface.network_dialog",
     "interface.receipt_manager",
@@ -350,18 +368,42 @@ else:
     print(f"\n[ERROR] No se encontro el ejecutable en: {bin_test_path}")
     sys.exit(1)
 
+# Auditoría post-compilación: asegurar CERO archivos sensibles/DBs dentro de dist/VmPOS
+vmpos_dist_dir = os.path.join(PROJECT_ROOT, "dist", "VmPOS")
+archivos_prohibidos = []
+for root_d, dirs_d, files_d in os.walk(vmpos_dist_dir):
+    if os.path.basename(root_d) == "logos" and os.path.basename(os.path.dirname(root_d)) == "assets":
+        shutil.rmtree(root_d, ignore_errors=True)
+        continue
+    for fn in files_d:
+        fl = fn.lower()
+        if fl.endswith((".db", ".db-wal", ".db-shm", ".key")) or fl in ("token.json", "business_config.json"):
+            full_p = os.path.join(root_d, fn)
+            try:
+                os.remove(full_p)
+            except Exception:
+                archivos_prohibidos.append(full_p)
+if archivos_prohibidos:
+    print(f"\n[ERROR] Archivos sensibles detectados en dist/VmPOS: {archivos_prohibidos}")
+    sys.exit(1)
+
 # Generar archivo comprimido ZIP para distribución directa
 print("\n[4/4] Generando paquete ZIP distribuible...")
-zip_target = os.path.join(PROJECT_ROOT, "dist", "VmPOS_Windows")
-vmpos_dist_dir = os.path.join(PROJECT_ROOT, "dist", "VmPOS")
+zip_target = os.path.join(PROJECT_ROOT, "dist", "VmPOS_Windows_Portable")
+zip_final_path = f"{zip_target}.zip"
+if os.path.exists(zip_final_path):
+    os.remove(zip_final_path)
 if os.path.exists(vmpos_dist_dir):
     try:
         shutil.make_archive(zip_target, 'zip', vmpos_dist_dir)
-        print(f"[OK] Paquete ZIP creado en: {zip_target}.zip")
+        if not os.path.isfile(zip_final_path) or os.path.getsize(zip_final_path) == 0:
+            raise RuntimeError("El archivo ZIP portable quedó vacío o no se creó.")
+        print(f"[OK] Paquete ZIP creado en: {zip_final_path}")
     except Exception as e:
-        print(f"[AVISO] Error al comprimir ZIP: {e}")
+        print(f"[ERROR] Error crítico al comprimir ZIP portable: {e}")
+        sys.exit(1)
 
-# Verificar si Inno Setup está disponible para crear el instalador VmPOS_Setup_v4.0.exe
+# Verificar si Inno Setup está disponible para crear el instalador VmPOS_Setup_v4.1.2.exe
 iscc_candidates = [
     r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     r"C:\Program Files\Inno Setup 6\ISCC.exe",
@@ -376,22 +418,28 @@ iscc_candidates = [
 
 iscc_bin = next((p for p in iscc_candidates if p and os.path.exists(p)), None)
 iss_script = os.path.join(PROJECT_ROOT, "packaging", "installer_windows.iss")
+exigir_inno = (os.environ.get("CI", "").lower() == "true") or (os.environ.get("REQUIRE_INNO_SETUP", "") == "1")
 
 if iscc_bin and os.path.exists(iss_script):
     print(f"\nCompilando instalador Setup con Inno Setup ({iscc_bin})...")
     try:
-        subprocess.run(f'"{iscc_bin}" "{iss_script}"', shell=True, check=True)
+        subprocess.run([iscc_bin, iss_script], check=True)
         setup_exe = os.path.join(PROJECT_ROOT, "dist", "VmPOS_Setup_v4.1.2.exe")
+        if not os.path.isfile(setup_exe) or os.path.getsize(setup_exe) == 0:
+            raise RuntimeError(f"Inno Setup finalizó pero no se encontró {setup_exe} válido.")
         print(f"[OK] Instalador Setup generado con exito en: {setup_exe}!")
     except Exception as e:
         print(f"[ERROR] Error al ejecutar Inno Setup: {e}")
         sys.exit(1)
+elif exigir_inno:
+    print("\n[ERROR] Inno Setup (ISCC.exe) es obligatorio en entorno CI / Release y no se encontró.")
+    sys.exit(1)
 else:
     print("\n[INFO] Nota sobre Inno Setup:")
     print("  Inno Setup no esta instalado en la ruta por defecto.")
-    print("  La aplicacion ya esta 100% funcional en:")
+    print("  La aplicacion portable ya esta verificada en:")
     print(f"  -> Carpeta ejecutable: {vmpos_dist_dir}")
-    print(f"  -> Archivo ZIP: {zip_target}.zip")
+    print(f"  -> Archivo ZIP: {zip_final_path}")
 
 print("\n" + "=" * 70)
 print("  [EXITO] COMPILACION PARA WINDOWS FINALIZADA CON EXITO!")

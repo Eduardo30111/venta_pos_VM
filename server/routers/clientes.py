@@ -568,6 +568,21 @@ async def update_cliente(
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
 
     update_data = cli_update.model_dump(exclude_unset=True, exclude={"cedula"})
+
+    # Campos sensibles de riesgo crediticio y estado reservados a administradores
+    es_admin = (current_user.rol or "").strip().lower() in ("administrador", "admin", "gerente")
+    if not es_admin:
+        campos_restringidos = {"limite_credito", "permite_fiado", "estado"}
+        intentados = [
+            c for c in campos_restringidos
+            if c in update_data and getattr(cliente, c, None) != update_data[c]
+        ]
+        if intentados:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Operación restringida: solo un administrador puede modificar {', '.join(intentados)}.",
+            )
+
     if "documento" in update_data and update_data["documento"]:
         doc = update_data["documento"].strip()
         dup = await db.execute(select(Cliente).where(Cliente.documento == doc, Cliente.id != id))
@@ -575,24 +590,26 @@ async def update_cliente(
             raise HTTPException(status_code=400, detail=f"El documento {doc} ya está asignado a otro cliente")
         update_data["documento"] = doc
 
+    valor_anterior = {k: getattr(cliente, k, None) for k in update_data.keys()}
     for key, value in update_data.items():
         setattr(cliente, key, value)
-
-    await db.commit()
-    await db.refresh(cliente)
 
     await log_audit(
         db=db,
         usuario_id=current_user.id,
-        usuario_nombre=current_user.nombre,
+        usuario_nombre=current_user.nombre or current_user.usuario,
         terminal_id=None,
         terminal_nombre="Terminal",
         accion="EDITAR_CLIENTE",
         modulo="CLIENTES",
         tabla_afectada="clientes",
         registro_id=str(cliente.id),
+        valor_anterior=valor_anterior,
         valor_nuevo=update_data,
+        auto_commit=False,
     )
+    await db.commit()
+    await db.refresh(cliente)
     return cliente
 
 
@@ -604,7 +621,7 @@ async def delete_cliente(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ):
-    if (current_user.rol or "").strip().lower() not in ("administrador", "admin"):
+    if (current_user.rol or "").strip().lower() not in ("administrador", "admin", "gerente"):
         raise HTTPException(
             status_code=403,
             detail="Operación restringida: Solo los administradores pueden eliminar clientes",
@@ -625,37 +642,63 @@ async def delete_cliente(
     doc_respaldo = cliente.documento
     nom_respaldo = cliente.nombre
 
-    cxc_subquery = select(CuentaPorCobrar.id).where(CuentaPorCobrar.cliente_id == id)
-    await db.execute(
-        delete(MovimientoCuentaCliente).where(
-            or_(
-                MovimientoCuentaCliente.cliente_id == id,
-                MovimientoCuentaCliente.cuenta_id.in_(cxc_subquery),
-            )
-        )
-    )
-    await db.execute(delete(Abono).where(Abono.cuenta_id.in_(cxc_subquery)))
-    await db.execute(delete(CuentaPorCobrar).where(CuentaPorCobrar.cliente_id == id))
-    await db.execute(update(Venta).where(Venta.cliente_id == id).values(cliente_id=None))
-    await db.delete(cliente)
-    await db.commit()
+    # Proteger la integridad histórica contable: si existen ventas, cuentas, abonos o movimientos,
+    # desactivar lógicamente en lugar de destruir registros financieros históricos.
+    cnt_ventas = int((await db.execute(select(func.count(Venta.id)).where(Venta.cliente_id == id))).scalar() or 0)
+    cnt_cxc = int((await db.execute(select(func.count(CuentaPorCobrar.id)).where(CuentaPorCobrar.cliente_id == id))).scalar() or 0)
+    cnt_mov = int((await db.execute(select(func.count(MovimientoCuentaCliente.id)).where(MovimientoCuentaCliente.cliente_id == id))).scalar() or 0)
 
+    if (cnt_ventas + cnt_cxc + cnt_mov) > 0:
+        estado_ant = cliente.estado
+        cliente.estado = "Inactivo"
+        cliente.permite_fiado = False
+        await log_audit(
+            db=db,
+            usuario_id=current_user.id,
+            usuario_nombre=current_user.nombre or current_user.usuario,
+            terminal_id=None,
+            terminal_nombre="Terminal",
+            accion="DESACTIVAR_CLIENTE_CON_HISTORIAL",
+            modulo="CLIENTES",
+            tabla_afectada="clientes",
+            registro_id=str(id),
+            valor_anterior={"estado": estado_ant, "documento": doc_respaldo, "nombre": nom_respaldo},
+            valor_nuevo={
+                "estado": "Inactivo",
+                "permite_fiado": False,
+                "ventas_historicas": cnt_ventas,
+                "cuentas_historicas": cnt_cxc,
+                "movimientos_historicos": cnt_mov,
+            },
+            auto_commit=False,
+        )
+        await db.commit()
+        return {
+            "message": (
+                f"Cliente '{nom_respaldo}' desactivado lógicamente (Inactivo) para preservar "
+                f"el historial contable ({cnt_ventas} ventas, {cnt_cxc} cuentas, {cnt_mov} movimientos)."
+            ),
+            "accion": "DESACTIVADO_CON_HISTORIAL",
+        }
+
+    await db.delete(cliente)
     await log_audit(
         db=db,
         usuario_id=current_user.id,
-        usuario_nombre=current_user.nombre,
+        usuario_nombre=current_user.nombre or current_user.usuario,
         terminal_id=None,
         terminal_nombre="Terminal",
         accion="ELIMINAR_CLIENTE_DEFINITIVO",
         modulo="CLIENTES",
         tabla_afectada="clientes",
         registro_id=str(id),
+        valor_anterior={"documento": doc_respaldo, "nombre": nom_respaldo},
         valor_nuevo={
-            "documento": doc_respaldo,
-            "nombre": nom_respaldo,
-            "motivo": "Eliminación solicitada por Administrador",
+            "motivo": "Eliminación definitiva de cliente sin historial financiero",
         },
+        auto_commit=False,
     )
+    await db.commit()
     return {
         "message": f"Cliente '{nom_respaldo}' eliminado definitivamente de la base de datos.",
         "accion": "ELIMINADO_DEFINITIVO",

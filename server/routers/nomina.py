@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.exc import IntegrityError
@@ -13,7 +13,9 @@ from ..models.proveedor import Proveedor
 from ..models.usuario import Usuario
 from ..models.venta import Venta, DetalleVenta
 from ..schemas.nomina import ComisionResponse, AsistenciaCreate, AsistenciaResponse, LiquidacionCreate, LiquidacionResponse
-from ..middleware.auth import get_current_user
+from ..services.caja_service import CajaService
+from ..middleware.auth import get_current_user, require_admin, is_admin_role
+from ..middleware.audit import log_audit
 from ..async_lock import LazyAsyncLock
 
 router = APIRouter(prefix="/nomina", tags=["nomina"])
@@ -91,7 +93,7 @@ async def solicitar_liquidacion(db: AsyncSession = Depends(get_db), current_user
     }
 
 @router.get("/solicitudes-pendientes")
-async def get_solicitudes_pendientes(db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+async def get_solicitudes_pendientes(db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(require_admin)):
     """Obtiene las solicitudes de liquidación activas para visualización del administrador"""
     result = await db.execute(
         select(Usuario).where(Usuario.rol != 'Administrador', Usuario.solicitud_liquidacion.isnot(None))
@@ -128,7 +130,7 @@ async def get_solicitudes_pendientes(db: AsyncSession = Depends(get_db), current
     return solicitudes
 
 @router.get("/empleados")
-async def list_empleados(db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+async def list_empleados(db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(require_admin)):
     result = await db.execute(select(Usuario).where(Usuario.rol != 'Administrador'))
     usuarios = result.scalars().all()
     ahora = datetime.now()
@@ -177,27 +179,30 @@ async def list_empleados(db: AsyncSession = Depends(get_db), current_user: Usuar
 
 @router.get("/empleados/{id}/comisiones", response_model=List[ComisionResponse])
 async def get_comisiones(id: int, db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+    if not is_admin_role(current_user) and current_user.id != id:
+        raise HTTPException(status_code=403, detail="Solo puede consultar sus propias comisiones.")
     result = await db.execute(select(Comision).where(Comision.usuario_id == id, Comision.estado == 'Pendiente'))
     return result.scalars().all()
 
 @router.post("/asistencia", response_model=AsistenciaResponse)
-async def register_asistencia(asistencia: AsistenciaCreate, db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+async def register_asistencia(asistencia: AsistenciaCreate, db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(require_admin)):
     user_result = await db.execute(select(Usuario).where(Usuario.id == asistencia.usuario_id))
     user = user_result.scalars().first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    from sqlalchemy import cast, Date
     fecha_dt = datetime.strptime(asistencia.fecha, "%Y-%m-%d")
+    fecha_str = fecha_dt.strftime("%Y-%m-%d")
     es_vendedor = str(user.rol or "").strip().lower() in ("vendedor", "vendedora")
 
     # Fase 3: El vendedor solo genera su salario diario cuando procesa su primera venta válida del día
     tiene_venta_valida = True
     if es_vendedor:
+        v_fecha = func.coalesce(Venta.fecha, func.date(Venta.created_at))
         v_res = await db.execute(
             select(func.count(Venta.id)).where(
                 Venta.usuario_id == user.id,
-                cast(Venta.created_at, Date) == fecha_dt.date(),
+                v_fecha == fecha_str,
                 Venta.estado == 'Completada'
             )
         )
@@ -217,7 +222,7 @@ async def register_asistencia(asistencia: AsistenciaCreate, db: AsyncSession = D
     res_exist = await db.execute(
         select(Asistencia).where(
             Asistencia.usuario_id == user.id,
-            cast(Asistencia.fecha, Date) == fecha_dt.date()
+            func.date(Asistencia.fecha) == fecha_str,
         )
     )
     db_asist = res_exist.scalars().first()
@@ -243,13 +248,15 @@ async def register_asistencia(asistencia: AsistenciaCreate, db: AsyncSession = D
 
 @router.get("/asistencia", response_model=List[AsistenciaResponse])
 async def get_asistencias(fecha: str, db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
-    fecha_dt = datetime.strptime(fecha, "%Y-%m-%d")
-    from sqlalchemy import cast, Date
-    result = await db.execute(select(Asistencia).where(cast(Asistencia.fecha, Date) == fecha_dt.date()))
+    fecha_str = datetime.strptime(fecha, "%Y-%m-%d").strftime("%Y-%m-%d")
+    q = select(Asistencia).where(func.date(Asistencia.fecha) == fecha_str)
+    if not is_admin_role(current_user):
+        q = q.where(Asistencia.usuario_id == current_user.id)
+    result = await db.execute(q)
     return result.scalars().all()
 
 @router.post("/liquidaciones", response_model=LiquidacionResponse)
-async def create_liquidacion(liq: LiquidacionCreate, db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+async def create_liquidacion(liq: LiquidacionCreate, db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(require_admin)):
     idem_clean = (getattr(liq, "idempotency_key", None) or "").strip() or None
     async with _LIQ_NOMINA_LOCK:
         try:
@@ -274,13 +281,36 @@ async def create_liquidacion(liq: LiquidacionCreate, db: AsyncSession = Depends(
             # 1. Comisiones pendientes
             com_result = await db.execute(select(Comision).with_for_update().where(Comision.usuario_id == liq.usuario_id, Comision.estado == 'Pendiente'))
             comisiones = com_result.scalars().all()
-            total_com = sum(c.monto_comision for c in comisiones)
+            total_com = round(sum(float(c.monto_comision or 0.0) for c in comisiones), 2)
             
-            # 2. Asistencias pendientes
-            asi_result = await db.execute(select(Asistencia).where(Asistencia.usuario_id == liq.usuario_id, Asistencia.fecha >= p_inicio, Asistencia.fecha <= p_fin, Asistencia.salario_generado > 0))
+            # 2. Asistencias pendientes (NO liquidadas previamente -> evita re-pago infinito)
+            asi_result = await db.execute(
+                select(Asistencia)
+                .with_for_update()
+                .where(
+                    Asistencia.usuario_id == liq.usuario_id,
+                    Asistencia.fecha >= p_inicio,
+                    Asistencia.fecha <= p_fin,
+                    Asistencia.salario_generado > 0,
+                    Asistencia.liquidacion_id.is_(None),
+                )
+            )
             asistencias = asi_result.scalars().all()
-            total_sal = sum(a.salario_generado for a in asistencias)
-            
+            total_sal = round(sum(float(a.salario_generado or 0.0) for a in asistencias), 2)
+            total_liq = round(total_com + total_sal, 2)
+
+            if total_liq <= 0.0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="El empleado no tiene comisiones ni salarios pendientes por liquidar.",
+                )
+
+            metodo = "Transferencia" if (liq.metodo_pago or "").strip().lower() in ("transferencia", "nequi", "daviplata", "bancolombia", "banco", "qr") else "Efectivo"
+            ahora = datetime.now()
+            f_str = ahora.strftime("%Y-%m-%d")
+            h_str = ahora.strftime("%H:%M:%S")
+            u_admin_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
+
             # 3. Liquidacion
             liquidacion = Liquidacion(
                 usuario_id=liq.usuario_id,
@@ -289,7 +319,8 @@ async def create_liquidacion(liq: LiquidacionCreate, db: AsyncSession = Depends(
                 total_servicios_vendidos=len(comisiones),
                 total_comisiones=total_com,
                 total_salario_fijo=total_sal,
-                total_liquidado=total_com + total_sal,
+                total_liquidado=total_liq,
+                metodo_pago=metodo,
                 estado="Liquidado",
                 liquidado_por=current_user.id,
                 observaciones=liq.observaciones,
@@ -298,10 +329,12 @@ async def create_liquidacion(liq: LiquidacionCreate, db: AsyncSession = Depends(
             db.add(liquidacion)
             await db.flush()
             
-            # 4. Actualizar comisiones a Liquidada
+            # 4. Marcar comisiones y asistencias como liquidadas
             for c in comisiones:
                 c.estado = 'Liquidada'
                 c.liquidacion_id = liquidacion.id
+            for a in asistencias:
+                a.liquidacion_id = liquidacion.id
                 
             # 5. Limpiar solicitud de liquidación del usuario
             usr_res = await db.execute(select(Usuario).where(Usuario.id == liq.usuario_id))
@@ -311,17 +344,61 @@ async def create_liquidacion(liq: LiquidacionCreate, db: AsyncSession = Depends(
                 target_user.solicitud_liquidacion = None
                 nombre_emp = f"{target_user.nombre or ''} {target_user.apellidos or ''}".strip() or target_user.usuario
 
-            # 6. Gasto contable automático
+            # 6. Registrar salida real de dinero en Caja Física o Banco Transferencia
+            cuenta_af = "CAJA_FISICA" if metodo == "Efectivo" else "BANCO_TRANSFERENCIA"
+            mf = await CajaService.registrar_movimiento_financiero(
+                db=db,
+                tipo="PAGO_NOMINA",
+                concepto=f"Liquidación Nómina #{liquidacion.id} - {nombre_emp}",
+                monto=total_liq,
+                metodo_pago=metodo,
+                cuenta_afectada=cuenta_af,
+                usuario=u_admin_nom,
+                referencia_origen=f"NOMINA-{liquidacion.id}",
+                sesion_id=liq.sesion_caja_id,
+                observaciones=liq.observaciones or f"Comisiones: {total_com:,.0f} | Salarios: {total_sal:,.0f}",
+                sincronizar_caja=(metodo == "Efectivo"),
+                fecha_str=f_str,
+                hora_str=h_str,
+            )
+
+            # 7. Registro de respaldo en tabla Gasto (marcado con tipo='Liquidacion_Nomina' para evitar doble conteo en P&G)
             gasto = Gasto(
                 concepto=f"Liquidación Nómina - {nombre_emp}",
                 categoria="Nomina",
-                valor=liquidacion.total_liquidado,
+                clasificacion="Nomina",
+                valor=total_liq,
+                fecha=f_str,
+                hora=h_str,
+                fecha_pago=f"{f_str} {h_str}",
+                metodo_pago=metodo,
+                estado="Pagado",
                 tipo="Liquidacion_Nomina",
                 referencia_id=liquidacion.id,
-                usuario_id=current_user.id
+                usuario_id=current_user.id,
+                usuario_nombre=u_admin_nom,
+                sesion_caja_id=mf.sesion_caja_id,
+                observacion=liq.observaciones or "",
             )
             db.add(gasto)
-            
+
+            await log_audit(
+                db=db,
+                modulo="NOMINA",
+                accion="LIQUIDAR_NOMINA",
+                entidad_id=liquidacion.id,
+                usuario_id=current_user.id,
+                usuario_nombre=u_admin_nom,
+                valor_nuevo={
+                    "usuario_id": liq.usuario_id,
+                    "empleado": nombre_emp,
+                    "total_comisiones": total_com,
+                    "total_salario_fijo": total_sal,
+                    "total_liquidado": total_liq,
+                    "metodo_pago": metodo,
+                },
+                auto_commit=False,
+            )
             await db.commit()
             await db.refresh(liquidacion)
             
@@ -407,6 +484,8 @@ async def get_liquidacion(id: int, db: AsyncSession = Depends(get_db), current_u
     liq = result.scalars().first()
     if not liq:
         raise HTTPException(status_code=404, detail="Liquidación no encontrada")
+    if not is_admin_role(current_user) and liq.usuario_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Solo puede consultar sus propias liquidaciones.")
     usr = await db.execute(select(Usuario).where(Usuario.id == liq.usuario_id))
     u = usr.scalars().first()
     liq.nombre_persona = (f"{u.nombre or ''} {u.apellidos or ''}".strip() or u.usuario) if u else f"Usuario {liq.usuario_id}"
@@ -424,10 +503,11 @@ async def list_proveedores_nomina(db: AsyncSession = Depends(get_db), current_us
     resultado = []
     for p in proveedores:
         cxp_res = await db.execute(
-            select(func.coalesce(func.sum(CuentaPorPagar.monto), 0.0))
-            .where(CuentaPorPagar.proveedor_id == p.id, CuentaPorPagar.estado == 'Pendiente')
+            select(func.coalesce(func.sum(CuentaPorPagar.saldo_pendiente), 0.0), func.count(CuentaPorPagar.id))
+            .where(CuentaPorPagar.proveedor_id == p.id, CuentaPorPagar.estado.in_(["Pendiente", "Parcial"]))
         )
-        saldo_pendiente = float(cxp_res.scalar() or 0.0)
+        row_cxp = cxp_res.first()
+        saldo_pendiente = float(row_cxp[0] or 0.0) if (row_cxp and int(row_cxp[1] or 0) > 0) else float(p.saldo_acumulado or 0.0)
         resultado.append({
             "id": p.id,
             "nombre": p.nombre,
@@ -468,10 +548,12 @@ async def list_historial_proveedores(mes_anio: Optional[str] = None, db: AsyncSe
 @router.post("/proveedores/{id}/liquidar")
 async def liquidar_proveedor_nomina_proxy(
     id: int,
+    payload: Optional[dict] = Body(default=None),
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
+    current_user: Usuario = Depends(require_admin),
 ):
-    """Reenvía de forma segura al endpoint canónico de liquidación de proveedores con todas las validaciones financieras"""
+    """Reenvía de forma segura al endpoint canónico de liquidación de proveedores respetando el monto y medio de pago solicitados"""
     from .proveedores import liquidar_proveedor, LiquidarProveedorRequest
-    return await liquidar_proveedor(id=id, req=LiquidarProveedorRequest(monto=None, metodo_pago="Efectivo"), db=db, current_user=current_user)
+    req_obj = LiquidarProveedorRequest(**(payload or {}))
+    return await liquidar_proveedor(id=id, req=req_obj, db=db, current_user=current_user)
 

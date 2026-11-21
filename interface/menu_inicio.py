@@ -141,7 +141,10 @@ try:
     from database_manager import inicializar_base_datos, conectar_db as _conectar_db
 except ImportError:
     from interface.database_manager import inicializar_base_datos, conectar_db as _conectar_db
-inicializar_base_datos()
+try:
+    inicializar_base_datos()
+except Exception as _e_init_db:
+    print(f"ERROR CRÍTICO inicializando base de datos local: {_e_init_db}")
 
 try:
     from caja_manager import obtener_resumen_financiero
@@ -240,8 +243,20 @@ class VmPOSDashboard(tk.Tk):
         self._verificar_asistencia()
         
         # Recordatorio único al administrador al iniciar sesión (se muestra a lo sumo 1 vez al día)
-        self.after(2000, self._recordar_asistencia_admin)
-        self.after(30000, self._programa_actualizacion_stats)
+        t_rec = self.after(2000, self._recordar_asistencia_admin)
+        t_stats = self.after(30000, self._programa_actualizacion_stats)
+        session_mgr.registrar_timer(self, t_rec)
+        session_mgr.registrar_timer(self, t_stats)
+
+        # Iniciar demonio de sincronización offline-first
+        try:
+            try:
+                from interface.sync_manager import sync_mgr
+            except ImportError:
+                from sync_manager import sync_mgr
+            sync_mgr.iniciar_demonio_sincronizacion(intervalo_segundos=15)
+        except Exception as e_sync_d:
+            print(f"Aviso iniciando demonio de sincronización: {e_sync_d}")
         
         # Ocultar la pantalla de carga después de inicializar el dashboard
         if isinstance(self.datos_usuario, dict) and 'ventana_carga' in self.datos_usuario:
@@ -253,6 +268,11 @@ class VmPOSDashboard(tk.Tk):
     def _on_close_window(self):
         """Maneja el evento de cierre de ventana desde el sistema operativo (X superior)."""
         if messagebox.askyesno("Salir de VmPOS", "¿Estás seguro que deseas salir del sistema?"):
+            try:
+                if hasattr(business_mgr, "_listeners") and self.refrescar_identidad_negocio in business_mgr._listeners:
+                    business_mgr._listeners.remove(self.refrescar_identidad_negocio)
+            except Exception:
+                pass
             session_mgr.cerrar_sesion(root_window=self, lanzar_login=False)
 
     def _get_user_permissions(self):
@@ -284,6 +304,8 @@ class VmPOSDashboard(tk.Tk):
 
     def _toggle_tema(self):
         """Alterna entre modo claro y oscuro con actualización visual inmediata manteniendo la sesión activa."""
+        # Cancelar timers previos para evitar multiplicación exponencial de polling tras reconstruir widgets
+        session_mgr.cancelar_timers(self)
         nuevo = theme_mgr.alternar_tema()
         self.t = aplicar_tema(self)
         self.configure(bg=self.t["bg_app"])
@@ -307,6 +329,8 @@ class VmPOSDashboard(tk.Tk):
         self._create_footer()
         self._bind_shortcuts()
         self._actualizar_estadisticas()
+        t_stats = self.after(30000, self._programa_actualizacion_stats)
+        session_mgr.registrar_timer(self, t_stats)
 
     def _renderizar_logo_header(self, bg_h, fg_h):
         """Renderiza o actualiza el logo institucional (o ícono por defecto) en el encabezado."""

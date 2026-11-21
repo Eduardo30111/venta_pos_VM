@@ -109,29 +109,15 @@ try:
     )
 except ImportError as e:
     print(f"Error importando usuarios_db: {e}")
-    # Funciones de respaldo
     def obtener_usuario_por_credenciales(usuario, password):
-        # Sistema de respaldo con usuarios hardcodeados
-        usuarios_respaldo = {
-            'admin': {'usuario': 'admin', 'rol': 'Administrador', 'id': 1, 'estado': 'Activo'},
-            'eduardo': {'usuario': 'eduardo', 'rol': 'Administrador', 'id': 2, 'estado': 'Activo'},
-            'andres': {'usuario': 'andres', 'rol': 'Vendedor', 'id': 3, 'estado': 'Activo'}
-        }
-        passwords_respaldo = {
-            'admin': 'admin123',
-            'eduardo': '2121',
-            'andres': '2180'
-        }
-        
-        if usuario in usuarios_respaldo and passwords_respaldo.get(usuario) == password:
-            return usuarios_respaldo[usuario]
-        return None
+        # Fail-closed: nunca autenticar mediante contraseñas codificadas en fuente
+        raise RuntimeError("El módulo usuarios_db no está disponible; autenticación bloqueada por seguridad.")
     
     def crear_tablas_iniciales():
-        print("Función crear_tablas_iniciales no disponible")
+        raise RuntimeError("Función crear_tablas_iniciales no disponible")
     
     def inicializar_admin_default():
-        print("Función inicializar_admin_default no disponible")
+        raise RuntimeError("Función inicializar_admin_default deshabilitada; use activación segura.")
 
 ''' + contenido[contenido.find('# --- Variables necesarias'):]
     

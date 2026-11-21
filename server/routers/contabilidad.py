@@ -11,11 +11,15 @@ from ..models.producto import Producto
 from ..models.finanzas import CuentaPorCobrar, Abono, Gasto
 from ..models.cliente import Cliente
 from ..models.caja import SesionCaja, MovimientoCaja, MovimientoFinanciero
-from ..models.nomina import Comision, Asistencia
+from ..models.nomina import Comision, Asistencia, Liquidacion
 from ..models.usuario import Usuario
 from ..middleware.auth import get_current_user
 
 router = APIRouter(prefix="/contabilidad", tags=["contabilidad"])
+
+# Tipos de gasto que representan liquidaciones de pasivos ya contabilizados
+# en COGS (proveedores) o en Nómina Devengada (no se suman dos veces en P&G).
+TIPOS_GASTO_INTERNOS = ("Liquidacion_Nomina", "Proveedor", "Pago_Proveedor")
 
 
 @router.get("/resumen-financiero")
@@ -140,8 +144,16 @@ async def get_resumen_financiero(
             Venta.estado != "Pendiente_Caja",
         )
     )
+    ventas_op_list = res_v_op.scalars().all()
+    v_ids_op = [v.id for v in ventas_op_list]
+    pagos_por_venta_op: Dict[int, List[Pago]] = {}
+    if v_ids_op:
+        res_p_op = await db.execute(select(Pago).where(Pago.venta_id.in_(v_ids_op)))
+        for p_row in res_p_op.scalars().all():
+            pagos_por_venta_op.setdefault(p_row.venta_id, []).append(p_row)
+
     op_stats: Dict[str, Dict[str, Any]] = {}
-    for v in res_v_op.scalars().all():
+    for v in ventas_op_list:
         op_name = v.operario_nombre or users_map.get(v.usuario_id, f"Usuario {v.usuario_id}")
         entry = op_stats.setdefault(
             op_name,
@@ -156,13 +168,24 @@ async def get_resumen_financiero(
         )
         entry["total_vendido"] += float(v.total or 0.0)
         entry["cant_ventas"] += 1
-        mp = (v.metodo_pago_principal or "Efectivo").strip().capitalize()
-        if mp == "Efectivo":
-            entry["efectivo"] += float(v.total or 0.0)
-        elif mp == "Transferencia":
-            entry["transferencia"] += float(v.total or 0.0)
-        elif mp == "Fiado":
-            entry["fiado"] += float(v.total or 0.0)
+        p_rows = pagos_por_venta_op.get(v.id, [])
+        if p_rows:
+            for p_r in p_rows:
+                mp = (p_r.metodo or "Efectivo").strip().capitalize()
+                if mp == "Efectivo":
+                    entry["efectivo"] += float(p_r.monto or 0.0)
+                elif mp == "Transferencia":
+                    entry["transferencia"] += float(p_r.monto or 0.0)
+                elif mp == "Fiado":
+                    entry["fiado"] += float(p_r.monto or 0.0)
+        else:
+            mp = (v.metodo_pago_principal or "Efectivo").strip().capitalize()
+            if mp == "Efectivo":
+                entry["efectivo"] += float(v.total or 0.0)
+            elif mp == "Transferencia":
+                entry["transferencia"] += float(v.total or 0.0)
+            elif mp == "Fiado":
+                entry["fiado"] += float(v.total or 0.0)
 
     operarios_list = sorted(op_stats.values(), key=lambda x: x["total_vendido"], reverse=True)
 
@@ -173,7 +196,7 @@ async def get_resumen_financiero(
     return {
         "ventas_totales_facturadas": total_ventas,
         "cantidad_ventas": cant_ventas,
-        "ganancia_neta_estimada": max(0.0, total_ventas - egresos_caja),
+        "ganancia_neta_estimada": round(total_ventas - egresos_caja, 2),
         "periodo": {"inicio": f_ini, "fin": f_fin},
         "ventas": {
             "total_ventas": total_ventas,
@@ -276,7 +299,7 @@ async def get_metricas_contables(
     ventas_transferencia = map_metodos.get("Transferencia", 0.0)
     ventas_fiado = map_metodos.get("Fiado", 0.0)
 
-    # 3. Costo de Mercancía Vendida (COGS) histórico
+    # 3. Costo de Ventas (COGS) histórico: productos físicos + costo de servicios de terceros (proveedores)
     res_cogs = await db.execute(
         select(func.sum(DetalleVenta.cantidad * func.coalesce(DetalleVenta.costo_unitario, 0.0)))
         .join(Venta, DetalleVenta.venta_id == Venta.id)
@@ -285,14 +308,13 @@ async def get_metricas_contables(
             v_fecha <= f_fin,
             Venta.estado != "Anulada",
             Venta.estado != "Pendiente_Caja",
-            DetalleVenta.tipo_item == "Producto",
         )
     )
-    cogs_total = float(res_cogs.scalar() or 0.0)
-    utilidad_bruta = max(0.0, ventas_netas - cogs_total)
+    cogs_total = round(float(res_cogs.scalar() or 0.0), 2)
+    utilidad_bruta = round(ventas_netas - cogs_total, 2)
     margen_bruto_pct = (utilidad_bruta / ventas_netas * 100.0) if ventas_netas > 0 else 0.0
 
-    # 4. Gastos Operativos desglosados en 4 categorías
+    # 4. Gastos Operativos desglosados en 4 categorías (excluye liquidaciones internas ya reflejadas en COGS/Nómina)
     gastos_por_cat = {
         "Operativo diario": 0.0,
         "Fijo periódico": 0.0,
@@ -302,6 +324,7 @@ async def get_metricas_contables(
     gastos_pagados = 0.0
     gastos_pendientes = 0.0
     gastos_transferencia = 0.0
+    egresos_banco_totales = 0.0
 
     res_g = await db.execute(
         select(Gasto).where(
@@ -310,11 +333,21 @@ async def get_metricas_contables(
             func.coalesce(Gasto.estado, "Pagado") != "Anulado",
         )
     )
-    gastos_rows = res_g.scalars().all()
-    for g in gastos_rows:
-        cat_name = (g.categoria or g.clasificacion or "Operativo diario").lower()
+    gastos_rows_all = res_g.scalars().all()
+    gastos_rows = []
+    for g in gastos_rows_all:
         val = float(g.valor or 0.0)
         est = g.estado or "Pagado"
+        es_liquidacion_interna = (g.tipo or "") in TIPOS_GASTO_INTERNOS
+
+        if est == "Pagado" and (g.metodo_pago or "").strip().lower() == "transferencia":
+            egresos_banco_totales += val
+
+        if es_liquidacion_interna:
+            continue
+
+        gastos_rows.append(g)
+        cat_name = (g.categoria or g.clasificacion or "Operativo diario").lower()
         if "fijo" in cat_name:
             cat_std = "Fijo periódico"
         elif "variable" in cat_name:
@@ -332,9 +365,9 @@ async def get_metricas_contables(
         else:
             gastos_pendientes += val
 
-    total_gastos = sum(gastos_por_cat.values())
+    total_gastos = round(sum(gastos_por_cat.values()), 2)
 
-    # 5. Comisiones / Nómina devengada en el período
+    # 5. Comisiones / Nómina devengada y pagada en el período
     c_fecha = func.date(Comision.created_at)
     res_com = await db.execute(
         select(func.sum(Comision.monto_comision)).where(
@@ -355,18 +388,48 @@ async def get_metricas_contables(
     salarios_dev = float(res_sal.scalar() or 0.0)
     comisiones_totales = round(comisiones_dev + salarios_dev, 2)
 
+    # Pagos reales de nómina del período y obligaciones pendientes globales
+    l_fecha = func.date(Liquidacion.created_at)
+    res_liq_nom = await db.execute(
+        select(Liquidacion).where(
+            l_fecha >= f_ini,
+            l_fecha <= f_fin,
+            Liquidacion.estado == "Liquidado",
+        )
+    )
+    pagos_nomina_ef = 0.0
+    pagos_nomina_tr = 0.0
+    for ln in res_liq_nom.scalars().all():
+        m_ln = float(ln.total_liquidado or 0.0)
+        if (getattr(ln, "metodo_pago", "Efectivo") or "Efectivo").strip().lower() == "transferencia":
+            pagos_nomina_tr += m_ln
+        else:
+            pagos_nomina_ef += m_ln
+    pagos_nomina_realizados = round(pagos_nomina_ef + pagos_nomina_tr, 2)
+
+    res_com_pend = await db.execute(
+        select(func.coalesce(func.sum(Comision.monto_comision), 0.0)).where(Comision.estado == "Pendiente")
+    )
+    res_sal_pend = await db.execute(
+        select(func.coalesce(func.sum(Asistencia.salario_generado), 0.0)).where(
+            Asistencia.salario_generado > 0,
+            Asistencia.liquidacion_id.is_(None),
+        )
+    )
+    obligaciones_nomina_pend = round(float(res_com_pend.scalar() or 0.0) + float(res_sal_pend.scalar() or 0.0), 2)
+
     metricas_nomina = {
         "gasto_personal_devengado": comisiones_totales,
-        "salarios_devengados": salarios_dev,
-        "comisiones_devengadas": comisiones_dev,
+        "salarios_devengados": round(salarios_dev, 2),
+        "comisiones_devengadas": round(comisiones_dev, 2),
         "ajustes_devengados": 0.0,
-        "pagos_nomina_realizados": 0.0,
-        "pagos_efectivo": 0.0,
-        "pagos_transferencia": 0.0,
-        "obligaciones_pendientes": comisiones_totales,
+        "pagos_nomina_realizados": pagos_nomina_realizados,
+        "pagos_efectivo": round(pagos_nomina_ef, 2),
+        "pagos_transferencia": round(pagos_nomina_tr, 2),
+        "obligaciones_pendientes": obligaciones_nomina_pend,
     }
 
-    utilidad_operacional_neta = utilidad_bruta - total_gastos - comisiones_totales
+    utilidad_operacional_neta = round(utilidad_bruta - total_gastos - comisiones_totales, 2)
     margen_neto_pct = (utilidad_operacional_neta / ventas_netas * 100.0) if ventas_netas > 0 else 0.0
 
     # 6. Flujo de Caja Física y Abonos
@@ -458,6 +521,12 @@ async def get_metricas_contables(
         )
     )
     ventas_periodo = res_v_list.scalars().all()
+    v_ids_per = [v.id for v in ventas_periodo]
+    pagos_por_venta_per: Dict[int, List[Pago]] = {}
+    if v_ids_per:
+        res_p_per = await db.execute(select(Pago).where(Pago.venta_id.in_(v_ids_per)))
+        for pr in res_p_per.scalars().all():
+            pagos_por_venta_per.setdefault(pr.venta_id, []).append(pr)
 
     op_map: Dict[str, Dict[str, Any]] = {}
     diarias_map: Dict[str, Dict[str, Any]] = {}
@@ -477,13 +546,24 @@ async def get_metricas_contables(
         tot_v = float(v.total or 0.0)
         st["total_vendido"] += tot_v
         st["cant_ventas"] += 1
-        mp = (v.metodo_pago_principal or "Efectivo").strip().capitalize()
-        if mp == "Efectivo":
-            st["efectivo"] += tot_v
-        elif mp == "Transferencia":
-            st["transferencia"] += tot_v
-        elif mp == "Fiado":
-            st["fiado"] += tot_v
+        p_rows = pagos_por_venta_per.get(v.id, [])
+        if p_rows:
+            for pr in p_rows:
+                mp = (pr.metodo or "Efectivo").strip().capitalize()
+                if mp == "Efectivo":
+                    st["efectivo"] += float(pr.monto or 0.0)
+                elif mp == "Transferencia":
+                    st["transferencia"] += float(pr.monto or 0.0)
+                elif mp == "Fiado":
+                    st["fiado"] += float(pr.monto or 0.0)
+        else:
+            mp = (v.metodo_pago_principal or "Efectivo").strip().capitalize()
+            if mp == "Efectivo":
+                st["efectivo"] += tot_v
+            elif mp == "Transferencia":
+                st["transferencia"] += tot_v
+            elif mp == "Fiado":
+                st["fiado"] += tot_v
 
         f_key = v.fecha or (v.created_at.strftime("%Y-%m-%d") if v.created_at else f_ini)
         d_item = diarias_map.setdefault(f_key, {"fecha": f_key, "total": 0.0, "cantidad": 0})
@@ -592,7 +672,28 @@ async def get_metricas_contables(
     )
     rb = res_banco.first()
     banco_verificado = float((rb[1] if rb else 0.0) or 0.0)
-    flujo_banco_calculado = ventas_transferencia + abonos_transferencia - gastos_transferencia
+    # Incluir todos los egresos bancarios reales (gastos operativos + pagos proveedor + pagos nómina por transferencia)
+    res_b_mf = await db.execute(
+        select(MovimientoFinanciero.tipo, func.sum(MovimientoFinanciero.monto))
+        .where(
+            MovimientoFinanciero.fecha >= f_ini,
+            MovimientoFinanciero.fecha <= f_fin,
+            MovimientoFinanciero.cuenta_afectada == "BANCO_TRANSFERENCIA",
+            MovimientoFinanciero.estado != "Anulado",
+        )
+        .group_by(MovimientoFinanciero.tipo)
+    )
+    b_mf_map = {t: float(v or 0.0) for t, v in res_b_mf.all()}
+    egresos_banco_mf = (
+        b_mf_map.get("GASTO_PAGADO", 0.0)
+        + b_mf_map.get("PAGO_PROVEEDOR", 0.0)
+        + b_mf_map.get("PAGO_NOMINA", 0.0)
+    )
+    egresos_banco_final = max(egresos_banco_totales, egresos_banco_mf)
+    ajustes_banco_mf = b_mf_map.get("AJUSTE_AUTORIZADO", 0.0)
+    flujo_banco_calculado = round(
+        ventas_transferencia + abonos_transferencia - egresos_banco_final + ajustes_banco_mf, 2
+    )
     dinero_bancos = flujo_banco_calculado if banco_verificado == 0.0 else banco_verificado
 
     res_val_inv = await db.execute(

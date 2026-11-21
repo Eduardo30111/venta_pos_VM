@@ -1,8 +1,9 @@
+import json
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func
+from sqlalchemy import func, or_, and_
 from fastapi import HTTPException
 
 from ..models.caja import SesionCaja, MovimientoCaja, MovimientoFinanciero
@@ -240,11 +241,11 @@ class CajaService:
         f_str = fecha_str or ahora.strftime("%Y-%m-%d")
         h_str = hora_str or ahora.strftime("%H:%M:%S")
 
-        if not sesion_id and cuenta_afectada == "CAJA_FISICA":
+        if not sesion_id:
             activa = await CajaService.obtener_sesion_activa(db)
             if activa:
                 sesion_id = activa.id
-            elif sincronizar_caja:
+            elif cuenta_afectada == "CAJA_FISICA" and sincronizar_caja:
                 nueva = await CajaService.abrir_sesion(
                     db=db,
                     usuario=usuario,
@@ -278,6 +279,7 @@ class CajaService:
                 "ABONO_EFECTIVO": "ABONO_EFECTIVO",
                 "GASTO_PAGADO": "EGRESO",
                 "PAGO_PROVEEDOR": "EGRESO",
+                "PAGO_NOMINA": "EGRESO",
                 "RETIRO_CAJA": "RETIRO",
                 "INGRESO_EXTRAORDINARIO": "AJUSTE",
                 "DEVOLUCION_VENTA": "DEVOLUCION_VENTA",
@@ -356,13 +358,16 @@ class CajaService:
             monto_inicial + ventas_efectivo + abonos_efectivo - egresos - retiros - devoluciones + ajustes
         )
 
-        # Ventas completadas en esta sesión o fecha de apertura
+        # Ventas completadas en esta sesión (o legadas sin sesion_caja_id del mismo día)
         res_v = await db.execute(
             select(Pago.metodo, func.sum(Pago.monto))
             .join(Venta, Pago.venta_id == Venta.id)
             .where(
                 Venta.estado == "Completada",
-                (Venta.sesion_caja_id == sesion_id) | (Venta.fecha == sesion.fecha_apertura),
+                or_(
+                    Venta.sesion_caja_id == sesion_id,
+                    and_(Venta.sesion_caja_id.is_(None), Venta.fecha == sesion.fecha_apertura),
+                ),
             )
             .group_by(Pago.metodo)
         )
@@ -376,19 +381,43 @@ class CajaService:
         ef_ventas_total = v_map.get("Efectivo", ventas_efectivo)
 
         res_b = await db.execute(
-            select(MovimientoFinanciero.tipo, func.sum(MovimientoFinanciero.monto))
+            select(MovimientoFinanciero)
             .where(
-                (MovimientoFinanciero.sesion_caja_id == sesion_id)
-                | (MovimientoFinanciero.fecha == sesion.fecha_apertura),
+                or_(
+                    MovimientoFinanciero.sesion_caja_id == sesion_id,
+                    and_(
+                        MovimientoFinanciero.sesion_caja_id.is_(None),
+                        MovimientoFinanciero.fecha == sesion.fecha_apertura,
+                    ),
+                ),
                 MovimientoFinanciero.cuenta_afectada == "BANCO_TRANSFERENCIA",
                 MovimientoFinanciero.estado != "Anulado",
             )
-            .group_by(MovimientoFinanciero.tipo)
         )
-        b_movs = {t: float(val or 0.0) for t, val in res_b.all()}
-        abonos_transferencia = b_movs.get("ABONO_TRANSFERENCIA", 0.0)
-        gastos_transferencia = b_movs.get("GASTO_PAGADO", 0.0) + b_movs.get("PAGO_PROVEEDOR", 0.0)
-        devol_transferencia = b_movs.get("DEVOLUCION_VENTA", 0.0)
+        b_rows = res_b.scalars().all()
+        abonos_transferencia = 0.0
+        gastos_transferencia = 0.0
+        devol_transferencia = 0.0
+        ajustes_transferencia = 0.0
+
+        # Ventas anuladas de esta misma sesión (ya excluidas de transf_total; no restar dos veces)
+        res_va = await db.execute(
+            select(Venta.id).where(Venta.estado == "Anulada", Venta.sesion_caja_id == sesion_id)
+        )
+        ventas_anuladas_misma_sesion = {f"ANULACION-VENTA-{vid}" for vid in res_va.scalars().all()}
+
+        for bm in b_rows:
+            val_m = float(bm.monto or 0.0)
+            if bm.tipo == "ABONO_TRANSFERENCIA":
+                abonos_transferencia += val_m
+            elif bm.tipo in ("GASTO_PAGADO", "PAGO_PROVEEDOR", "PAGO_NOMINA"):
+                gastos_transferencia += val_m
+            elif bm.tipo == "DEVOLUCION_VENTA":
+                # Solo descontar devoluciones de ventas de sesiones anteriores (evitar doble resta)
+                if (bm.referencia_origen or "") not in ventas_anuladas_misma_sesion:
+                    devol_transferencia += val_m
+            elif bm.tipo == "AJUSTE_AUTORIZADO":
+                ajustes_transferencia += val_m
 
         res_cxc = await db.execute(
             select(func.sum(CuentaPorCobrar.saldo_pendiente)).where(CuentaPorCobrar.estado == "Pendiente")
@@ -398,7 +427,13 @@ class CajaService:
         total_ventas_facturadas = ef_ventas_total + transf_total + fiado_total
         entradas_efectivo = ventas_efectivo + abonos_efectivo + (ajustes if ajustes > 0 else 0.0)
         salidas_efectivo = egresos + retiros + devoluciones + (abs(ajustes) if ajustes < 0 else 0.0)
-        transferencias_esperadas = transf_total + abonos_transferencia - gastos_transferencia - devol_transferencia
+        transferencias_esperadas = (
+            transf_total
+            + abonos_transferencia
+            - gastos_transferencia
+            - devol_transferencia
+            + ajustes_transferencia
+        )
 
         return {
             "sesion": sesion_dict,

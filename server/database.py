@@ -50,11 +50,8 @@ def _migrar_archivo_sqlite_directo(db_url: str):
             try:
                 c.execute(sql)
             except Exception as e:
-                msg = str(e).lower()
-                if "no such table" in msg or "database is locked" in msg or "disk i/o error" in msg or "malformed" in msg:
-                    logger.critical("Error crítico fatal en UPDATE migración directa (%s): %s", desc or sql[:50], e)
-                    raise MigrationError(f"Error fatal de UPDATE migración ({desc}): {e}") from e
-                logger.warning("Aviso UPDATE migración directa (%s): %s", desc or sql[:50], e)
+                logger.critical("Error crítico fatal en UPDATE migración directa (%s): %s", desc or sql[:50], e)
+                raise MigrationError(f"Error fatal de UPDATE migración ({desc}): {e}") from e
 
         try:
             # 1. Sesiones de Caja
@@ -399,25 +396,50 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                 "movimientos_caja",
                 "movimientos_financieros",
             ]
+            # 9b. Usuarios, Asistencias y Liquidaciones (seguridad y control de pagos únicos)
+            cur.execute("PRAGMA table_info(usuarios);")
+            cols_usr = {r[1] for r in cur.fetchall()}
+            if cols_usr and "requiere_cambio_password" not in cols_usr:
+                _safe_alter_column_direct(
+                    cur,
+                    "ALTER TABLE usuarios ADD COLUMN requiere_cambio_password INTEGER DEFAULT 0;",
+                    "usuarios.requiere_cambio_password",
+                )
+
+            cur.execute("PRAGMA table_info(asistencias);")
+            cols_asi = {r[1] for r in cur.fetchall()}
+            if cols_asi and "liquidacion_id" not in cols_asi:
+                _safe_alter_column_direct(
+                    cur,
+                    "ALTER TABLE asistencias ADD COLUMN liquidacion_id INTEGER;",
+                    "asistencias.liquidacion_id",
+                )
+
+            cur.execute("PRAGMA table_info(liquidaciones);")
+            cols_liq = {r[1] for r in cur.fetchall()}
+            if cols_liq and "metodo_pago" not in cols_liq:
+                _safe_alter_column_direct(
+                    cur,
+                    "ALTER TABLE liquidaciones ADD COLUMN metodo_pago TEXT DEFAULT 'Efectivo';",
+                    "liquidaciones.metodo_pago",
+                )
+
             for t_nom in idem_tablas:
-                try:
-                    cur.execute(f"PRAGMA table_info({t_nom});")
-                    t_cols = {r[1] for r in cur.fetchall()}
-                    if t_cols and "idempotency_key" not in t_cols:
-                        cur.execute(f"ALTER TABLE {t_nom} ADD COLUMN idempotency_key TEXT;")
-                    if t_cols and "observaciones" not in t_cols and t_nom in ("compras_inventario", "traslados_inventario", "movimientos_inventario"):
-                        cur.execute(f"ALTER TABLE {t_nom} ADD COLUMN observaciones TEXT DEFAULT '';")
-                    if t_cols and "created_at" not in t_cols:
-                        cur.execute(f"ALTER TABLE {t_nom} ADD COLUMN created_at TIMESTAMP;")
-                except Exception as e_mig_col:
-                    if "duplicate column" not in str(e_mig_col).lower():
-                        logger.debug("Aviso columna en %s: %s", t_nom, e_mig_col)
-            for t_nom in idem_tablas:
-                try:
-                    cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{t_nom}_idempotency_key ON {t_nom}(idempotency_key);")
-                except Exception as e_mig_idx:
-                    if "already exists" not in str(e_mig_idx).lower():
-                        logger.debug("Aviso índice en %s: %s", t_nom, e_mig_idx)
+                cur.execute(f"PRAGMA table_info({t_nom});")
+                t_cols = {r[1] for r in cur.fetchall()}
+                if not t_cols:
+                    continue
+                if "idempotency_key" not in t_cols:
+                    _safe_alter_column_direct(cur, f"ALTER TABLE {t_nom} ADD COLUMN idempotency_key TEXT;", f"{t_nom}.idempotency_key")
+                if "observaciones" not in t_cols and t_nom in ("compras_inventario", "traslados_inventario", "movimientos_inventario"):
+                    _safe_alter_column_direct(cur, f"ALTER TABLE {t_nom} ADD COLUMN observaciones TEXT DEFAULT '';", f"{t_nom}.observaciones")
+                if "created_at" not in t_cols:
+                    _safe_alter_column_direct(cur, f"ALTER TABLE {t_nom} ADD COLUMN created_at TIMESTAMP;", f"{t_nom}.created_at")
+                _safe_alter_column_direct(
+                    cur,
+                    f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{t_nom}_idempotency_key ON {t_nom}(idempotency_key);",
+                    f"uq_{t_nom}_idempotency_key",
+                )
 
             conn.commit()
         finally:
@@ -430,7 +452,7 @@ def _migrar_archivo_sqlite_directo(db_url: str):
 
 
 def asegurar_migraciones_sqlite(db_url_or_path: str = None):
-    """Garantiza de forma inmediata y tolerante que todas las tablas y columnas SQLite existan."""
+    """Garantiza de forma inmediata y estricta que todas las tablas y columnas SQLite existan."""
     if not db_url_or_path:
         db_url_or_path = settings.DATABASE_URL
     _migrar_archivo_sqlite_directo(db_url_or_path)
@@ -448,85 +470,13 @@ def _crear_engine(db_url: str):
 
         @event.listens_for(eng.sync_engine, "connect")
         def _set_sqlite_pragma(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
             try:
-                cursor = dbapi_connection.cursor()
                 cursor.execute("PRAGMA journal_mode=WAL;")
                 cursor.execute("PRAGMA synchronous=NORMAL;")
                 cursor.execute("PRAGMA busy_timeout=15000;")
-
-                # Migración preventiva inmediata de columnas en SQLite
-                try:
-                    cursor.execute("PRAGMA table_info(sesiones_caja);")
-                    cols_caja = [r[1] for r in cursor.fetchall()]
-                    if cols_caja:
-                        cols_sesion = [
-                            ("arqueo_apertura_json", "TEXT"),
-                    ("arqueo_cierre_json", "TEXT"),
-                            ("monto_transferencias_esperado", "REAL DEFAULT 0.0"),
-                            ("monto_transferencias_verificado", "REAL DEFAULT 0.0"),
-                            ("diferencia_banco", "REAL DEFAULT 0.0"),
-                            ("estado_banco", "TEXT DEFAULT 'Pendiente'"),
-                            ("terminal_id", "INTEGER"),
-                            ("terminal_nombre", "TEXT"),
-                            ("observaciones", "TEXT"),
-                            ("fecha_cierre", "TEXT"),
-                            ("hora_cierre", "TEXT"),
-                            ("usuario_cierre", "TEXT"),
-                            ("monto_esperado_efectivo", "REAL DEFAULT 0.0"),
-                            ("monto_real_contado", "REAL DEFAULT 0.0"),
-                            ("diferencia", "REAL DEFAULT 0.0"),
-                            ("created_at", "TIMESTAMP"),
-                        ]
-                        for c_nom, c_def in cols_sesion:
-                            if c_nom not in cols_caja:
-                                try:
-                                    cursor.execute(f"ALTER TABLE sesiones_caja ADD COLUMN {c_nom} {c_def};")
-                                except Exception as e_sc:
-                                    if "duplicate column" not in str(e_sc).lower():
-                                        logger.warning("Aviso pragma sesiones_caja.%s: %s", c_nom, e_sc)
-                        try:
-                            cursor.execute("UPDATE sesiones_caja SET created_at = datetime('now') WHERE created_at IS NULL;")
-                        except Exception as e_sc_up:
-                            logger.warning("Aviso pragma UPDATE sesiones_caja: %s", e_sc_up)
-
-                    cursor.execute("PRAGMA table_info(proveedores);")
-                    cols_prov = [r[1] for r in cursor.fetchall()]
-                    if cols_prov:
-                        cols_p = [
-                            ("documento_nit", "TEXT DEFAULT ''"),
-                            ("email", "TEXT DEFAULT ''"),
-                            ("direccion", "TEXT DEFAULT ''"),
-                            ("contacto", "TEXT DEFAULT ''"),
-                            ("estado", "TEXT DEFAULT 'Activo'"),
-                            ("saldo_acumulado", "REAL DEFAULT 0.0"),
-                            ("total_ventas", "REAL DEFAULT 0.0"),
-                            ("total_comisiones", "REAL DEFAULT 0.0"),
-                            ("total_pagado", "REAL DEFAULT 0.0"),
-                        ]
-                        for c_nom, c_def in cols_p:
-                            if c_nom not in cols_prov:
-                                try:
-                                    cursor.execute(f"ALTER TABLE proveedores ADD COLUMN {c_nom} {c_def};")
-                                except Exception as e_pv:
-                                    if "duplicate column" not in str(e_pv).lower():
-                                        logger.warning("Aviso pragma proveedores.%s: %s", c_nom, e_pv)
-                    for t_nom in ("compras_inventario", "movimientos_inventario", "traslados_inventario", "gastos", "liquidaciones_proveedores", "liquidaciones", "ventas", "abonos", "movimientos_caja", "movimientos_financieros"):
-                        try:
-                            cursor.execute(f"PRAGMA table_info({t_nom});")
-                            t_cols = {r[1] for r in cursor.fetchall()}
-                            if t_cols and "idempotency_key" not in t_cols:
-                                cursor.execute(f"ALTER TABLE {t_nom} ADD COLUMN idempotency_key TEXT;")
-                                cursor.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{t_nom}_idempotency_key ON {t_nom}(idempotency_key);")
-                        except Exception as e_prg:
-                            if "duplicate column" not in str(e_prg).lower() and "already exists" not in str(e_prg).lower():
-                                logger.warning("Aviso pragma idempotencia %s: %s", t_nom, e_prg)
-                    dbapi_connection.commit()
-                except Exception as e_pragma_mig:
-                    logger.warning("Aviso en bloque de migración pragma connect: %s", e_pragma_mig)
-
+            finally:
                 cursor.close()
-            except Exception as e_conn_pragma:
-                logger.warning("Aviso configurando conexión SQLite: %s", e_conn_pragma)
 
         return eng
     return create_async_engine(db_url, echo=_echo_sql)

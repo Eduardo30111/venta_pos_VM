@@ -148,6 +148,7 @@ async def resumen_diario(
         select(func.count(func.distinct(Venta.cliente_id))).where(
             v_fecha == f_str,
             Venta.estado != "Anulada",
+            Venta.estado != "Pendiente_Caja",
             Venta.cliente_id.isnot(None),
         )
     )
@@ -157,7 +158,7 @@ async def resumen_diario(
     top_res = await db.execute(
         select(DetalleVenta.item_nombre, func.sum(DetalleVenta.cantidad).label("u"))
         .join(Venta, DetalleVenta.venta_id == Venta.id)
-        .where(v_fecha == f_str, Venta.estado != "Anulada")
+        .where(v_fecha == f_str, Venta.estado != "Anulada", Venta.estado != "Pendiente_Caja")
         .group_by(DetalleVenta.item_nombre)
         .order_by(func.sum(DetalleVenta.cantidad).desc())
         .limit(1)

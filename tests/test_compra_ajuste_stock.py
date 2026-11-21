@@ -87,7 +87,7 @@ class TestCompraAjusteStockFlow(unittest.TestCase):
             );
         """)
         conn.execute("""
-            CREATE TABLE usuarios (
+            CREATE TABLE IF NOT EXISTS usuarios (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 usuario TEXT UNIQUE NOT NULL,
                 clave TEXT NOT NULL,
@@ -96,6 +96,24 @@ class TestCompraAjusteStockFlow(unittest.TestCase):
                 apellidos TEXT DEFAULT 'Sistema',
                 documento TEXT DEFAULT '00000',
                 estado TEXT DEFAULT 'Activo'
+            );
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario_id INTEGER,
+                usuario_nombre TEXT,
+                terminal_id INTEGER,
+                terminal_nombre TEXT,
+                accion TEXT,
+                modulo TEXT,
+                tabla_afectada TEXT,
+                registro_id TEXT,
+                valor_anterior TEXT,
+                valor_nuevo TEXT,
+                descripcion TEXT,
+                ip_address TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
         conn.execute("INSERT INTO usuarios (id, usuario, clave, rol, nombre) VALUES (1, 'admin', 'pass', 'Administrador', 'Admin');")

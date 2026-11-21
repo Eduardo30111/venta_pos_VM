@@ -5,6 +5,7 @@ import asyncio
 from sqlalchemy.future import select
 from server.config import settings
 import server.database as db_mod
+import server.models  # Asegura que todos los modelos ORM estén registrados en Base.metadata
 from server.database import Base, _crear_engine, asegurar_migraciones_sqlite
 from server.models.usuario import Usuario
 from server.models.terminal import Terminal

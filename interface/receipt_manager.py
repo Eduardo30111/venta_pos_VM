@@ -248,9 +248,10 @@ def reconstruir_datos_venta_historica(id_venta):
         if resp.status_code == 200:
             v = resp.json()
             snapshot_negocio = None
-            if v.get("datos_negocio_json"):
+            raw_snap = v.get("snapshot_negocio") or v.get("datos_negocio_json")
+            if raw_snap:
                 try:
-                    parsed = json.loads(v["datos_negocio_json"])
+                    parsed = raw_snap if isinstance(raw_snap, dict) else json.loads(raw_snap)
                     if isinstance(parsed, dict) and parsed.get("nombre_negocio"):
                         snapshot_negocio = parsed
                 except Exception:
@@ -309,9 +310,10 @@ def reconstruir_datos_venta_historica(id_venta):
                 if v.get("saldo_pendiente") is not None
                 else (total_venta if str(metodo_pago).lower() == "fiado" else 0.0)
             )
-            fecha_str = v.get("fecha") or str(v.get("creado_en") or "")[:10]
+            ts_creacion = str(v.get("created_at") or v.get("creado_en") or "")
+            fecha_str = v.get("fecha") or ts_creacion[:10]
             hora_str = v.get("hora") or (
-                str(v.get("creado_en") or "")[11:19] if len(str(v.get("creado_en") or "")) >= 19 else ""
+                ts_creacion[11:19] if len(ts_creacion) >= 19 else ""
             )
 
             datos_api = {

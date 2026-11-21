@@ -50,8 +50,9 @@ Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-; Regla de Firewall opcional para el puerto 8000
-Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""VmPOS Servidor"" dir=in action=allow protocol=TCP localport=8000"; Tasks: firewall; Flags: runhidden
+; Regla de Firewall opcional restringida a redes privadas (evita duplicación y exposición en Wi-Fi pública)
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""VmPOS Servidor"""; Tasks: firewall; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""VmPOS Servidor"" dir=in action=allow protocol=TCP localport=8000 profile=private"; Tasks: firewall; Flags: runhidden
 ; Ejecutar la aplicación al finalizar si el usuario lo desea
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 

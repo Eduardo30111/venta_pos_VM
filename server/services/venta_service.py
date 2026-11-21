@@ -21,11 +21,10 @@ from ..models.terminal import Terminal
 from ..models.caja import MovimientoFinanciero, MovimientoCaja
 from ..schemas.venta import VentaCreate, CobroOrdenCreate, EditarVentaRequest
 from ..middleware.audit import log_audit
+from ..middleware.auth import is_admin_role
 from .caja_service import CajaService
 
-from ..async_lock import LazyAsyncLock as _LazyAsyncLock
-
-_VENTA_LOCK = _LazyAsyncLock()
+from ..async_lock import SHARED_INVENTORY_LOCK as _VENTA_LOCK
 
 
 def normalizar_metodo_pago(metodo: str) -> str:
@@ -110,7 +109,10 @@ class VentaService:
                 func.sum(CuentaPorPagar.monto_comision),
                 func.sum(CuentaPorPagar.monto_pagado),
                 func.sum(CuentaPorPagar.saldo_pendiente),
-            ).where(CuentaPorPagar.proveedor_id == proveedor_id, CuentaPorPagar.estado != "Anulada")
+            ).where(
+                CuentaPorPagar.proveedor_id == proveedor_id,
+                CuentaPorPagar.estado.notin_(["Anulada", "Pendiente_Caja"]),
+            )
         )
         row = res_sum.first()
         prov.total_ventas = float((row[0] if row else 0.0) or 0.0)
@@ -161,6 +163,9 @@ class VentaService:
 
                 # 2. Normalizar pagos antes de crear registros
                 estado_venta = venta_data.estado or "Completada"
+                total_esperado = round(float(venta_data.total or 0.0), 2)
+                if total_esperado < 0:
+                    raise HTTPException(status_code=400, detail="El total de la venta no puede ser negativo.")
                 pagos_limpios: List[Dict[str, Any]] = []
                 monto_fiado = 0.0
                 if estado_venta != "Pendiente_Caja":
@@ -168,9 +173,9 @@ class VentaService:
                         pagos_limpios.append(
                             {
                                 "metodo": "Efectivo",
-                                "monto": float(venta_data.total),
+                                "monto": total_esperado,
                                 "referencia": None,
-                                "recibido": float(venta_data.total),
+                                "recibido": total_esperado,
                                 "cambio": 0.0,
                             }
                         )
@@ -191,6 +196,15 @@ class VentaService:
                             )
                             if m_norm == "Fiado":
                                 monto_fiado = round(monto_fiado + m_val, 2)
+                        suma_pagos = round(sum(p["monto"] for p in pagos_limpios), 2)
+                        if abs(suma_pagos - total_esperado) > 0.05:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=(
+                                    f"La suma de los pagos (${suma_pagos:,.2f}) no coincide con "
+                                    f"el total de la venta (${total_esperado:,.2f})."
+                                ),
+                            )
 
                 # 3. Resolver Cliente por ID estable primero; recuperar documento automáticamente
                 cliente_obj: Optional[Cliente] = None
@@ -221,12 +235,18 @@ class VentaService:
                             status_code=400,
                             detail=f"El cliente '{cliente_obj.nombre}' se encuentra inactivo y no puede recibir crédito.",
                         )
+                    es_admin_u = is_admin_role(usuario)
                     if not cliente_obj.permite_fiado:
+                        if not es_admin_u:
+                            raise HTTPException(
+                                status_code=403,
+                                detail=f"El cliente '{cliente_obj.nombre}' no tiene crédito habilitado. Requiere autorización de un administrador.",
+                            )
                         cliente_obj.permite_fiado = True
                         db.add(cliente_obj)
                         await db.flush()
 
-                    # Verificar límite de crédito salvo autorización expresa de administrador
+                    # Verificar límite de crédito (solo un administrador puede autorizar exceso)
                     cxc_sum_res = await db.execute(
                         select(func.sum(CuentaPorCobrar.saldo_pendiente)).where(
                             CuentaPorCobrar.cliente_id == cliente_obj.id,
@@ -235,7 +255,12 @@ class VentaService:
                     )
                     deuda_actual = round(float(cxc_sum_res.scalar() or 0.0), 2)
                     limite_cli = round(float(cliente_obj.limite_credito or 0.0), 2)
-                    autorizado_exceso = bool(getattr(venta_data, "autorizado_exceso_credito", False))
+                    if getattr(venta_data, "autorizado_exceso_credito", False) and not es_admin_u:
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Solo un Administrador puede autorizar ventas que excedan el límite de crédito.",
+                        )
+                    autorizado_exceso = bool(getattr(venta_data, "autorizado_exceso_credito", False)) and es_admin_u
                     if limite_cli > 0 and (deuda_actual + monto_fiado > limite_cli + 0.009) and not autorizado_exceso:
                         raise HTTPException(
                             status_code=400,
@@ -469,6 +494,7 @@ class VentaService:
                                 comision_prov = 0.0
 
                             if monto_cxp_prod > 0:
+                                estado_cxp = "Pendiente_Caja" if estado_venta == "Pendiente_Caja" else "Pendiente"
                                 cxp_prod = CuentaPorPagar(
                                     proveedor_id=prov_id_prod,
                                     venta_id=venta.id,
@@ -482,7 +508,7 @@ class VentaService:
                                     monto=monto_cxp_prod,
                                     monto_pagado=0.0,
                                     saldo_pendiente=monto_cxp_prod,
-                                    estado="Pendiente",
+                                    estado=estado_cxp,
                                     fecha=f_str,
                                     hora=h_str,
                                     usuario=op_nombre,
@@ -575,6 +601,7 @@ class VentaService:
 
                         # Cuenta por Pagar a proveedor (para Servicios con proveedor asignado)
                         if prov_id_serv and monto_cxp > 0:
+                            estado_cxp = "Pendiente_Caja" if estado_venta == "Pendiente_Caja" else "Pendiente"
                             cxp = CuentaPorPagar(
                                 proveedor_id=prov_id_serv,
                                 venta_id=venta.id,
@@ -588,7 +615,7 @@ class VentaService:
                                 monto=monto_cxp,
                                 monto_pagado=0.0,
                                 saldo_pendiente=monto_cxp,
-                                estado="Pendiente",
+                                estado=estado_cxp,
                                 fecha=f_str,
                                 hora=h_str,
                                 usuario=op_nombre,
@@ -779,6 +806,8 @@ class VentaService:
 
                 pagos_limpios = []
                 monto_fiado = 0.0
+                if not cobro_data.pagos:
+                    raise HTTPException(status_code=400, detail="Debe especificar al menos un pago para autorizar la orden.")
                 for p in cobro_data.pagos:
                     m_norm = normalizar_metodo_pago(p.metodo)
                     m_val = round(float(p.monto or 0.0), 2)
@@ -795,6 +824,13 @@ class VentaService:
                     )
                     if m_norm == "Fiado":
                         monto_fiado = round(monto_fiado + m_val, 2)
+                suma_cobro = round(sum(p["monto"] for p in pagos_limpios), 2)
+                total_orden = round(float(venta.total or 0.0), 2)
+                if abs(suma_cobro - total_orden) > 0.05:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"La suma de los pagos (${suma_cobro:,.2f}) no coincide con el total de la orden (${total_orden:,.2f}).",
+                    )
 
                 cliente_obj = None
                 raw_doc = (getattr(cobro_data, "cliente_documento", None) or "").strip()
@@ -882,7 +918,18 @@ class VentaService:
                             status_code=400,
                             detail="Para autorizar como FIADO debe seleccionar un cliente registrado válido.",
                         )
+                    if str(cliente_obj.estado or "Activo").strip().lower() == "inactivo":
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"El cliente '{cliente_obj.nombre}' se encuentra inactivo y no puede recibir crédito.",
+                        )
+                    es_admin_cobro = is_admin_role(admin_user)
                     if not cliente_obj.permite_fiado:
+                        if not es_admin_cobro:
+                            raise HTTPException(
+                                status_code=403,
+                                detail=f"El cliente '{cliente_obj.nombre}' no tiene crédito habilitado. Requiere autorización de un administrador.",
+                            )
                         cliente_obj.permite_fiado = True
                         db.add(cliente_obj)
                         await db.flush()
@@ -895,10 +942,11 @@ class VentaService:
                     )
                     deuda_actual = round(float(cxc_result.scalar() or 0.0), 2)
                     limite_cli = round(float(cliente_obj.limite_credito or 0.0), 2)
+                    autorizado_exceso_cobro = bool(getattr(cobro_data, "autorizado_exceso_credito", False)) and es_admin_cobro
                     if (
                         limite_cli > 0
                         and (deuda_actual + monto_fiado > limite_cli + 0.009)
-                        and not getattr(cobro_data, "autorizado_exceso_credito", False)
+                        and not autorizado_exceso_cobro
                     ):
                         raise HTTPException(status_code=400, detail="Límite de crédito excedido")
 
@@ -949,6 +997,15 @@ class VentaService:
                 for c in com_res.scalars().all():
                     if c.estado == "Pendiente_Caja":
                         c.estado = "Pendiente"
+
+                cxp_res = await db.execute(select(CuentaPorPagar).with_for_update().where(CuentaPorPagar.venta_id == venta.id))
+                provs_activar = set()
+                for cxp_o in cxp_res.scalars().all():
+                    if cxp_o.estado == "Pendiente_Caja":
+                        cxp_o.estado = "Pendiente"
+                        provs_activar.add(cxp_o.proveedor_id)
+                for pid_act in provs_activar:
+                    await VentaService._recalcular_acumulados_proveedor(db, pid_act)
 
                 venta.metodo_pago_principal = (
                     "Mixto"
@@ -1218,16 +1275,47 @@ class VentaService:
                     raise HTTPException(status_code=404, detail=f"No existe la venta #{venta_id}")
                 if venta.estado == "Anulada":
                     raise HTTPException(status_code=400, detail="No se puede editar una venta anulada.")
+                if venta.estado == "Pendiente_Caja":
+                    raise HTTPException(
+                        status_code=400,
+                        detail="No se puede editar una orden en estado Pendiente_Caja. Cobre o anule la orden primero.",
+                    )
 
                 ahora = datetime.now()
                 f_str = ahora.strftime("%Y-%m-%d")
                 h_str = ahora.strftime("%H:%M:%S")
                 admin_nom = (f"{usuario.nombre or ''} {usuario.apellidos or ''}".strip() or usuario.usuario)
 
+                # Validar comisiones ya liquidadas y CXP ya pagadas antes de mutar
+                com_res_ant = await db.execute(select(Comision).with_for_update().where(Comision.venta_id == venta.id))
+                coms_ant = com_res_ant.scalars().all()
+                for com in coms_ant:
+                    if com.estado == "Liquidada":
+                        raise HTTPException(status_code=400, detail="No se puede editar: existen comisiones ya liquidadas.")
+
+                cxp_res_ant = await db.execute(select(CuentaPorPagar).with_for_update().where(CuentaPorPagar.venta_id == venta.id))
+                cxps_ant = cxp_res_ant.scalars().all()
+                provs_afectados = set()
+                for cxp in cxps_ant:
+                    if cxp.estado == "Pagada" or float(cxp.monto_pagado or 0.0) > 0.01:
+                        raise HTTPException(status_code=400, detail="No se puede editar: ya existen pagos al proveedor asociados.")
+                    provs_afectados.add(cxp.proveedor_id)
+
                 total_anterior = float(venta.total or 0.0)
                 pag_res = await db.execute(select(Pago).where(Pago.venta_id == venta.id))
                 pagos_ant = pag_res.scalars().all()
                 metodo_anterior = venta.metodo_pago_principal or (pagos_ant[0].metodo if pagos_ant else "Efectivo")
+
+                ef_ant = round(sum(float(p.monto or 0.0) for p in pagos_ant if (p.metodo or "").strip().lower() == "efectivo"), 2)
+                tr_ant = round(sum(float(p.monto or 0.0) for p in pagos_ant if (p.metodo or "").strip().lower() == "transferencia"), 2)
+                fi_ant = round(sum(float(p.monto or 0.0) for p in pagos_ant if (p.metodo or "").strip().lower() == "fiado"), 2)
+                if not pagos_ant:
+                    if metodo_anterior == "Efectivo":
+                        ef_ant = total_anterior
+                    elif metodo_anterior == "Transferencia":
+                        tr_ant = total_anterior
+                    elif metodo_anterior == "Fiado":
+                        fi_ant = total_anterior
 
                 # Validar abonos previos si tenía CXC
                 cxc_res = await db.execute(
@@ -1240,33 +1328,90 @@ class VentaService:
                         detail="No se puede editar una venta fiada que ya tiene abonos registrados.",
                     )
 
-                if nuevo_metodo == "Fiado" and not venta.cliente_id:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="No se puede cambiar a Fiado porque la venta no tiene un cliente registrado asociado.",
-                    )
+                cliente_obj = None
+                if venta.cliente_id:
+                    cli_r = await db.execute(select(Cliente).with_for_update().where(Cliente.id == venta.cliente_id))
+                    cliente_obj = cli_r.scalars().first()
 
-                # 1. Revertir stock anterior
+                if nuevo_metodo == "Fiado":
+                    if not cliente_obj:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="No se puede cambiar a Fiado porque la venta no tiene un cliente registrado asociado.",
+                        )
+                    if str(cliente_obj.estado or "Activo").strip().lower() == "inactivo":
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"El cliente '{cliente_obj.nombre}' está inactivo y no puede recibir crédito.",
+                        )
+
+                # Obtener usuario original de la venta para recalcular comisiones
+                v_user_res = await db.execute(select(Usuario).where(Usuario.id == venta.usuario_id))
+                venta_usuario = v_user_res.scalars().first() or usuario
+
+                # 1. Eliminar comisiones y CXP anteriores ANTES de borrar DetalleVenta (evita violación FK en PostgreSQL)
+                await db.execute(delete(Comision).where(Comision.venta_id == venta.id))
+                await db.execute(delete(CuentaPorPagar).where(CuentaPorPagar.venta_id == venta.id))
+
+                # 2. Revertir stock anterior con registro en Kárdex
                 det_res = await db.execute(select(DetalleVenta).where(DetalleVenta.venta_id == venta.id))
                 dets_ant = det_res.scalars().all()
                 for d_old in dets_ant:
-                    if d_old.tipo_item == "Producto":
+                    if str(d_old.tipo_item or "").strip().lower() in ("producto", "productos"):
                         p_res = await db.execute(select(Producto).with_for_update().where(Producto.id == d_old.item_id))
                         prod = p_res.scalars().first()
                         if prod:
-                            prod.stock_vitrina = round(float(prod.stock_vitrina or 0.0) + float(d_old.cantidad), 4)
-                            prod.stock = round(float(prod.stock_bodega or 0.0) + prod.stock_vitrina, 4)
+                            sv_ant = float(prod.stock_vitrina or 0.0)
+                            sb_ant = float(prod.stock_bodega or 0.0)
+                            st_ant = float(prod.stock or 0.0)
+                            sv_des = round(sv_ant + float(d_old.cantidad), 4)
+                            st_des = round(sb_ant + sv_des, 4)
+                            prod.stock_vitrina = sv_des
+                            prod.stock = st_des
+                            db.add(
+                                MovimientoInventario(
+                                    fecha=f_str,
+                                    hora=h_str,
+                                    producto_id=prod.id,
+                                    codigo_producto=prod.codigo,
+                                    nombre_producto=prod.nombre,
+                                    tipo="DEVOLUCION_VENTA",
+                                    cantidad=float(d_old.cantidad),
+                                    unidad_medida=prod.unidad_medida or "Unidad",
+                                    ubicacion_origen="CLIENTE",
+                                    ubicacion_destino="VITRINA",
+                                    stock_anterior=st_ant,
+                                    stock_nuevo=st_des,
+                                    stock_origen_ant=0.0,
+                                    stock_origen_des=0.0,
+                                    stock_destino_ant=sv_ant,
+                                    stock_destino_des=sv_des,
+                                    costo_unitario=float(d_old.costo_unitario or prod.precio_costo or 0.0),
+                                    valor_total=round(float(d_old.costo_unitario or prod.precio_costo or 0.0) * float(d_old.cantidad), 2),
+                                    referencia=f"EDIT-REV-{venta.numero}",
+                                    usuario_id=usuario_id,
+                                    usuario_nombre=admin_nom,
+                                    terminal_id=req.terminal_id or venta.terminal_id or 1,
+                                    observacion=f"Reverso por edición de venta {venta.numero}: {req.motivo}",
+                                    estado="Completado",
+                                )
+                            )
 
                 await db.execute(delete(DetalleVenta).where(DetalleVenta.venta_id == venta.id))
 
-                # 2. Insertar nuevos ítems y descontar stock
+                # 3. Insertar nuevos ítems, descontar stock con Kárdex y recalcular comisiones + CXP
                 nuevo_total = 0.0
+                pct_op = float(venta_usuario.porcentaje_comision or 0.0)
+                es_porcentual_op = venta_usuario.tipo_remuneracion == "Porcentual" or pct_op > 0
+
                 for it in req.nuevos_items:
                     cod = str(it.codigo_producto).strip()
                     cant = float(it.cantidad)
                     pu = float(it.precio_unitario)
                     if cant <= 0:
                         raise HTTPException(status_code=400, detail="La cantidad debe ser mayor a cero.")
+                    if pu < 0:
+                        raise HTTPException(status_code=400, detail="El precio unitario no puede ser negativo.")
                     sub = round(pu * cant, 2)
                     nuevo_total = round(nuevo_total + sub, 2)
 
@@ -1275,48 +1420,206 @@ class VentaService:
                     )
                     prod = prod_res.scalars().first()
                     if prod:
-                        if float(prod.stock_vitrina or 0.0) + 1e-6 < cant:
+                        sv_ant = float(prod.stock_vitrina or 0.0)
+                        sb_ant = float(prod.stock_bodega or 0.0)
+                        st_ant = float(prod.stock or 0.0)
+                        if sv_ant + 1e-6 < cant:
                             raise HTTPException(
                                 status_code=409,
                                 detail=f"Stock insuficiente en Vitrina para '{prod.nombre}' al editar.",
                             )
-                        prod.stock_vitrina = round(max(0.0, float(prod.stock_vitrina or 0.0) - cant), 4)
-                        prod.stock = round(float(prod.stock_bodega or 0.0) + prod.stock_vitrina, 4)
-                        db.add(
-                            DetalleVenta(
-                                venta_id=venta.id,
-                                tipo_item="Producto",
-                                item_id=prod.id,
-                                item_codigo=prod.codigo,
-                                item_nombre=prod.nombre,
-                                precio_original=float(prod.precio_venta or pu),
-                                precio_vendido=pu,
-                                cantidad=cant,
-                                descuento=0.0,
-                                subtotal=sub,
-                                costo_unitario=float(prod.precio_costo or 0.0),
-                            )
+                        sv_des = round(max(0.0, sv_ant - cant), 4)
+                        st_des = round(sb_ant + sv_des, 4)
+                        prod.stock_vitrina = sv_des
+                        prod.stock = st_des
+                        costo_u = float(prod.precio_costo or 0.0)
+                        det_new = DetalleVenta(
+                            venta_id=venta.id,
+                            tipo_item="Producto",
+                            item_id=prod.id,
+                            item_codigo=prod.codigo,
+                            item_nombre=prod.nombre,
+                            precio_original=float(prod.precio_venta or pu),
+                            precio_vendido=pu,
+                            cantidad=cant,
+                            descuento=0.0,
+                            subtotal=sub,
+                            costo_unitario=costo_u,
                         )
-                    else:
-                        serv_res = await db.execute(select(Servicio).where(Servicio.codigo == cod))
-                        serv = serv_res.scalars().first()
+                        db.add(det_new)
+                        await db.flush()
+
                         db.add(
-                            DetalleVenta(
-                                venta_id=venta.id,
-                                tipo_item="Servicio",
-                                item_id=serv.id if serv else 0,
-                                item_codigo=cod,
-                                item_nombre=serv.nombre if serv else it.nombre_producto,
-                                precio_original=float(serv.precio_venta if serv else pu),
-                                precio_vendido=pu,
+                            MovimientoInventario(
+                                fecha=f_str,
+                                hora=h_str,
+                                producto_id=prod.id,
+                                codigo_producto=prod.codigo,
+                                nombre_producto=prod.nombre,
+                                tipo="VENTA",
                                 cantidad=cant,
-                                descuento=0.0,
-                                subtotal=sub,
-                                costo_unitario=0.0,
+                                unidad_medida=prod.unidad_medida or "Unidad",
+                                ubicacion_origen="VITRINA",
+                                ubicacion_destino="CLIENTE",
+                                stock_anterior=st_ant,
+                                stock_nuevo=st_des,
+                                stock_origen_ant=sv_ant,
+                                stock_origen_des=sv_des,
+                                stock_destino_ant=0.0,
+                                stock_destino_des=0.0,
+                                costo_unitario=costo_u,
+                                valor_total=round(costo_u * cant, 2),
+                                referencia=f"EDIT-{venta.numero}",
+                                usuario_id=usuario_id,
+                                usuario_nombre=admin_nom,
+                                terminal_id=req.terminal_id or venta.terminal_id or 1,
+                                observacion=f"Salida por edición de venta {venta.numero}: {req.motivo}",
+                                estado="Completado",
                             )
                         )
 
-                # 3. Reemplazar pagos y ajustar Caja / CXC
+                        if es_porcentual_op and pct_op > 0:
+                            util_u = max(0.0, pu - costo_u)
+                            base_c = util_u if util_u > 0 else pu
+                            db.add(
+                                Comision(
+                                    usuario_id=venta.usuario_id,
+                                    venta_id=venta.id,
+                                    detalle_venta_id=det_new.id,
+                                    producto_id=prod.id,
+                                    servicio_id=None,
+                                    valor_servicio=sub,
+                                    costo_servicio=round(costo_u * cant, 2),
+                                    utilidad=round(util_u * cant, 2),
+                                    porcentaje=pct_op,
+                                    monto_comision=round((base_c * cant) * (pct_op / 100.0), 2),
+                                    estado="Pendiente",
+                                )
+                            )
+
+                        if prod.proveedor_id:
+                            pct_p = float(getattr(prod, "porcentaje_comision", 0.0) or 0.0)
+                            if pct_p > 0:
+                                com_p = round((sub * pct_p) / 100.0, 2)
+                                m_cxp = round(max(0.0, sub - com_p), 2)
+                            elif costo_u > 0:
+                                m_cxp = round(costo_u * cant, 2)
+                                com_p = round(max(0.0, sub - m_cxp), 2)
+                            else:
+                                m_cxp = sub
+                                com_p = 0.0
+                            if m_cxp > 0:
+                                db.add(
+                                    CuentaPorPagar(
+                                        proveedor_id=prod.proveedor_id,
+                                        venta_id=venta.id,
+                                        numero_venta=venta.numero,
+                                        codigo_servicio=prod.codigo,
+                                        nombre_servicio=prod.nombre,
+                                        precio_venta=sub,
+                                        porcentaje_comision=pct_p,
+                                        monto_comision=com_p,
+                                        concepto=f"Producto {prod.nombre} - Venta {venta.numero} (Editada)",
+                                        monto=m_cxp,
+                                        monto_pagado=0.0,
+                                        saldo_pendiente=m_cxp,
+                                        estado="Pendiente",
+                                        fecha=f_str,
+                                        hora=h_str,
+                                        usuario=admin_nom,
+                                    )
+                                )
+                                provs_afectados.add(prod.proveedor_id)
+                    else:
+                        serv_res = await db.execute(select(Servicio).where(Servicio.codigo == cod))
+                        serv = serv_res.scalars().first()
+                        prov_id_s = serv.proveedor_id if serv else None
+                        costo_p_s = float(getattr(serv, "costo_proveedor", 0.0) or 0.0) if serv else 0.0
+                        pct_p_s = float(getattr(serv, "porcentaje_comision", 0.0) or 0.0) if serv else 0.0
+                        if prov_id_s:
+                            if pct_p_s > 0:
+                                com_ps = round((sub * pct_p_s) / 100.0, 2)
+                                m_cxp_s = round(max(0.0, sub - com_ps), 2)
+                            elif costo_p_s > 0:
+                                m_cxp_s = round(costo_p_s * cant, 2)
+                                com_ps = round(max(0.0, sub - m_cxp_s), 2)
+                            else:
+                                m_cxp_s = sub
+                                com_ps = 0.0
+                            costo_u_s = round(m_cxp_s / cant, 2) if cant > 0 else 0.0
+                        else:
+                            m_cxp_s = 0.0
+                            com_ps = 0.0
+                            costo_u_s = 0.0
+
+                        det_new = DetalleVenta(
+                            venta_id=venta.id,
+                            tipo_item="Servicio",
+                            item_id=serv.id if serv else 0,
+                            item_codigo=cod,
+                            item_nombre=serv.nombre if serv else it.nombre_producto,
+                            precio_original=float(serv.precio_venta if serv else pu),
+                            precio_vendido=pu,
+                            cantidad=cant,
+                            descuento=0.0,
+                            subtotal=sub,
+                            costo_unitario=costo_u_s,
+                        )
+                        db.add(det_new)
+                        await db.flush()
+
+                        gen_c = (
+                            (serv.genera_comision if serv.genera_comision is not None else (serv.proveedor_id is None))
+                            if serv
+                            else True
+                        )
+                        if gen_c and es_porcentual_op and pct_op > 0:
+                            util_us = pu - costo_u_s
+                            base_cs = util_us if util_us > 0 else pu
+                            db.add(
+                                Comision(
+                                    usuario_id=venta.usuario_id,
+                                    venta_id=venta.id,
+                                    detalle_venta_id=det_new.id,
+                                    servicio_id=serv.id if serv else None,
+                                    producto_id=None,
+                                    valor_servicio=sub,
+                                    costo_servicio=round(costo_u_s * cant, 2),
+                                    utilidad=round(max(0.0, util_us) * cant, 2),
+                                    porcentaje=pct_op,
+                                    monto_comision=round((base_cs * cant) * (pct_op / 100.0), 2),
+                                    estado="Pendiente",
+                                )
+                            )
+
+                        if prov_id_s and m_cxp_s > 0:
+                            db.add(
+                                CuentaPorPagar(
+                                    proveedor_id=prov_id_s,
+                                    venta_id=venta.id,
+                                    numero_venta=venta.numero,
+                                    codigo_servicio=cod,
+                                    nombre_servicio=serv.nombre if serv else it.nombre_producto,
+                                    precio_venta=sub,
+                                    porcentaje_comision=pct_p_s,
+                                    monto_comision=com_ps,
+                                    concepto=f"Servicio {serv.nombre if serv else it.nombre_producto} - Venta {venta.numero} (Editada)",
+                                    monto=m_cxp_s,
+                                    monto_pagado=0.0,
+                                    saldo_pendiente=m_cxp_s,
+                                    estado="Pendiente",
+                                    fecha=f_str,
+                                    hora=h_str,
+                                    usuario=admin_nom,
+                                )
+                            )
+                            provs_afectados.add(prov_id_s)
+
+                await db.flush()
+                for pid_af in provs_afectados:
+                    await VentaService._recalcular_acumulados_proveedor(db, pid_af)
+
+                # 4. Reemplazar pagos y ajustar Caja Física / Banco Transferencias / Cartera CXC
                 await db.execute(delete(Pago).where(Pago.venta_id == venta.id))
                 db.add(
                     Pago(
@@ -1329,15 +1632,15 @@ class VentaService:
                     )
                 )
 
-                ef_ant = total_anterior if metodo_anterior == "Efectivo" else 0.0
+                try:
+                    activa = await CajaService.obtener_sesion_activa(db)
+                except Exception:
+                    activa = None
+                sesion_id = activa.id if activa else venta.sesion_caja_id
+
                 ef_nuevo = nuevo_total if nuevo_metodo == "Efectivo" else 0.0
                 delta_ef = round(ef_nuevo - ef_ant, 2)
                 if abs(delta_ef) > 0.01:
-                    try:
-                        activa = await CajaService.obtener_sesion_activa(db)
-                    except Exception:
-                        activa = None
-                    sesion_id = activa.id if activa else venta.sesion_caja_id
                     await CajaService.registrar_movimiento_caja(
                         db=db,
                         tipo="AJUSTE",
@@ -1350,30 +1653,94 @@ class VentaService:
                         hora_str=h_str,
                     )
 
+                tr_nuevo = nuevo_total if nuevo_metodo == "Transferencia" else 0.0
+                delta_tr = round(tr_nuevo - tr_ant, 2)
+                if abs(delta_tr) > 0.01:
+                    await CajaService.registrar_movimiento_financiero(
+                        db=db,
+                        tipo="AJUSTE_AUTORIZADO",
+                        concepto=f"Ajuste banco por edición Venta {venta.numero}: {req.motivo}",
+                        monto=delta_tr,
+                        metodo_pago="Transferencia",
+                        cuenta_afectada="BANCO_TRANSFERENCIA",
+                        usuario=admin_nom,
+                        referencia_origen=f"EDIT-VENTA-{venta.id}",
+                        sesion_id=sesion_id,
+                        observaciones=req.motivo,
+                        sincronizar_caja=False,
+                        fecha_str=f_str,
+                        hora_str=h_str,
+                    )
+
+                from .cliente_service import ClienteService
+
                 if cxc_ant and nuevo_metodo != "Fiado":
-                    cxc_ant.estado = "Anulada"
-                    cxc_ant.saldo_pendiente = 0.0
+                    await ClienteService.revertir_fiado_por_anulacion(
+                        db=db,
+                        venta_id=venta.id,
+                        usuario_id=usuario_id,
+                        terminal_id=req.terminal_id or venta.terminal_id or 1,
+                        motivo=f"Edición de venta {venta.numero} (cambio de Fiado a {nuevo_metodo}): {req.motivo}",
+                    )
                 elif nuevo_metodo == "Fiado":
+                    fi_nuevo = nuevo_total
+                    delta_fi = round(fi_nuevo - fi_ant, 2)
                     if cxc_ant:
+                        saldo_ant_cli = await ClienteService.obtener_saldo_cliente(db, venta.cliente_id)
                         cxc_ant.monto_original = nuevo_total
                         cxc_ant.saldo_pendiente = nuevo_total
                         cxc_ant.estado = "Pendiente"
-                    else:
-                        db.add(
-                            CuentaPorCobrar(
-                                cliente_id=venta.cliente_id,
-                                venta_id=venta.id,
-                                fecha=f_str,
-                                hora=h_str,
-                                monto_original=nuevo_total,
-                                saldo_pendiente=nuevo_total,
-                                estado="Pendiente",
+                        await db.flush()
+                        if abs(delta_fi) > 0.01:
+                            from ..models.finanzas import MovimientoCuentaCliente
+                            db.add(
+                                MovimientoCuentaCliente(
+                                    cliente_id=venta.cliente_id,
+                                    cuenta_id=cxc_ant.id,
+                                    venta_id=venta.id,
+                                    fecha=f_str,
+                                    hora=h_str,
+                                    tipo="AJUSTE_EDICION",
+                                    monto=abs(delta_fi),
+                                    saldo_anterior=saldo_ant_cli,
+                                    saldo_nuevo=round(max(0.0, saldo_ant_cli + delta_fi), 2),
+                                    metodo_pago="Fiado",
+                                    usuario_id=usuario_id,
+                                    terminal_id=req.terminal_id or venta.terminal_id or 1,
+                                    motivo=f"Edición de venta {venta.numero}: {req.motivo}",
+                                    observacion=f"Delta fiado {delta_fi:+,.2f}",
+                                )
                             )
+                    else:
+                        cxc_new = CuentaPorCobrar(
+                            cliente_id=venta.cliente_id,
+                            venta_id=venta.id,
+                            fecha=f_str,
+                            hora=h_str,
+                            monto_original=nuevo_total,
+                            saldo_pendiente=nuevo_total,
+                            estado="Pendiente",
+                        )
+                        db.add(cxc_new)
+                        await db.flush()
+                        await ClienteService.registrar_movimiento_fiado(
+                            db=db,
+                            cliente_id=venta.cliente_id,
+                            cuenta_id=cxc_new.id,
+                            venta_id=venta.id,
+                            monto=nuevo_total,
+                            usuario_id=usuario_id,
+                            terminal_id=req.terminal_id or venta.terminal_id or 1,
+                            observacion=f"Cambio a Fiado por edición Venta {venta.numero}: {req.motivo}",
+                            fecha_str=f_str,
+                            hora_str=h_str,
                         )
 
                 venta.subtotal = nuevo_total
                 venta.total = nuevo_total
                 venta.metodo_pago_principal = nuevo_metodo
+                venta.recibido = 0.0 if nuevo_metodo == "Fiado" else nuevo_total
+                venta.cambio = 0.0
                 venta.saldo_pendiente = nuevo_total if nuevo_metodo == "Fiado" else 0.0
                 venta.modificado_por = admin_nom
                 venta.fecha_modificacion = f"{f_str} {h_str}"

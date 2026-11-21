@@ -117,8 +117,17 @@ class APIClient:
     def _save_token(self, token_data):
         try:
             os.makedirs(os.path.dirname(os.path.abspath(TOKEN_FILE)), exist_ok=True)
-            with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-                json.dump(token_data, f)
+            if os.name == "posix":
+                fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(token_data, f)
+                try:
+                    os.chmod(TOKEN_FILE, 0o600)
+                except Exception:
+                    pass
+            else:
+                with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+                    json.dump(token_data, f)
         except Exception:
             pass
         self.token = token_data.get("access_token")
@@ -130,6 +139,16 @@ class APIClient:
             except Exception:
                 pass
         self.token = None
+
+    def logout(self):
+        """Revoca el token JWT activo en el servidor (best-effort) y borra las credenciales locales."""
+        if self.token and HTTPX_DISPONIBLE:
+            try:
+                client = self._get_http_client() or httpx.Client(timeout=2.5)
+                client.post(f"{self.base_url}/auth/logout", headers=self._get_headers(), timeout=2.5)
+            except Exception:
+                pass
+        self.clear_token()
 
     def _get_headers(self):
         headers = {"Content-Type": "application/json"}

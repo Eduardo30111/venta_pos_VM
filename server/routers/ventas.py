@@ -15,7 +15,7 @@ from ..schemas.venta import (
     EditarVentaRequest,
 )
 from ..services.venta_service import VentaService
-from ..middleware.auth import get_current_user
+from ..middleware.auth import get_current_user, require_admin, require_roles
 from ..models.usuario import Usuario
 from ..models.cliente import Cliente
 
@@ -188,7 +188,7 @@ async def anular_venta(
     req: Optional[AnularVentaRequest] = Body(default=None),
     motivo: Optional[str] = Query(default=None),
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ):
     motivo_final = (
         (req.motivo if req and req.motivo else None)
@@ -223,7 +223,7 @@ async def editar_venta(
     id: int,
     req: EditarVentaRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_admin),
 ):
     return await VentaService.editar_venta(
         db=db,
@@ -239,7 +239,7 @@ async def autorizar_pago(
     id: int,
     cobro_data: CobroOrdenCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_roles("administrador", "admin", "gerente", "cajero", "vendedor")),
 ):
     terminal_id = 1
     return await VentaService.autorizar_pago_orden(

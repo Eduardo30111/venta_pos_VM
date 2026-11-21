@@ -1,10 +1,13 @@
 import os
+import logging
 import sqlite3
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+
+logger = logging.getLogger("vmpos.server")
 
 from .routers import (
     auth,
@@ -164,21 +167,31 @@ async def _reparar_tablas_bigint_sqlite():
 @app.on_event("startup")
 async def startup():
     from . import models  # noqa: F401
+    from .database import asegurar_migraciones_sqlite, MigrationError, _is_benign_ddl_error
 
     try:
-        from .database import asegurar_migraciones_sqlite
         asegurar_migraciones_sqlite(settings.DATABASE_URL)
-        _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        _v_db = os.path.join(_root, "database", "ventas.db")
-        if os.path.exists(_v_db):
+        try:
+            from interface.config import DB_VENTAS_PATH as _v_db
+        except Exception:
+            _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            _v_db = os.path.join(_root, "database", "ventas.db")
+        if _v_db and os.path.exists(_v_db):
             asegurar_migraciones_sqlite(f"sqlite:///{_v_db}")
+    except MigrationError:
+        logger.critical("Error fatal en migraciones iniciales SQLite; deteniendo arranque del servidor.")
+        raise
     except Exception as e_mig:
-        logger.warning("Aviso asegurando migraciones iniciales SQLite: %s", e_mig)
+        logger.critical("Error inesperado asegurando migraciones iniciales SQLite: %s", e_mig)
+        raise MigrationError(f"Error crítico en migraciones iniciales: {e_mig}") from e_mig
 
     try:
         async with db_mod.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
     except Exception as pg_err:
+        if "sqlite" in str(db_mod.engine.url):
+            logger.critical("Error crítico inicializando SQLite central: %s", pg_err)
+            raise
         logger.warning(
             "Aviso conectando motor primario (%s): %s. Activando motor central SQLite/WAL...",
             settings.DATABASE_URL,
@@ -190,13 +203,18 @@ async def startup():
             await conn.run_sync(Base.metadata.create_all)
 
     await _reparar_tablas_bigint_sqlite()
-    async with db_mod.engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
 
-    # Migraciones incrementales tolerantes al dialecto (SQLite y PostgreSQL)
+    _is_sqlite = "sqlite" in str(db_mod.engine.url).lower()
+    _bool_false = "0" if _is_sqlite else "FALSE"
+    _pk_auto = "INTEGER PRIMARY KEY AUTOINCREMENT" if _is_sqlite else "SERIAL PRIMARY KEY"
+
+    # Migraciones incrementales compatibles con SQLite y PostgreSQL
     migraciones_sql = [
-        # Usuarios y turnos
+        # Usuarios, nómina y turnos
         "ALTER TABLE usuarios ADD COLUMN solicitud_liquidacion TIMESTAMP;",
+        f"ALTER TABLE usuarios ADD COLUMN requiere_cambio_password BOOLEAN DEFAULT {_bool_false};",
+        "ALTER TABLE asistencias ADD COLUMN liquidacion_id INTEGER;",
+        "ALTER TABLE liquidaciones ADD COLUMN metodo_pago VARCHAR DEFAULT 'Efectivo';",
         "ALTER TABLE cola_turno ADD COLUMN turno_retorno_posicion INTEGER;",
         "ALTER TABLE cola_turno ADD COLUMN turnos_pendientes INTEGER NOT NULL DEFAULT 0;",
         # Productos
@@ -215,15 +233,15 @@ async def startup():
         "ALTER TABLE productos ADD COLUMN stock_minimo_vitrina FLOAT DEFAULT 2.0;",
         "ALTER TABLE productos ADD COLUMN stock_minimo FLOAT DEFAULT 0.0;",
         "ALTER TABLE productos ADD COLUMN imagen_url VARCHAR DEFAULT '';",
-        "ALTER TABLE productos ADD COLUMN precio_variable BOOLEAN DEFAULT 0;",
+        f"ALTER TABLE productos ADD COLUMN precio_variable BOOLEAN DEFAULT {_bool_false};",
         "ALTER TABLE productos ADD COLUMN porcentaje_comision FLOAT DEFAULT 0.0;",
         "ALTER TABLE productos ADD COLUMN fecha_creacion VARCHAR;",
         "ALTER TABLE productos ADD COLUMN fecha_modificacion VARCHAR;",
         "ALTER TABLE productos ADD COLUMN created_at TIMESTAMP;",
         "ALTER TABLE productos ADD COLUMN updated_at TIMESTAMP;",
         # Servicios
-        "ALTER TABLE servicios ADD COLUMN precio_variable BOOLEAN DEFAULT 0;",
-        "ALTER TABLE servicios ADD COLUMN solo_operarios BOOLEAN NOT NULL DEFAULT 0;",
+        f"ALTER TABLE servicios ADD COLUMN precio_variable BOOLEAN DEFAULT {_bool_false};",
+        f"ALTER TABLE servicios ADD COLUMN solo_operarios BOOLEAN NOT NULL DEFAULT {_bool_false};",
         "ALTER TABLE servicios ADD COLUMN creado_por_operario_id INTEGER;",
         "ALTER TABLE servicios ADD COLUMN categoria VARCHAR DEFAULT 'Servicios';",
         "ALTER TABLE servicios ADD COLUMN marca VARCHAR DEFAULT '';",
@@ -308,7 +326,7 @@ async def startup():
         "ALTER TABLE gastos ADD COLUMN estado VARCHAR DEFAULT 'Pagado';",
         "ALTER TABLE gastos ADD COLUMN proveedor VARCHAR DEFAULT '';",
         "ALTER TABLE gastos ADD COLUMN comprobante VARCHAR DEFAULT '';",
-        "ALTER TABLE gastos ADD COLUMN es_recurrente BOOLEAN DEFAULT 0;",
+        f"ALTER TABLE gastos ADD COLUMN es_recurrente BOOLEAN DEFAULT {_bool_false};",
         "ALTER TABLE gastos ADD COLUMN recurrencia_id INTEGER;",
         "ALTER TABLE gastos ADD COLUMN sesion_caja_id INTEGER;",
         "ALTER TABLE gastos ADD COLUMN usuario_nombre VARCHAR;",
@@ -359,13 +377,13 @@ async def startup():
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_mov_caja_idempotency_key ON movimientos_caja(idempotency_key);",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_mov_fin_idempotency_key ON movimientos_financieros(idempotency_key);",
         # Materiales y Presentaciones en Productos
-        "ALTER TABLE productos ADD COLUMN es_material BOOLEAN DEFAULT 0;",
+        f"ALTER TABLE productos ADD COLUMN es_material BOOLEAN DEFAULT {_bool_false};",
         "ALTER TABLE productos ADD COLUMN presentacion_defecto VARCHAR DEFAULT 'Paquete';",
         "ALTER TABLE productos ADD COLUMN factor_conversion_defecto FLOAT DEFAULT 1.0;",
         "ALTER TABLE productos ADD COLUMN unidad_consumo_defecto VARCHAR DEFAULT 'Unidad';",
         # Tablas de Materiales, Operarios y Consumos
-        """CREATE TABLE IF NOT EXISTS inventario_operarios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        f"""CREATE TABLE IF NOT EXISTS inventario_operarios (
+            id {_pk_auto},
             usuario_id INTEGER,
             usuario_nombre VARCHAR NOT NULL,
             rol VARCHAR DEFAULT 'Operario',
@@ -382,8 +400,8 @@ async def startup():
             fecha_actualizacion VARCHAR,
             UNIQUE(usuario_nombre, producto_id)
         );""",
-        """CREATE TABLE IF NOT EXISTS presentaciones_producto (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        f"""CREATE TABLE IF NOT EXISTS presentaciones_producto (
+            id {_pk_auto},
             producto_id INTEGER NOT NULL,
             codigo_producto VARCHAR NOT NULL,
             nombre_presentacion VARCHAR NOT NULL,
@@ -395,8 +413,8 @@ async def startup():
             activo INTEGER DEFAULT 1,
             fecha_creacion VARCHAR
         );""",
-        """CREATE TABLE IF NOT EXISTS consumos_materiales_venta (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        f"""CREATE TABLE IF NOT EXISTS consumos_materiales_venta (
+            id {_pk_auto},
             venta_id INTEGER NOT NULL,
             numero_factura VARCHAR DEFAULT '',
             usuario_responsable VARCHAR NOT NULL,
@@ -421,12 +439,9 @@ async def startup():
             async with db_mod.engine.begin() as conn:
                 await conn.execute(text(stmt))
         except Exception as e_stmt:
-            msg = str(e_stmt).lower()
-            if "duplicate column" not in msg and "already exists" not in msg:
-                if any(err_term in msg for err_term in ("disk i/o error", "database is locked", "syntax error", "file is not a database", "malformed", "permission denied")):
-                    logger.critical("Error fatal irrecuperable en DDL de arranque (%s): %s", stmt[:50], e_stmt)
-                    raise RuntimeError(f"Error fatal de base de datos durante arranque ({stmt[:50]}): {e_stmt}") from e_stmt
-                logger.warning("Aviso en DDL de arranque (%s): %s", stmt[:50], e_stmt)
+            if not _is_benign_ddl_error(e_stmt):
+                logger.critical("Error fatal irrecuperable en DDL de arranque (%s): %s", stmt[:60], e_stmt)
+                raise MigrationError(f"Error fatal de base de datos durante arranque ({stmt[:60]}): {e_stmt}") from e_stmt
 
     try:
         async with db_mod.engine.begin() as conn:
@@ -445,7 +460,7 @@ async def startup():
 
     from .models.terminal import Terminal
     from .models.usuario import Usuario
-    from .middleware.auth import hash_password
+    from .middleware.auth import hash_password, validar_password_fuerte_servidor
 
     async with db_mod.SessionLocal() as session:
         result = await session.execute(select(Terminal).where(Terminal.nombre == "CAJA-01"))
@@ -456,26 +471,42 @@ async def startup():
 
     await _sincronizar_usuarios_locales()
 
+    # Política de seguridad estricta: NUNCA sembrar contraseñas universales (admin/admin123).
+    # En instalaciones limpias sin administrador, solo se crea si VMPOS_ADMIN_PASSWORD
+    # se define explícitamente en el entorno con clave fuerte; de lo contrario, el sistema
+    # espera activación de un solo uso mediante POST /auth/bootstrap-admin.
     async with db_mod.SessionLocal() as session:
-        admin_res = await session.execute(select(Usuario).where(Usuario.rol == "Administrador"))
+        from sqlalchemy import func as _sqlfunc
+        admin_res = await session.execute(
+            select(Usuario).where(_sqlfunc.lower(Usuario.rol).in_(("administrador", "admin")))
+        )
         if not admin_res.scalars().first():
-            env_pwd = os.environ.get("VMPOS_ADMIN_PASSWORD")
-            initial_pwd = env_pwd if env_pwd else "admin123"
-            req_change = False if env_pwd else True
-            session.add(
-                Usuario(
-                    nombre="Admin",
-                    apellidos="Principal",
-                    documento=None,
-                    usuario="admin",
-                    password_hash=hash_password(initial_pwd),
-                    rol="Administrador",
-                    tipo_remuneracion="Fija",
-                    estado="Activo",
-                    requiere_cambio_password=req_change,
+            env_pwd = (os.environ.get("VMPOS_ADMIN_PASSWORD") or "").strip()
+            env_usr = (os.environ.get("VMPOS_ADMIN_USER") or "admin").strip() or "admin"
+            if env_pwd:
+                ok_pwd, msg_pwd = validar_password_fuerte_servidor(env_pwd)
+                if not ok_pwd:
+                    logger.critical("VMPOS_ADMIN_PASSWORD rechazada por política de seguridad: %s", msg_pwd)
+                    raise RuntimeError(f"VMPOS_ADMIN_PASSWORD insegura: {msg_pwd}")
+                session.add(
+                    Usuario(
+                        nombre="Administrador",
+                        apellidos="Principal",
+                        documento=None,
+                        usuario=env_usr,
+                        password_hash=hash_password(env_pwd),
+                        rol="Administrador",
+                        tipo_remuneracion="Fija",
+                        estado="Activo",
+                        requiere_cambio_password=False,
+                    )
                 )
-            )
-            await session.commit()
+                await session.commit()
+                logger.info("Administrador inicial '%s' aprovisionado mediante VMPOS_ADMIN_PASSWORD.", env_usr)
+            else:
+                logger.info(
+                    "Sistema sin administrador inicial. Esperando activación segura vía POST /auth/bootstrap-admin."
+                )
 
     async with db_mod.SessionLocal() as cfg_session:
         await obtener_o_crear_config_negocio(cfg_session)
@@ -491,9 +522,10 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         await db.execute(text("SELECT 1"))
         cfg = await obtener_o_crear_config_negocio(db)
     except Exception as exc:
+        logger.error("Fallo en health check de base de datos: %s", exc)
         raise HTTPException(
             status_code=503,
-            detail=f"Base de datos del servidor no disponible: {exc}",
+            detail="Base de datos del servidor temporalmente no disponible.",
         )
     modo_db = "postgresql" if "postgresql" in settings.DATABASE_URL else "sqlite"
     return {
