@@ -20,7 +20,7 @@
     "pie_factura_extra": "",
     "copias": 2,
     "corte_automatico": true,
-    "abrir_cajon": false,
+    "abrir_cajon": true,
     "usb_vendor_id": "",
     "usb_product_id": ""
 }

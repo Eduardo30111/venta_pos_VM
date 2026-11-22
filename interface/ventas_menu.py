@@ -1812,26 +1812,17 @@ class App:
         self.ventana.bind('<F3>', self.abrir_operarios_popup)
 
     def abrir_cajon_manual(self, event=None):
-        """Abre el cajón monedero conectado a la impresora térmica (F7 / Botón)."""
+        """Abre el cajón monedero manualmente (F7 / Botón) solicitando PIN de seguridad."""
         try:
             try:
-                from interface.receipt_manager import pulsar_apertura_cajon
+                from interface.cajon_pin_manager import solicitar_pin_y_abrir_cajon
             except ImportError:
-                from receipt_manager import pulsar_apertura_cajon
-            ok, msg = pulsar_apertura_cajon()
-            if ok:
-                messagebox.showinfo(
-                    "✅ Cajón Monedero",
-                    f"Orden de apertura enviada:\n\n{msg}\n\n"
-                    "ℹ️ Si el cajón no abrió mecánicamente, verifique que la cerradura esté en posición vertical (abierta).",
-                    parent=self.ventana
-                )
-            else:
-                messagebox.showwarning(
-                    "⚠️ Cajón Monedero",
-                    f"{msg}",
-                    parent=self.ventana
-                )
+                from cajon_pin_manager import solicitar_pin_y_abrir_cajon
+            solicitar_pin_y_abrir_cajon(
+                parent=self.ventana,
+                rol_usuario=getattr(self, "rol", "Operario"),
+                nombre_usuario=getattr(self, "user_nombre", None) or getattr(self, "rol", "Usuario")
+            )
         except Exception as e:
             messagebox.showerror("Error Cajón Monedero", f"Error al abrir cajón: {e}", parent=self.ventana)
 
@@ -5081,18 +5072,6 @@ class App:
                     if self.printer_manager:
                         self.printer_manager.ultima_factura = datos_venta
 
-                    # Regla comercial: Apertura automática de gaveta si la venta incluye efectivo
-                    try:
-                        try:
-                            from interface.receipt_manager import evaluar_apertura_cajon_por_venta, pulsar_apertura_cajon
-                        except ImportError:
-                            from receipt_manager import evaluar_apertura_cajon_por_venta, pulsar_apertura_cajon
-
-                        if evaluar_apertura_cajon_por_venta(metodo_pago, pagos=pagos):
-                            pulsar_apertura_cajon()
-                    except Exception as e_caj:
-                        print(f"Aviso control de gaveta en venta: {e_caj}")
-
                     if imprimir_recibo:
                         try:
                             try:
@@ -5105,6 +5084,8 @@ class App:
                             imprimir_factura_unificada(datos_venta, config_override=cfg_over)
                         except Exception as e_imp:
                             print(f"Aviso en impresión de comprobante: {e_imp}")
+                        # Apertura automática y recordatorio de cambio tras impresión directa
+                        self.ventana.after(60, lambda: self._procesar_fin_venta_gaveta_y_cambio(datos_venta))
                     else:
                         # Modal interactivo post-venta: ¿Deseas imprimir la factura de esta venta?
                         self.ventana.after(60, lambda: self._dialogo_confirmar_impresion(datos_venta, formato_papel=formato_impresion))
@@ -5215,9 +5196,13 @@ class App:
                     messagebox.showwarning("Impresora Térmica", f"No se pudo imprimir el comprobante:\n{err}", parent=self.ventana)
             except Exception as e_pr:
                 print(f"Aviso imprimiendo factura pos-venta: {e_pr}")
+            # Apertura automática y modal dar cambio tras responder que SÍ
+            self.ventana.after(40, lambda: self._procesar_fin_venta_gaveta_y_cambio(datos_venta))
 
         def accion_no_imprimir(event=None):
             dlg.destroy()
+            # Apertura automática y modal dar cambio tras responder que NO
+            self.ventana.after(40, lambda: self._procesar_fin_venta_gaveta_y_cambio(datos_venta))
 
         btn_no = crear_boton(
             btn_box,
@@ -5243,6 +5228,133 @@ class App:
         dlg.bind("<Escape>", lambda e: accion_no_imprimir())
 
         btn_si.focus_set()
+
+    def _procesar_fin_venta_gaveta_y_cambio(self, datos_venta):
+        """
+        Regla de finalización de venta POS:
+        1. Evalúa si el método de pago incluye efectivo (Efectivo o Mixto).
+        2. Si incluye efectivo:
+           - Envía la señal de apertura física del cajón monedero automáticamente (SIN pedir PIN).
+           - Muestra un popup modal centrado: '¡RECUERDA DAR CAMBIO!' con el valor exacto en texto grande.
+           - El foco queda en el botón 'Aceptar (Enter)' para cerrarlo con Enter o clic.
+        3. Al cerrarse, enfoca inmediatamente la entrada del lector de código para la próxima venta.
+        """
+        if not datos_venta or not isinstance(datos_venta, dict):
+            return
+
+        metodo = datos_venta.get("metodo_pago", "")
+        pagos = datos_venta.get("pagos")
+
+        es_efectivo = False
+        try:
+            try:
+                from interface.receipt_manager import evaluar_apertura_cajon_por_venta, pulsar_apertura_cajon
+            except ImportError:
+                from receipt_manager import evaluar_apertura_cajon_por_venta, pulsar_apertura_cajon
+
+            es_efectivo = evaluar_apertura_cajon_por_venta(metodo, pagos=pagos)
+        except Exception as e_ev:
+            print(f"Aviso evaluando efectivo para apertura: {e_ev}")
+
+        if not es_efectivo:
+            try:
+                self.entry_codigo.focus_set()
+            except Exception:
+                pass
+            return
+
+        # 1. Enviar pulso de apertura física de cajón monedero (automático, sin pedir PIN)
+        try:
+            pulsar_apertura_cajon()
+        except Exception as e_c:
+            print(f"Aviso abriendo gaveta automática post-venta: {e_c}")
+
+        # 2. Obtener datos de cambio y montos
+        cambio_val = float(datos_venta.get("cambio", 0.0) or 0.0)
+        recibido_val = float(datos_venta.get("recibido", 0.0) or 0.0)
+        total_val = float(datos_venta.get("total", 0.0) or 0.0)
+
+        # 3. Mostrar modal centrado "¡RECUERDA DAR CAMBIO!"
+        dlg_cambio = tk.Toplevel(self.ventana)
+        dlg_cambio.title("💵 ¡RECUERDA DAR CAMBIO!")
+        t_c = aplicar_tema(dlg_cambio)
+        calcular_geometria_segura(dlg_cambio, 480, 310, 420, 270)
+        dlg_cambio.configure(bg=t_c["bg_app"])
+        dlg_cambio.transient(self.ventana)
+        dlg_cambio.grab_set()
+
+        hdr = tk.Frame(dlg_cambio, bg="#059669", height=50)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        tk.Label(
+            hdr,
+            text="💵 ¡RECUERDA DAR CAMBIO!",
+            font=("Segoe UI", 13, "bold"),
+            bg="#059669",
+            fg="white"
+        ).pack(pady=12)
+
+        body = tk.Frame(dlg_cambio, bg=t_c["bg_surface"], padx=20, pady=18, bd=1, relief="solid")
+        body.pack(fill="both", expand=True, padx=14, pady=(10, 8))
+
+        tk.Label(
+            body,
+            text="CAMBIO A ENTREGAR AL CLIENTE:",
+            font=("Segoe UI", 10, "bold"),
+            bg=t_c["bg_surface"],
+            fg=t_c["text_secondary"]
+        ).pack(pady=(4, 6))
+
+        # Dígitos grandes legibles
+        txt_cambio = f"$ {cambio_val:,.0f} COP" if cambio_val > 0 else "$ 0 COP (Pago exacto)"
+        color_cambio = "#059669" if cambio_val > 0 else "#2563EB"
+        lbl_monto = tk.Label(
+            body,
+            text=txt_cambio,
+            font=("Segoe UI", 24, "bold"),
+            bg=t_c["bg_surface"],
+            fg=color_cambio
+        )
+        lbl_monto.pack(pady=(2, 10))
+
+        # Información complementaria de la transacción
+        if recibido_val > 0:
+            tk.Label(
+                body,
+                text=f"Total Venta: {self.formato_peso(total_val)}   |   Recibido: {self.formato_peso(recibido_val)}",
+                font=("Segoe UI", 10),
+                bg=t_c["bg_surface"],
+                fg=t_c["text_main"]
+            ).pack(pady=(0, 4))
+
+        btn_box = tk.Frame(dlg_cambio, bg=t_c["bg_app"], padx=14, pady=10)
+        btn_box.pack(fill="x", side="bottom")
+
+        def _cerrar_cambio(event=None):
+            try:
+                dlg_cambio.destroy()
+            except Exception:
+                pass
+            try:
+                self.entry_codigo.focus_set()
+            except Exception:
+                pass
+
+        btn_ok = crear_boton(
+            btn_box,
+            "✅ Aceptar (Enter)",
+            _cerrar_cambio,
+            tipo="success",
+            tam_fuente=11,
+            negrita=True
+        )
+        btn_ok.pack(fill="x", ipady=4)
+
+        dlg_cambio.bind("<Return>", _cerrar_cambio)
+        dlg_cambio.bind("<KP_Enter>", _cerrar_cambio)
+        dlg_cambio.bind("<Escape>", _cerrar_cambio)
+
+        btn_ok.focus_set()
 
     def confirmar_asistencia_y_recaudo_vendedor(self, operario_nombre, total_venta, detalles_payload, id_venta=None, metodo_pago="Efectivo"):
         """

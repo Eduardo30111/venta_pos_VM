@@ -1172,7 +1172,24 @@ def anular_venta_completa(
             q_motivo = urllib.parse.quote(motivo.strip())
             resp = api.post(f"/ventas/{id_venta}/anular?motivo={q_motivo}", timeout=6.0)
             if resp.status_code == 200:
-                return resp.json()
+                resp_json = resp.json()
+                try:
+                    conn_loc = conectar_db()
+                    if conn_loc:
+                        cur_loc = conn_loc.cursor()
+                        cur_loc.execute("""
+                            UPDATE ventas SET
+                                estado = 'Anulada',
+                                motivo_anulacion = ?,
+                                anulado_por = ?,
+                                fecha_anulacion = ?
+                            WHERE id_venta = ? OR numero_factura = ? OR numero = ?
+                        """, (motivo, usuario_admin, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), id_venta, f"V-{id_venta:06d}", f"V-{id_venta:06d}"))
+                        conn_loc.commit()
+                        conn_loc.close()
+                except Exception as e_loc:
+                    print(f"Aviso sincronizando anulación en SQLite local: {e_loc}")
+                return resp_json
             elif resp.status_code in (400, 404):
                 raise ValueError(resp.json().get("detail", "Error al anular venta en servidor"))
         except ValueError:
@@ -1623,8 +1640,8 @@ def editar_venta_completa(
                             campos_upd.append("hora_venta = ?")
                             prms.append(h_norm)
 
-                        prms.append(id_venta)
-                        cur_loc.execute(f"UPDATE ventas SET {', '.join(campos_upd)} WHERE id_venta = ?", prms)
+                        prms.extend([id_venta, f"V-{id_venta:06d}", f"V-{id_venta:06d}"])
+                        cur_loc.execute(f"UPDATE ventas SET {', '.join(campos_upd)} WHERE id_venta = ? OR numero_factura = ? OR numero = ?", prms)
                         conn_loc.commit()
                         conn_loc.close()
                 except Exception as e_loc:

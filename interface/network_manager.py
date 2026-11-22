@@ -544,7 +544,7 @@ def _iniciar_uvicorn_en_hilo_interno(puerto: int) -> bool:
         return False
 
 
-def iniciar_servidor_segundo_plano() -> Tuple[bool, str]:
+def iniciar_servidor_segundo_plano(forzar_reinicio: bool = False) -> Tuple[bool, str]:
     """
     Inicia el servidor central FastAPI de forma controlada y única:
     - Impide ejecuciones duplicadas simultáneas con `_LOCK_ARRANQUE`.
@@ -557,11 +557,16 @@ def iniciar_servidor_segundo_plano() -> Tuple[bool, str]:
     cfg = obtener_config_red()
     puerto = int(cfg.get("servidor_puerto", OFFICIAL_SERVER_PORT))
 
-    # 1. Comprobar si ya está saludable antes de adquirir bloqueo largo
-    ok_previo, datos_salud, msg_previo, _ = verificar_salud_servidor("127.0.0.1", puerto=puerto, timeout=1.2)
-    if ok_previo:
-        _ESTADO_SERVIDOR = "activo"
-        return True, f"El servidor VmPOS ya está activo y saludable en el puerto {puerto}."
+    if forzar_reinicio:
+        detener_servidor_segundo_plano()
+        time.sleep(0.8)
+
+    # 1. Comprobar si ya está saludable antes de adquirir bloqueo largo (si no se forzó reinicio)
+    if not forzar_reinicio:
+        ok_previo, datos_salud, msg_previo, _ = verificar_salud_servidor("127.0.0.1", puerto=puerto, timeout=1.2)
+        if ok_previo:
+            _ESTADO_SERVIDOR = "activo"
+            return True, f"El servidor VmPOS ya está activo y saludable en el puerto {puerto}."
 
     if not _LOCK_ARRANQUE.acquire(blocking=False):
         return False, "El servidor ya se encuentra en proceso de arranque. Por favor espera unos segundos."
@@ -754,3 +759,14 @@ def detener_servidor_segundo_plano() -> bool:
 
     _ESTADO_SERVIDOR = "detenido"
     return detenido
+
+
+def reiniciar_servidor_segundo_plano() -> Tuple[bool, str]:
+    """
+    Detiene cualquier instancia previa en ejecución y arranca una nueva instancia limpia
+    del servidor FastAPI con el código y modelos más recientes.
+    """
+    detener_servidor_segundo_plano()
+    time.sleep(0.8)
+    return iniciar_servidor_segundo_plano(forzar_reinicio=True)
+

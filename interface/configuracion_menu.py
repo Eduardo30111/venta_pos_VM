@@ -1198,6 +1198,65 @@ def iniciar_configuracion(parent=None, on_save_callback=None):
     crear_boton(f_btns, "💾 Guardar Todo", lambda: guardar_config_completa(True), tipo="success", tam_fuente=9).pack(side="left", padx=4)
 
     # =========================================================================
+    # SECCIÓN: SEGURIDAD DEL CAJÓN MONEDERO / GAVETA DE DINERO
+    # =========================================================================
+    card_pin_cajon = tk.Frame(scroll_body, bg=t["bg_surface"], bd=1, relief="solid")
+    card_pin_cajon.pack(fill="x", pady=(0, 15), padx=5)
+
+    pin_header = tk.Frame(card_pin_cajon, bg=t["bg_surface_alt"], height=38)
+    pin_header.pack(fill="x")
+    tk.Label(pin_header, text="🔐 SEGURIDAD DEL CAJÓN MONEDERO / GAVETA DE DINERO", font=("Segoe UI", 11, "bold"),
+             bg=t["bg_surface_alt"], fg=t["text_primary"]).pack(side="left", padx=15, pady=8)
+
+    pin_body = tk.Frame(card_pin_cajon, bg=t["bg_surface"], padx=20, pady=15)
+    pin_body.pack(fill="x")
+
+    pin_left = tk.Frame(pin_body, bg=t["bg_surface"])
+    pin_left.pack(side="left", fill="both", expand=True)
+
+    try:
+        from interface.cajon_pin_manager import tiene_pin_configurado, abrir_modal_cambiar_pin_admin, abrir_modal_crear_pin, obtener_estado_seguridad
+    except ImportError:
+        try:
+            from cajon_pin_manager import tiene_pin_configurado, abrir_modal_cambiar_pin_admin, abrir_modal_crear_pin, obtener_estado_seguridad
+        except ImportError:
+            tiene_pin_configurado = lambda: False
+            abrir_modal_cambiar_pin_admin = None
+            abrir_modal_crear_pin = None
+            obtener_estado_seguridad = lambda: {"configurado": False, "bloqueado": False}
+
+    lbl_pin_estado = tk.Label(pin_left, text="", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"])
+    lbl_pin_estado.pack(anchor="w")
+
+    lbl_pin_desc = tk.Label(
+        pin_left,
+        text="Toda apertura manual (F7 o botones en POS y Caja) requiere un PIN de 4 a 6 dígitos con protección anti fuerza bruta.\nLa apertura automática tras cobrar una venta no requiere PIN.",
+        font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_muted"], justify="left"
+    )
+    lbl_pin_desc.pack(anchor="w", pady=(2, 0))
+
+    def _refrescar_card_pin():
+        est = obtener_estado_seguridad()
+        if est.get("configurado"):
+            lbl_pin_estado.config(text="Estado: ✅ PIN de seguridad configurado y activo", fg=t["success"])
+            btn_gestionar_pin.config(text="🔑 Cambiar PIN de Seguridad")
+        else:
+            lbl_pin_estado.config(text="Estado: ⚠️ Sin configurar (Aperturas manuales bloqueadas para personal)", fg=t.get("warning", "#D97706"))
+            btn_gestionar_pin.config(text="➕ Crear PIN de Seguridad")
+
+    def _al_pulsar_gestionar_pin():
+        if tiene_pin_configurado():
+            if abrir_modal_cambiar_pin_admin:
+                abrir_modal_cambiar_pin_admin(ventana, usuario_admin="Admin", on_success=_refrescar_card_pin)
+        else:
+            if abrir_modal_crear_pin:
+                abrir_modal_crear_pin(ventana, usuario_admin="Admin", on_success=_refrescar_card_pin)
+
+    btn_gestionar_pin = crear_boton(pin_body, "🔐 Gestionar PIN", _al_pulsar_gestionar_pin, tipo="primary", tam_fuente=10)
+    btn_gestionar_pin.pack(side="right")
+    _refrescar_card_pin()
+
+    # =========================================================================
     # SECCIÓN 3: CONEXIÓN EN RED Y SERVIDOR MULTI-CAJA
     # =========================================================================
     card_net = tk.Frame(scroll_body, bg=t["bg_surface"], bd=1, relief="solid")

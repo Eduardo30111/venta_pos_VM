@@ -49,6 +49,7 @@ assets/logos/
 Thumbs.db
 backups/
 config/token.json
+config/cajon_pin.json
 config/jwt_secret.key
 *.key
 .env

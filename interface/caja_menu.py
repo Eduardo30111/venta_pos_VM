@@ -236,24 +236,14 @@ def iniciar_control_caja(usuario_actual="Administrador", rol_actual="Administrad
     def _abrir_gaveta_manual():
         try:
             try:
-                from interface.receipt_manager import pulsar_apertura_cajon
+                from interface.cajon_pin_manager import solicitar_pin_y_abrir_cajon
             except ImportError:
-                from receipt_manager import pulsar_apertura_cajon
-            ok, msg = pulsar_apertura_cajon()
-            if ok:
-                messagebox.showinfo(
-                    "✅ Gaveta Física",
-                    f"Orden de apertura enviada a la impresora:\n\n{msg}\n\n"
-                    "ℹ️ Si la gaveta no abrió mecánicamente, asegúrese de que no esté con llave cerrada.",
-                    parent=ventana
-                )
-            else:
-                messagebox.showwarning(
-                    "⚠️ Gaveta Física",
-                    f"{msg}\n\n"
-                    "Verifique que la impresora esté encendida y conectada a este equipo.",
-                    parent=ventana
-                )
+                from cajon_pin_manager import solicitar_pin_y_abrir_cajon
+            solicitar_pin_y_abrir_cajon(
+                parent=ventana,
+                rol_usuario=rol_actual,
+                nombre_usuario=usuario_actual
+            )
         except Exception as e_gav:
             messagebox.showerror("Error Gaveta", f"Error abriendo gaveta: {e_gav}", parent=ventana)
 

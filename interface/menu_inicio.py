@@ -731,64 +731,70 @@ class VmPOSDashboard(tk.Toplevel):
         ganancias_mes = 0.0
         pedidos_mes = 0
 
+        api_cargado = False
         # 1. Intentar API si hay token activo
         if getattr(api, "token", None):
             try:
                 resp = api.get("/reportes/resumen-diario", params={"fecha": hoy_iso})
                 if resp.status_code == 200:
                     d = resp.json()
-                    v_api = float(d.get("ventas", 0.0))
-                    g_api = float(d.get("neto", d.get("caja_efectivo", 0.0)))
-                    p_api = int(d.get("pedidos", 0))
-                    c_api = int(d.get("clientes", 0))
-                    if v_api > 0: ventas_hoy = v_api
-                    if g_api > 0: ganancias_hoy = g_api
-                    if p_api > 0: pedidos_hoy = p_api
-                    if c_api > 0: clientes_hoy = c_api
+                    ventas_hoy = float(d.get("ventas", 0.0))
+                    ganancias_hoy = float(d.get("neto", d.get("caja_efectivo", 0.0)))
+                    pedidos_hoy = int(d.get("pedidos", 0))
+                    clientes_hoy = int(d.get("clientes", 0))
                     if d.get("producto_top"): producto_top = str(d.get("producto_top"))
+                    api_cargado = True
             except Exception:
                 pass
 
-        # 2. Consultar o complementar con SQLite local (database/ventas.db)
-        try:
-            if obtener_resumen_financiero:
-                try:
-                    res_fin = obtener_resumen_financiero(fecha=hoy_iso)
-                    if res_fin:
-                        ventas_hoy = res_fin.get("total_ventas", res_fin.get("ventas_totales_facturadas", 0.0))
-                        pedidos_hoy = res_fin.get("cant_ventas", res_fin.get("cantidad_ventas", 0))
-                        ganancias_hoy = res_fin.get("ganancia_neta_estimada", 0.0)
-                except Exception as e_rf:
-                    print(f"Aviso resumen financiero: {e_rf}")
+        # 2. Consultar SQLite local (database/ventas.db) solo si no se obtuvo respuesta autoritativa de la API
+        if not api_cargado:
+            try:
+                if obtener_resumen_financiero:
+                    try:
+                        res_fin = obtener_resumen_financiero(fecha=hoy_iso)
+                        if res_fin:
+                            ventas_hoy = res_fin.get("total_ventas", res_fin.get("ventas_totales_facturadas", 0.0))
+                            pedidos_hoy = res_fin.get("cant_ventas", res_fin.get("cantidad_ventas", 0))
+                            ganancias_hoy = res_fin.get("ganancia_neta_estimada", 0.0)
+                    except Exception as e_rf:
+                        print(f"Aviso resumen financiero: {e_rf}")
 
+                conn = _conectar_db()
+                if conn:
+                    cur = conn.cursor()
+
+                    # Ventas y pedidos de hoy (excluyendo estrictamente ventas anuladas o canceladas)
+                    try:
+                        cur.execute("""
+                            SELECT COALESCE(SUM(total_venta), 0.0), COUNT(id_venta)
+                            FROM ventas
+                            WHERE (fecha_venta = ? OR fecha_venta = ? OR fecha_venta LIKE ? OR fecha_venta LIKE ?)
+                              AND (estado IS NULL OR estado NOT IN ('Anulada', 'Cancelada', 'Pendiente_Caja'))
+                        """, (hoy_iso, hoy_dmy, f"{hoy_iso}%", f"{hoy_dmy}%"))
+                        row_v = cur.fetchone()
+                        if row_v and row_v[0] is not None:
+                            ventas_hoy = float(row_v[0])
+                            pedidos_hoy = int(row_v[1])
+                    except Exception as e_v:
+                        print(f"Aviso consultando ventas hoy: {e_v}")
+
+                    conn.close()
+            except Exception as e_sq:
+                print(f"Aviso consultando SQLite local: {e_sq}")
+
+        # 3. Métricas complementarias de gastos y contexto de mes
+        try:
             conn = _conectar_db()
             if conn:
                 cur = conn.cursor()
-
-                # Ventas y pedidos de hoy (con soporte de formato fecha ISO y DMY con o sin hora)
-                try:
-                    cur.execute("""
-                        SELECT COALESCE(SUM(total_venta), 0.0), COUNT(id_venta)
-                        FROM ventas
-                        WHERE (fecha_venta = ? OR fecha_venta = ? OR fecha_venta LIKE ? OR fecha_venta LIKE ?)
-                          AND (estado IS NULL OR estado != 'Anulada')
-                    """, (hoy_iso, hoy_dmy, f"{hoy_iso}%", f"{hoy_dmy}%"))
-                    row_v = cur.fetchone()
-                    if row_v and row_v[0] is not None:
-                        v_sql = float(row_v[0])
-                        p_sql = int(row_v[1])
-                        ventas_hoy = v_sql
-                        pedidos_hoy = p_sql
-                except Exception as e_v:
-                    print(f"Aviso consultando ventas hoy: {e_v}")
-
                 # Ventas del mes actual para contexto comercial
                 try:
                     cur.execute("""
                         SELECT COALESCE(SUM(total_venta), 0.0), COUNT(id_venta)
                         FROM ventas
                         WHERE (fecha_venta LIKE ? OR fecha_venta LIKE ?)
-                          AND (estado IS NULL OR estado != 'Anulada')
+                          AND (estado IS NULL OR estado NOT IN ('Anulada', 'Cancelada', 'Pendiente_Caja'))
                     """, (f"{mes_iso}%", f"%-{mes_dmy}%"))
                     row_m = cur.fetchone()
                     if row_m and row_m[0]:
