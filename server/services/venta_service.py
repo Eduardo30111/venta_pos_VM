@@ -144,6 +144,24 @@ class VentaService:
                 ahora = datetime.now()
                 f_str = ahora.strftime("%Y-%m-%d")
                 h_str = ahora.strftime("%H:%M:%S")
+
+                # Distinguir Fecha de Operación vs Fecha de Registro (ventas atrasadas)
+                fecha_operacion = f_str
+                hora_operacion = h_str
+                es_atrasada = bool(getattr(venta_data, "es_venta_atrasada", False))
+                custom_fecha = getattr(venta_data, "fecha", None)
+                if custom_fecha and str(custom_fecha).strip():
+                    try:
+                        datetime.strptime(str(custom_fecha).strip()[:10], "%Y-%m-%d")
+                        fecha_operacion = str(custom_fecha).strip()[:10]
+                        if fecha_operacion != f_str:
+                            es_atrasada = True
+                    except ValueError:
+                        pass
+                custom_hora = getattr(venta_data, "hora", None)
+                if custom_hora and str(custom_hora).strip():
+                    hora_operacion = str(custom_hora).strip()[:8]
+
                 op_nombre = (f"{usuario.nombre or ''} {usuario.apellidos or ''}".strip() or usuario.usuario)
 
                 # 1. Validar terminal
@@ -314,9 +332,10 @@ class VentaService:
                 venta = Venta(
                     numero=numero,
                     idempotency_key=idem_clean,
-                    fecha=f_str,
-                    hora=h_str,
-                    sesion_caja_id=sesion_id,
+                    fecha=fecha_operacion,
+                    hora=hora_operacion,
+                    es_venta_atrasada=es_atrasada,
+                    sesion_caja_id=sesion_id if not es_atrasada else None,
                     cliente_id=resolved_cliente_id,
                     cliente_documento=doc_final,
                     usuario_id=usuario_id,
@@ -452,10 +471,10 @@ class VentaService:
                         )
                         db.add(mov)
 
-                        # Comisión para Producto (si el operario tiene remuneración porcentual)
-                        porcentaje = float(usuario.porcentaje_comision or 0.0)
-                        es_porcentual = usuario.tipo_remuneracion == "Porcentual" or porcentaje > 0
-                        if es_porcentual and porcentaje > 0:
+                        # Comisión para Producto (si el operario tiene remuneración porcentual y NO fija)
+                        porcentaje = float(usuario.porcentaje_comision or 0.0) if usuario.tipo_remuneracion != "Fija" else 0.0
+                        es_porcentual = (usuario.tipo_remuneracion == "Porcentual" or (usuario.tipo_remuneracion != "Fija" and porcentaje > 0))
+                        if es_porcentual and porcentaje > 0 and usuario.tipo_remuneracion != "Fija":
                             precio_prod = float(item.precio_vendido)
                             utilidad_prod = max(0.0, precio_prod - costo_hist)
                             base_com = utilidad_prod if utilidad_prod > 0 else precio_prod
@@ -570,14 +589,14 @@ class VentaService:
                         db.add(det)
                         await db.flush()
 
-                        porcentaje = float(usuario.porcentaje_comision or 0.0)
-                        es_porcentual = usuario.tipo_remuneracion == "Porcentual" or porcentaje > 0
+                        porcentaje = float(usuario.porcentaje_comision or 0.0) if usuario.tipo_remuneracion != "Fija" else 0.0
+                        es_porcentual = (usuario.tipo_remuneracion == "Porcentual" or (usuario.tipo_remuneracion != "Fija" and porcentaje > 0))
                         genera_com = (
                             servicio.genera_comision
                             if servicio.genera_comision is not None
                             else (servicio.proveedor_id is None)
                         )
-                        if genera_com and es_porcentual and porcentaje > 0:
+                        if genera_com and es_porcentual and porcentaje > 0 and usuario.tipo_remuneracion != "Fija":
                             utilidad_unitaria = float(item.precio_vendido) - monto_costo_unitario
                             base_com = utilidad_unitaria if utilidad_unitaria > 0 else float(item.precio_vendido)
                             utilidad_total = round(max(0.0, utilidad_unitaria) * cantidad_item, 2)
@@ -642,39 +661,39 @@ class VentaService:
                         if m_pago == "Efectivo":
                             mf_ef = await CajaService.registrar_movimiento_financiero(
                                 db=db,
-                                tipo="VENTA_EFECTIVO",
-                                concepto=f"Venta {numero} en efectivo",
+                                tipo="VENTA_EXTEMPORANEA" if es_atrasada else "VENTA_EFECTIVO",
+                                concepto=f"Venta {numero} en efectivo {'(Extemporánea)' if es_atrasada else ''}",
                                 monto=m_monto,
                                 metodo_pago="Efectivo",
                                 cuenta_afectada="CAJA_FISICA",
                                 usuario=op_nombre,
                                 referencia_origen=f"VENTA-{venta.id}",
-                                sesion_id=sesion_id,
-                                observaciones=f"Cobro efectivo venta {numero}",
-                                sincronizar_caja=True,
+                                sesion_id=sesion_id if not es_atrasada else None,
+                                observaciones=f"Cobro efectivo venta {numero}{' [VENTA ATRASADA]' if es_atrasada else ''}",
+                                sincronizar_caja=not es_atrasada,
                                 terminal=terminal_nombre,
-                                fecha_str=f_str,
-                                hora_str=h_str,
+                                fecha_str=fecha_operacion,
+                                hora_str=hora_operacion,
                             )
-                            if not venta.sesion_caja_id and mf_ef.sesion_caja_id:
+                            if not es_atrasada and not venta.sesion_caja_id and mf_ef.sesion_caja_id:
                                 venta.sesion_caja_id = mf_ef.sesion_caja_id
 
                         elif m_pago == "Transferencia":
                             await CajaService.registrar_movimiento_financiero(
                                 db=db,
                                 tipo="VENTA_TRANSFERENCIA",
-                                concepto=f"Venta {numero} por transferencia",
+                                concepto=f"Venta {numero} por transferencia {'(Extemporánea)' if es_atrasada else ''}",
                                 monto=m_monto,
                                 metodo_pago="Transferencia",
                                 cuenta_afectada="BANCO_TRANSFERENCIA",
                                 usuario=op_nombre,
                                 referencia_origen=f"VENTA-{venta.id}",
-                                sesion_id=sesion_id,
+                                sesion_id=sesion_id if not es_atrasada else None,
                                 observaciones=f"Recaudo transferencia venta {numero}",
                                 sincronizar_caja=False,
                                 terminal=terminal_nombre,
-                                fecha_str=f_str,
-                                hora_str=h_str,
+                                fecha_str=fecha_operacion,
+                                hora_str=hora_operacion,
                             )
 
                     if monto_fiado > 0:
@@ -1401,8 +1420,8 @@ class VentaService:
 
                 # 3. Insertar nuevos ítems, descontar stock con Kárdex y recalcular comisiones + CXP
                 nuevo_total = 0.0
-                pct_op = float(venta_usuario.porcentaje_comision or 0.0)
-                es_porcentual_op = venta_usuario.tipo_remuneracion == "Porcentual" or pct_op > 0
+                pct_op = float(venta_usuario.porcentaje_comision or 0.0) if venta_usuario.tipo_remuneracion != "Fija" else 0.0
+                es_porcentual_op = (venta_usuario.tipo_remuneracion == "Porcentual" or (venta_usuario.tipo_remuneracion != "Fija" and pct_op > 0)) and venta_usuario.tipo_remuneracion != "Fija"
 
                 for it in req.nuevos_items:
                     cod = str(it.codigo_producto).strip()
@@ -1736,6 +1755,28 @@ class VentaService:
                             hora_str=h_str,
                         )
 
+                fecha_anterior = str(venta.fecha or "")
+                hora_anterior = str(venta.hora or "")
+                nueva_f = getattr(req, "nueva_fecha", None)
+                nueva_h = getattr(req, "nueva_hora", None)
+                cambio_fecha = False
+                if nueva_f and str(nueva_f).strip():
+                    try:
+                        datetime.strptime(str(nueva_f).strip()[:10], "%Y-%m-%d")
+                        venta.fecha = str(nueva_f).strip()[:10]
+                        venta.es_venta_atrasada = True
+                        venta.motivo_modificacion_fecha = req.motivo
+                        cambio_fecha = True
+                    except ValueError:
+                        raise HTTPException(status_code=400, detail="El formato de la nueva fecha debe ser YYYY-MM-DD.")
+                if nueva_h and str(nueva_h).strip():
+                    try:
+                        datetime.strptime(str(nueva_h).strip()[:8], "%H:%M:%S")
+                        venta.hora = str(nueva_h).strip()[:8]
+                        cambio_fecha = True
+                    except ValueError:
+                        pass
+
                 venta.subtotal = nuevo_total
                 venta.total = nuevo_total
                 venta.metodo_pago_principal = nuevo_metodo
@@ -1756,8 +1797,8 @@ class VentaService:
                     "VENTAS",
                     "ventas",
                     str(venta.id),
-                    valor_anterior={"total": total_anterior, "metodo": metodo_anterior},
-                    valor_nuevo={"total": nuevo_total, "metodo": nuevo_metodo, "motivo": req.motivo},
+                    valor_anterior={"total": total_anterior, "metodo": metodo_anterior, "fecha": fecha_anterior, "hora": hora_anterior},
+                    valor_nuevo={"total": nuevo_total, "metodo": nuevo_metodo, "fecha": venta.fecha, "hora": venta.hora, "motivo": req.motivo, "cambio_fecha": cambio_fecha},
                 )
                 return {
                     "ok": True,

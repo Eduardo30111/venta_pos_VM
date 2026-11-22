@@ -1471,10 +1471,13 @@ def editar_venta_completa(
     nuevos_items: Optional[List[Dict[str, Any]]] = None,
     motivo: str = "Edición administrativa",
     terminal: str = "Terminal-1",
-    usuario: Optional[str] = None
+    usuario: Optional[str] = None,
+    nueva_fecha: Optional[str] = None,
+    nueva_hora: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Edita una venta con cálculo atómico de diferencias (delta inventario, delta caja/fiado) y auditoría completa.
+    Edita una venta con cálculo atómico de diferencias (delta inventario, delta caja/fiado),
+    modificación de fecha operativa y auditoría completa.
     """
     if usuario:
         usuario_admin = usuario
@@ -1497,15 +1500,21 @@ def editar_venta_completa(
                 }
                 for it in (nuevos_items or [])
             ]
+            req_json = {
+                "nuevo_metodo": nuevo_metodo,
+                "metodo_pago_principal": nuevo_metodo,
+                "nuevos_items": norm_items,
+                "items": norm_items,
+                "motivo": motivo.strip(),
+            }
+            if nueva_fecha and str(nueva_fecha).strip():
+                req_json["nueva_fecha"] = str(nueva_fecha).strip()
+            if nueva_hora and str(nueva_hora).strip():
+                req_json["nueva_hora"] = str(nueva_hora).strip()
+
             resp = api.put(
                 f"/ventas/{id_venta}?motivo={q_motivo}",
-                json={
-                    "nuevo_metodo": nuevo_metodo,
-                    "metodo_pago_principal": nuevo_metodo,
-                    "nuevos_items": norm_items,
-                    "items": norm_items,
-                    "motivo": motivo.strip(),
-                },
+                json=req_json,
                 timeout=8.0,
             )
             if resp.status_code == 200:
@@ -1540,6 +1549,8 @@ def editar_venta_completa(
         total_anterior = float(venta_dict["total_venta"])
         metodo_anterior = venta_dict.get("metodo_pago", "Efectivo")
         doc_cliente = venta_dict.get("documento_cliente", "")
+        fecha_venta_orig = venta_dict.get("fecha_venta", "")
+        hora_venta_orig = venta_dict.get("hora_venta", "")
 
         # 2. Calcular nuevo total
         nuevo_total = sum(float(item.get("precio_unitario", item.get("precio", 0.0))) * float(item.get("cantidad", 1.0)) for item in nuevos_items)
@@ -1643,15 +1654,21 @@ def editar_venta_completa(
             """, (delta_fiado, doc_cliente))
 
         # 5. Actualizar venta
+        fecha_final_op = str(nueva_fecha).strip() if nueva_fecha and str(nueva_fecha).strip() else fecha_venta_orig
+        hora_final_op = str(nueva_hora).strip() if nueva_hora and str(nueva_hora).strip() else hora_venta_orig
         cur.execute("""
             UPDATE ventas SET
                 total_venta = ?,
                 metodo_pago = ?,
                 estado = 'Modificada',
                 modificado_por = ?,
-                fecha_modificacion = ?
+                fecha_modificacion = ?,
+                fecha_venta = ?,
+                hora_venta = ?,
+                es_venta_atrasada = CASE WHEN ? != fecha_venta THEN 1 ELSE es_venta_atrasada END,
+                motivo_modificacion_fecha = CASE WHEN ? != fecha_venta THEN ? ELSE motivo_modificacion_fecha END
             WHERE id_venta = ?
-        """, (nuevo_total, nuevo_metodo, usuario_admin, f"{fecha_str} {hora_str}", id_venta))
+        """, (nuevo_total, nuevo_metodo, usuario_admin, f"{fecha_str} {hora_str}", fecha_final_op, hora_final_op, fecha_final_op, fecha_final_op, motivo, id_venta))
 
         # 6. Registrar en auditoría
         cur.execute("PRAGMA table_info(auditoria_ventas)")

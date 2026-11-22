@@ -70,6 +70,9 @@ class VentaCreate(BaseModel):
     autorizado_exceso_credito: Optional[bool] = False
     es_turno_especial: Optional[bool] = False
     motivo_especial: Optional[str] = None
+    fecha: Optional[str] = None
+    hora: Optional[str] = None
+    es_venta_atrasada: Optional[bool] = False
     snapshot_negocio: Optional[Dict[str, Any]] = None
 
     @model_validator(mode="before")
@@ -126,6 +129,8 @@ class EditarVentaRequest(BaseModel):
     nuevos_items: List[EditarVentaItemRequest]
     motivo: str = "Edición administrativa"
     terminal_id: Optional[int] = 1
+    nueva_fecha: Optional[str] = None
+    nueva_hora: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -138,6 +143,10 @@ class EditarVentaRequest(BaseModel):
                 d["nuevo_metodo"] = d["metodo_pago_principal"]
             elif "nuevo_metodo" not in d and "metodo_pago" in d:
                 d["nuevo_metodo"] = d["metodo_pago"]
+            if "nueva_fecha" not in d and "fecha" in d:
+                d["nueva_fecha"] = d["fecha"]
+            if "nueva_hora" not in d and "hora" in d:
+                d["nueva_hora"] = d["hora"]
             if "motivo" not in d:
                 d["motivo"] = d.get("razon") or "Edición administrativa"
             return d

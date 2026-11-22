@@ -451,6 +451,13 @@ def iniciar_configuracion(parent=None, on_save_callback=None):
     var_mostrar_eslogan = tk.BooleanVar(master=ventana, value=bool(cfg_imp_ini.get("mostrar_eslogan", True)))
     var_pie_extra = tk.StringVar(master=ventana, value=str(cfg_imp_ini.get("pie_factura_extra", "")))
 
+    # Variables de Configuración de Códigos SKU
+    var_sku_auto = tk.BooleanVar(master=ventana, value=bool(business_mgr.obtener("sku_auto_generar", True)))
+    var_sku_prefijo = tk.StringVar(master=ventana, value=str(business_mgr.obtener("sku_prefijo", "")))
+    var_sku_separador = tk.StringVar(master=ventana, value=str(business_mgr.obtener("sku_separador", "")))
+    var_sku_digitos = tk.IntVar(master=ventana, value=int(business_mgr.obtener("sku_digitos", 5)))
+    var_sku_numero_inicial = tk.IntVar(master=ventana, value=int(business_mgr.obtener("sku_numero_inicial", 1)))
+
     # =========================================================================
     # SECCIÓN 1: IDENTIDAD DEL NEGOCIO Y LOGO (MARCA BLANCA)
     # =========================================================================
@@ -926,6 +933,86 @@ def iniciar_configuracion(parent=None, on_save_callback=None):
         ).grid(row=r_c, column=col_c, sticky="w", padx=(0, 14), pady=2)
 
     # =========================================================================
+    # SECCIÓN 4: CONFIGURACIÓN DE CÓDIGOS SKU CONSECUTIVOS
+    # =========================================================================
+    card_sku = tk.Frame(scroll_body, bg=t["bg_surface"], bd=1, relief="solid")
+    card_sku.pack(fill="x", pady=(0, 15), padx=5)
+
+    card_sku_head = tk.Frame(card_sku, bg=t["bg_surface_alt"], height=40)
+    card_sku_head.pack(fill="x")
+    card_sku_head.pack_propagate(False)
+
+    tk.Label(
+        card_sku_head, text="🏷️ Configuración de Códigos SKU Consecutivos",
+        font=("Segoe UI", 11, "bold"), bg=t["bg_surface_alt"], fg=t["text_main"]
+    ).pack(side="left", padx=15, pady=8)
+
+    body_sku = tk.Frame(card_sku, bg=t["bg_surface"], padx=20, pady=12)
+    body_sku.pack(fill="x")
+
+    chk_sku_auto = tk.Checkbutton(
+        body_sku, text="Activar generación automática de SKU al crear productos",
+        variable=var_sku_auto, font=("Segoe UI", 9, "bold"), bg=t["bg_surface"],
+        fg=t["text_main"], activebackground=t["bg_surface"], selectcolor=t["bg_surface"]
+    )
+    chk_sku_auto.pack(anchor="w", pady=(0, 10))
+
+    grid_sku = tk.Frame(body_sku, bg=t["bg_surface"])
+    grid_sku.pack(fill="x", pady=2)
+
+    # Prefijo
+    tk.Label(grid_sku, text="Prefijo (ej: EDU, PROD):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_main"]).grid(row=0, column=0, sticky="w", pady=5, padx=(0, 10))
+    e_sku_pref = tk.Entry(grid_sku, textvariable=var_sku_prefijo, font=("Segoe UI", 9), width=15, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_insert"], relief="solid", bd=1)
+    e_sku_pref.grid(row=0, column=1, sticky="w", pady=5, padx=(0, 20))
+
+    # Separador
+    tk.Label(grid_sku, text="Separador (opcional):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=0, column=2, sticky="w", pady=5, padx=(0, 10))
+    cb_sku_sep = ttk.Combobox(grid_sku, textvariable=var_sku_separador, values=["", "-", "_", "/"], width=8, state="readonly")
+    cb_sku_sep.grid(row=0, column=3, sticky="w", pady=5)
+
+    # Cantidad de Dígitos
+    tk.Label(grid_sku, text="Cantidad de dígitos:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=1, column=0, sticky="w", pady=5, padx=(0, 10))
+    cb_sku_dig = ttk.Combobox(grid_sku, textvariable=var_sku_digitos, values=[3, 4, 5, 6, 7, 8], width=8, state="readonly")
+    cb_sku_dig.grid(row=1, column=1, sticky="w", pady=5, padx=(0, 20))
+
+    # Número Inicial
+    tk.Label(grid_sku, text="Número inicial consecutivo:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=1, column=2, sticky="w", pady=5, padx=(0, 10))
+    sp_sku_num = tk.Spinbox(grid_sku, from_=1, to=999999, textvariable=var_sku_numero_inicial, width=10, font=("Segoe UI", 9))
+    sp_sku_num.grid(row=1, column=3, sticky="w", pady=5)
+
+    # Vista Previa Dinámica
+    lbl_preview_sku = tk.Label(
+        body_sku, text="🔍 Vista previa del siguiente código SKU: ---",
+        font=("Segoe UI", 10, "bold"), bg=t["bg_surface_alt"], fg=t.get("accent", "#0284C7"),
+        bd=1, relief="solid", padx=12, pady=6
+    )
+    lbl_preview_sku.pack(fill="x", pady=(10, 2))
+
+    def _actualizar_preview_sku(*_):
+        pref = var_sku_prefijo.get().strip().upper()
+        sep = var_sku_separador.get().strip()
+        try:
+            dig = max(1, min(12, int(var_sku_digitos.get() or 5)))
+        except Exception:
+            dig = 5
+        try:
+            num = max(1, int(var_sku_numero_inicial.get() or 1))
+        except Exception:
+            num = 1
+        ejemplo = f"{pref}{sep}{num:0{dig}d}"
+        if var_sku_auto.get():
+            lbl_preview_sku.config(text=f"🔍 Vista previa del siguiente código SKU sugerido: {ejemplo}", fg=t.get("accent", "#0284C7"))
+        else:
+            lbl_preview_sku.config(text="⚠️ Generación automática de SKU DESACTIVADA (se ingresará manualmente)", fg=t["text_muted"])
+
+    var_sku_auto.trace_add("write", _actualizar_preview_sku)
+    var_sku_prefijo.trace_add("write", _actualizar_preview_sku)
+    var_sku_separador.trace_add("write", _actualizar_preview_sku)
+    var_sku_digitos.trace_add("write", _actualizar_preview_sku)
+    var_sku_numero_inicial.trace_add("write", _actualizar_preview_sku)
+    _actualizar_preview_sku()
+
+    # =========================================================================
     # FUNCIONES UNIFICADAS DE RECOLECCIÓN, GUARDADO, VISTA PREVIA E IMPRESIÓN DE PRUEBA
     # =========================================================================
     def recolectar_datos_negocio_formulario():
@@ -946,7 +1033,12 @@ def iniciar_configuracion(parent=None, on_save_callback=None):
             "eslogan": var_eslogan.get().strip(),
             "color_barra": var_color_barra.get().strip() or "#DB2777",
             "color_login": var_color_login.get().strip() or "#DB2777",
-            "logo_path": var_logo_path.get().strip()
+            "logo_path": var_logo_path.get().strip(),
+            "sku_auto_generar": bool(var_sku_auto.get()),
+            "sku_prefijo": var_sku_prefijo.get().strip().upper(),
+            "sku_separador": var_sku_separador.get().strip(),
+            "sku_digitos": max(1, min(12, int(var_sku_digitos.get() or 5))),
+            "sku_numero_inicial": max(1, int(var_sku_numero_inicial.get() or 1)),
         }
 
     def recolectar_datos_impresora_formulario():

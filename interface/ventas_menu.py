@@ -69,7 +69,11 @@ def guardar_venta_sqlite(
     cambio=0.0,
     numero_factura="",
     snapshot_negocio=None,
-    pagos=None
+    pagos=None,
+    fecha=None,
+    hora=None,
+    es_venta_atrasada=False,
+    motivo_modificacion_fecha=None
 ):
     """Guarda la venta de forma local en SQLite (database/ventas.db) para persistencia y respaldo."""
     try:
@@ -87,8 +91,9 @@ def guardar_venta_sqlite(
         if not conn:
             return None
         cur = conn.cursor()
-        hoy_str = datetime.now().strftime("%Y-%m-%d")
-        hora_str = datetime.now().strftime("%H:%M:%S")
+        hoy_str = str(fecha).strip() if fecha else datetime.now().strftime("%Y-%m-%d")
+        hora_str = str(hora).strip() if hora else datetime.now().strftime("%H:%M:%S")
+        fecha_reg_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         doc = str(doc_cliente or "Consumidor Final").strip() or "Consumidor Final"
 
         # Obtener o vincular sesión de caja activa (OBLIGATORIO)
@@ -117,6 +122,21 @@ def guardar_venta_sqlite(
         if "saldo_pendiente" not in v_cols:
             try:
                 cur.execute("ALTER TABLE ventas ADD COLUMN saldo_pendiente REAL DEFAULT 0.0")
+            except Exception:
+                pass
+        if "fecha_registro" not in v_cols:
+            try:
+                cur.execute("ALTER TABLE ventas ADD COLUMN fecha_registro TEXT")
+            except Exception:
+                pass
+        if "es_venta_atrasada" not in v_cols:
+            try:
+                cur.execute("ALTER TABLE ventas ADD COLUMN es_venta_atrasada INTEGER DEFAULT 0")
+            except Exception:
+                pass
+        if "motivo_modificacion_fecha" not in v_cols:
+            try:
+                cur.execute("ALTER TABLE ventas ADD COLUMN motivo_modificacion_fecha TEXT")
             except Exception:
                 pass
 
@@ -158,10 +178,12 @@ def guardar_venta_sqlite(
         cur.execute("""
             INSERT INTO ventas (
                 fecha_venta, hora_venta, documento_cliente, cliente_id,
-                total_venta, saldo_pendiente, metodo_pago, operario, estado, sesion_caja_id
+                total_venta, saldo_pendiente, metodo_pago, operario, estado, sesion_caja_id,
+                fecha_registro, es_venta_atrasada, motivo_modificacion_fecha
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Completada', ?)
-        """, (hoy_str, hora_str, doc, cli_id_int, float(total), saldo_pend_venta, str(metodo_pago), str(operario_nombre), sesion_id))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Completada', ?, ?, ?, ?)
+        """, (hoy_str, hora_str, doc, cli_id_int, float(total), saldo_pend_venta, str(metodo_pago), str(operario_nombre), sesion_id,
+              fecha_reg_str, 1 if es_venta_atrasada else 0, motivo_modificacion_fecha or ""))
         id_venta = cur.lastrowid
 
         # Guardar snapshot histórico inmutable del negocio y datos de cobro en la venta
@@ -290,6 +312,8 @@ def guardar_venta_sqlite(
         conn.commit()
 
         # Impacto contable en libro central según método de pago
+        # Si es venta atrasada, sincronizar_caja se desactiva para no alterar el arqueo físico de hoy
+        sinc_caja_efectivo = not bool(es_venta_atrasada)
         try:
             if str(metodo_pago) == "Mixto" and pagos:
                 for p_it in pagos:
@@ -308,7 +332,7 @@ def guardar_venta_sqlite(
                             referencia_origen=f"VENTA-{id_venta}",
                             sesion_id=sesion_id,
                             conn=conn,
-                            sincronizar_caja=True
+                            sincronizar_caja=sinc_caja_efectivo
                         )
                     elif m_n == "Transferencia":
                         registrar_movimiento_financiero(
@@ -354,7 +378,7 @@ def guardar_venta_sqlite(
                     referencia_origen=f"VENTA-{id_venta}",
                     sesion_id=sesion_id,
                     conn=conn,
-                    sincronizar_caja=True
+                    sincronizar_caja=sinc_caja_efectivo
                 )
             elif str(metodo_pago) == "Transferencia":
                 registrar_movimiento_financiero(
@@ -609,6 +633,446 @@ class PrinterManager:
                 pass
         return False
 
+# ====================================================================================
+#   VENTANAS INDEPENDIENTES: CATÁLOGO INTELIGENTE Y VENTAS DE OPERARIOS
+# ====================================================================================
+
+class VentanaCatalogo:
+    """Ventana independiente no bloqueante para el Catálogo de Productos y Servicios con Buscador Inteligente."""
+
+    def __init__(self, app):
+        self.app = app
+        self.top = tk.Toplevel(self.app.ventana)
+        self.top.title(f"{business_mgr.nombre} - Catálogo de Productos y Servicios")
+        self.top.protocol("WM_DELETE_WINDOW", self.cerrar)
+        self.t = aplicar_tema(self.top)
+        self.top.configure(bg=self.t["bg_app"])
+        calcular_geometria_segura(self.top, 980, 620, 750, 460)
+
+        self.busqueda_var = tk.StringVar()
+        self.tipo_var = tk.StringVar(value="Todos")
+        self._debounce_id = None
+
+        self._crear_ui()
+        self.filtrar_catalogo()
+
+    def _crear_ui(self):
+        bg_h = self.t["bg_header"]
+        fg_h = self.t["text_header"]
+        bg_panel = self.t["bg_surface"]
+        bg_panel_head = self.t["bg_surface_alt"]
+        fg_main = self.t["text_main"]
+        fg_muted = self.t["text_muted"]
+
+        # 1. Header
+        header = tk.Frame(self.top, bg=bg_h)
+        header.pack(side="top", fill="x")
+        tk.Label(
+            header,
+            text="📦 CATÁLOGO DE PRODUCTOS Y SERVICIOS",
+            font=("Segoe UI", 12, "bold"),
+            bg=bg_h,
+            fg=fg_h,
+        ).pack(side="left", padx=15, pady=8)
+
+        crear_boton(
+            header,
+            "Refrescar",
+            command=self.refrescar_datos,
+            tipo="info",
+            icono="🔄",
+            tam_fuente=9,
+            pady=2,
+            padx=8,
+        ).pack(side="right", padx=12, pady=6)
+
+        # 2. Barra de Búsqueda y Filtros
+        filtro_frame = tk.Frame(self.top, bg=bg_panel, bd=1, relief="solid")
+        filtro_frame.pack(side="top", fill="x", padx=12, pady=(8, 4))
+
+        # Selector de Tipo
+        tipo_box = tk.Frame(filtro_frame, bg=bg_panel)
+        tipo_box.pack(side="left", padx=10, pady=6)
+        tk.Label(tipo_box, text="Tipo:", font=("Segoe UI", 9, "bold"), bg=bg_panel, fg=fg_main).pack(side="left", padx=(0, 4))
+        for val, txt in [("Todos", "📑 Todos"), ("Fisico", "📦 Físicos"), ("Servicio", "🛎️ Servicios")]:
+            rb = tk.Radiobutton(
+                tipo_box,
+                text=txt,
+                variable=self.tipo_var,
+                value=val,
+                bg=bg_panel,
+                activebackground=bg_panel,
+                font=("Segoe UI", 9, "bold"),
+                fg=fg_main,
+                selectcolor=bg_panel_head,
+                command=self.filtrar_catalogo,
+            )
+            rb.pack(side="left", padx=3)
+
+        # Buscador inteligente multi-criterio
+        busq_box = tk.Frame(filtro_frame, bg=bg_panel)
+        busq_box.pack(side="left", fill="x", expand=True, padx=10, pady=6)
+        tk.Label(busq_box, text="🔍", font=("Segoe UI", 11), bg=bg_panel, fg=fg_main).pack(side="left", padx=(0, 4))
+
+        self.entry_busqueda = tk.Entry(
+            busq_box,
+            textvariable=self.busqueda_var,
+            font=("Segoe UI", 10),
+            bg=self.t["input_bg"],
+            fg=self.t["input_fg"],
+            insertbackground=self.t["input_insert"],
+            bd=1,
+            relief="solid",
+        )
+        self.entry_busqueda.pack(side="left", fill="x", expand=True, ipady=3)
+        self.entry_busqueda.focus_set()
+
+        def _on_search_changed(*args):
+            if self._debounce_id:
+                try:
+                    self.top.after_cancel(self._debounce_id)
+                except Exception:
+                    pass
+            self._debounce_id = self.top.after(140, self.filtrar_catalogo)
+
+        self.busqueda_var.trace_add("write", _on_search_changed)
+
+        btn_limpiar = crear_boton(
+            filtro_frame,
+            "Limpiar Filtros",
+            command=self.limpiar_filtros,
+            tipo="secondary",
+            icono="🧹",
+            tam_fuente=9,
+            pady=2,
+            padx=8,
+        )
+        btn_limpiar.pack(side="right", padx=10, pady=6)
+
+        # 3. Contenedor de la Tabla
+        table_frame = tk.Frame(self.top, bg=bg_panel, bd=1, relief="solid")
+        table_frame.pack(side="top", fill="both", expand=True, padx=12, pady=4)
+
+        cols = ("Código", "Nombre", "Tipo", "Categoría", "Stock", "Precio")
+        self.tabla = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="browse")
+        anchos = {"Código": 110, "Nombre": 320, "Tipo": 90, "Categoría": 140, "Stock": 90, "Precio": 130}
+        alineaciones = {"Código": "center", "Nombre": "w", "Tipo": "center", "Categoría": "center", "Stock": "center", "Precio": "e"}
+
+        for col in cols:
+            self.tabla.heading(col, text=col)
+            self.tabla.column(col, width=anchos.get(col, 100), anchor=alineaciones.get(col, "center"))
+
+        sc_y = ttk.Scrollbar(table_frame, orient="vertical", command=self.tabla.yview)
+        sc_x = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tabla.xview)
+        self.tabla.configure(yscrollcommand=sc_y.set, xscrollcommand=sc_x.set)
+
+        self.tabla.grid(row=0, column=0, sticky="nsew")
+        sc_y.grid(row=0, column=1, sticky="ns")
+        sc_x.grid(row=1, column=0, sticky="ew")
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+
+        self.tabla.bind("<Double-1>", self.agregar_al_carrito)
+        self.tabla.bind("<Return>", self.agregar_al_carrito)
+        self.top.bind("<Escape>", lambda e: self.cerrar())
+
+        # 4. Footer con info y acciones
+        footer = tk.Frame(self.top, bg=bg_panel_head, bd=1, relief="solid")
+        footer.pack(side="bottom", fill="x", padx=12, pady=(2, 8))
+
+        self.lbl_info = tk.Label(
+            footer,
+            text="💡 Doble clic o Enter para agregar producto al carrito  |  0 ítems encontrados",
+            font=("Segoe UI", 9, "italic"),
+            bg=bg_panel_head,
+            fg=fg_muted,
+        )
+        self.lbl_info.pack(side="left", padx=10, pady=6)
+
+        btn_cerrar = crear_boton(footer, "Cerrar (Esc)", command=self.cerrar, tipo="secondary", icono="✖", tam_fuente=9)
+        btn_cerrar.pack(side="right", padx=8, pady=4)
+
+        btn_add = crear_boton(footer, "Agregar al Carrito (Enter)", command=self.agregar_al_carrito, tipo="success", icono="➕", tam_fuente=9)
+        btn_add.pack(side="right", padx=4, pady=4)
+
+    def refrescar_datos(self):
+        self.app.refrescar_catalogo_central()
+        self.filtrar_catalogo()
+
+    def limpiar_filtros(self):
+        self.busqueda_var.set("")
+        self.tipo_var.set("Todos")
+        self.entry_busqueda.focus_set()
+        self.filtrar_catalogo()
+
+    def filtrar_catalogo(self):
+        try:
+            from interface.table_filter_sorter import normalizar_texto
+        except ImportError:
+            try:
+                from table_filter_sorter import normalizar_texto
+            except ImportError:
+                def normalizar_texto(t):
+                    return str(t or "").lower().strip()
+
+        query_norm = normalizar_texto(self.busqueda_var.get())
+        tipo_sel = self.tipo_var.get().strip()
+
+        self.tabla.delete(*self.tabla.get_children())
+        prods = getattr(self.app, "productos_inventario", [])
+        total_coincidencias = 0
+
+        for p in prods:
+            cod = str(p[0] or "").strip()
+            nom = str(p[1] or "").strip()
+            stock = p[2]
+            precio = p[3]
+            t_prod = p[4]
+            es_var = p[8] if len(p) > 8 else False
+            cod_barras = str(p[10] or "").strip() if len(p) > 10 else ""
+            cat = str(p[11] or "").strip() if len(p) > 11 else ""
+            prov = str(p[12] or "").strip() if len(p) > 12 else ""
+            marca = str(p[13] or "").strip() if len(p) > 13 else ""
+            desc = str(p[14] or "").strip() if len(p) > 14 else ""
+
+            # Filtro por tipo
+            if tipo_sel != "Todos" and t_prod != tipo_sel:
+                continue
+
+            # Filtro por texto multi-criterio normalizado sin acentos
+            if query_norm:
+                campo_completo = f"{cod} {nom} {cod_barras} {cat} {prov} {marca} {desc} {t_prod}"
+                if query_norm not in normalizar_texto(campo_completo):
+                    continue
+
+            precio_str = "Variable" if es_var else self.app.formato_peso(precio)
+            stock_str = "—" if t_prod == "Servicio" else str(stock)
+
+            self.tabla.insert(
+                "",
+                tk.END,
+                text=cod,
+                values=(
+                    cod,
+                    nom,
+                    t_prod,
+                    cat or "General",
+                    stock_str,
+                    precio_str,
+                ),
+            )
+            total_coincidencias += 1
+
+        if hasattr(self, "lbl_info"):
+            self.lbl_info.config(
+                text=f"💡 Doble clic o Enter para agregar producto al carrito  |  {total_coincidencias} ítems encontrados"
+            )
+
+    def agregar_al_carrito(self, event=None):
+        if not self.app.verificar_caja_abierta("agregar productos del catálogo"):
+            return
+        sel = self.tabla.selection()
+        if not sel:
+            return
+        cod = self.tabla.item(sel[0], "text")
+        producto = next(
+            (
+                p
+                for p in self.app.productos_inventario
+                if str(p[0]) == str(cod) or str(p[0]).zfill(5) == str(cod).zfill(5)
+            ),
+            None,
+        )
+        if not producto:
+            return
+
+        tipo_prod = producto[4]
+        es_var = producto[8] if len(producto) > 8 else False
+        precio = producto[3]
+
+        if producto[2] > 0 or tipo_prod == "Servicio":
+            if es_var:
+                precio_ingresado = self.app.solicitar_precio_variable(producto[1], precio, parent=self.top)
+                if precio_ingresado is None:
+                    return
+                precio = precio_ingresado
+            self.app.agregar_producto(producto[0], producto[1], precio)
+        else:
+            messagebox.showwarning(
+                "Sin Stock",
+                f"El producto '{producto[1]}' no tiene stock disponible en vitrina.",
+                parent=self.top,
+            )
+
+    def cerrar(self):
+        if hasattr(self.app, "ventana_catalogo_instancia"):
+            self.app.ventana_catalogo_instancia = None
+        try:
+            self.top.destroy()
+        except Exception:
+            pass
+
+
+class VentanaOperarios:
+    """Ventana independiente para consultar, atender y procesar pedidos pendientes de operarios."""
+
+    def __init__(self, app):
+        self.app = app
+        self.top = tk.Toplevel(self.app.ventana)
+        self.top.title(f"{business_mgr.nombre} - Ventas de Operarios")
+        self.top.protocol("WM_DELETE_WINDOW", self.cerrar)
+        self.t = aplicar_tema(self.top)
+        self.top.configure(bg=self.t["bg_app"])
+        calcular_geometria_segura(self.top, 780, 520, 620, 400)
+
+        self._crear_ui()
+        self.actualizar_tabla(list(self.app.ventas_pendientes_cache.values()))
+
+    def _crear_ui(self):
+        bg_h = self.t["bg_header"]
+        fg_h = self.t["text_header"]
+        bg_panel = self.t["bg_surface"]
+        bg_panel_head = self.t["bg_surface_alt"]
+        fg_main = self.t["text_main"]
+        fg_muted = self.t["text_muted"]
+
+        # Header
+        header = tk.Frame(self.top, bg=bg_h)
+        header.pack(side="top", fill="x")
+        tk.Label(
+            header,
+            text="📥 VENTAS Y PEDIDOS DE OPERARIOS",
+            font=("Segoe UI", 12, "bold"),
+            bg=bg_h,
+            fg=fg_h,
+        ).pack(side="left", padx=15, pady=8)
+
+        self.lbl_badge = tk.Label(
+            header,
+            text="🟢 0 Órdenes",
+            font=("Segoe UI", 9, "bold"),
+            bg="#16A34A",
+            fg="white",
+            padx=8,
+            pady=2,
+        )
+        self.lbl_badge.pack(side="left", padx=6)
+
+        crear_boton(
+            header,
+            "Refrescar",
+            command=self.app.actualizar_ventas_operarios,
+            tipo="info",
+            icono="🔄",
+            tam_fuente=9,
+            pady=2,
+            padx=8,
+        ).pack(side="right", padx=12, pady=6)
+
+        # Contenedor Tabla
+        table_frame = tk.Frame(self.top, bg=bg_panel, bd=1, relief="solid")
+        table_frame.pack(side="top", fill="both", expand=True, padx=12, pady=(8, 4))
+
+        cols = ("Venta", "Operario", "Total", "Hora")
+        self.tabla = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="browse")
+        anchos = {"Venta": 110, "Operario": 240, "Total": 140, "Hora": 110}
+
+        for c in cols:
+            self.tabla.heading(c, text=c)
+            self.tabla.column(c, width=anchos.get(c, 100), anchor="center")
+
+        sc_y = ttk.Scrollbar(table_frame, orient="vertical", command=self.tabla.yview)
+        sc_x = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tabla.xview)
+        self.tabla.configure(yscrollcommand=sc_y.set, xscrollcommand=sc_x.set)
+
+        self.tabla.grid(row=0, column=0, sticky="nsew")
+        sc_y.grid(row=0, column=1, sticky="ns")
+        sc_x.grid(row=1, column=0, sticky="ew")
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+
+        self.tabla.bind("<Double-1>", self.atender_orden)
+        self.tabla.bind("<Return>", self.atender_orden)
+        self.top.bind("<Escape>", lambda e: self.cerrar())
+
+        # Footer acciones
+        footer = tk.Frame(self.top, bg=bg_panel_head, bd=1, relief="solid")
+        footer.pack(side="bottom", fill="x", padx=12, pady=(2, 8))
+
+        tk.Label(
+            footer,
+            text="💡 Seleccione un pedido para atenderlo y cobrarlo en caja",
+            font=("Segoe UI", 9, "italic"),
+            bg=bg_panel_head,
+            fg=fg_muted,
+        ).pack(side="left", padx=10, pady=6)
+
+        btn_cerrar = crear_boton(footer, "Cerrar (Esc)", command=self.cerrar, tipo="secondary", icono="✖", tam_fuente=9)
+        btn_cerrar.pack(side="right", padx=6, pady=4)
+
+        btn_rechazar = crear_boton(footer, "Rechazar Pedido", command=self.rechazar_orden, tipo="danger", icono="❌", tam_fuente=9)
+        btn_rechazar.pack(side="right", padx=6, pady=4)
+
+        btn_atender = crear_boton(footer, "Atender Pedido (Enter)", command=self.atender_orden, tipo="success", icono="📥", tam_fuente=9)
+        btn_atender.pack(side="right", padx=6, pady=4)
+
+    def actualizar_tabla(self, ventas):
+        sel_prev = self.tabla.selection()
+        sel_id = self.tabla.item(sel_prev[0], "text") if sel_prev else None
+
+        self.tabla.delete(*self.tabla.get_children())
+        cant = len(ventas)
+        for v in ventas:
+            v_id = v.get("id")
+            num = v.get("numero", f"ID {v_id}")
+            operario = v.get("operario_nombre", f"Operario {v.get('usuario_id')}")
+            total_fmt = self.app.formato_peso(v.get("total", 0.0))
+            hora = v.get("hora", "")
+            item_row = self.tabla.insert("", tk.END, text=str(v_id), values=(num, operario, total_fmt, hora))
+            if sel_id and str(v_id) == str(sel_id):
+                self.tabla.selection_set(item_row)
+
+        if hasattr(self, "lbl_badge"):
+            if cant > 0:
+                self.lbl_badge.config(text=f"🔴 {cant} Órdenes Pendientes", bg="#DC2626")
+            else:
+                self.lbl_badge.config(text="🟢 0 Órdenes", bg="#16A34A")
+
+    def atender_orden(self, event=None):
+        sel = self.tabla.selection()
+        if not sel:
+            messagebox.showinfo("Aviso", "Seleccione una orden de la lista para atender.", parent=self.top)
+            return
+        v_id_str = self.tabla.item(sel[0], "text")
+        try:
+            v_id = int(v_id_str)
+        except Exception:
+            return
+        ok = self.app.cargar_orden_operario_por_id(v_id)
+        if ok:
+            self.cerrar()
+
+    def rechazar_orden(self):
+        sel = self.tabla.selection()
+        if not sel:
+            messagebox.showinfo("Aviso", "Seleccione una orden para rechazar.", parent=self.top)
+            return
+        v_id_str = self.tabla.item(sel[0], "text")
+        try:
+            v_id = int(v_id_str)
+        except Exception:
+            return
+        self.app.descartar_orden_operario_por_id(v_id)
+
+    def cerrar(self):
+        if hasattr(self.app, "ventana_operarios_instancia"):
+            self.app.ventana_operarios_instancia = None
+        try:
+            self.top.destroy()
+        except Exception:
+            pass
+
+
 class App:
     def __init__(self, ventana, user_id="", rol="", parent_pid="", usuario_nombre=""):
         self.ventana = ventana
@@ -755,6 +1219,15 @@ class App:
         self._venta_fingerprint = None
         self._ultimo_refresh_catalogo = 0.0
 
+        # Ventanas emergentes y control de fecha atrasada
+        self.ventana_catalogo_instancia = None
+        self.ventana_operarios_instancia = None
+        self.fecha_operacion_atrasada = None
+        self.hora_operacion_atrasada = None
+        self.motivo_venta_atrasada = None
+        self.banner_venta_atrasada = None
+        self.btn_operarios_popup = None
+
         # Variables de control para Lector de Código de Barras (Hardware USB Keyboard Wedge)
         self._scanner_burst_chars = []
         self._scanner_modal_burst = []
@@ -881,6 +1354,26 @@ class App:
         )
         self.btn_estado_caja.pack(side="right", padx=8, pady=2)
 
+        # Botón Catálogo Emergente (F2)
+        self.btn_catalogo_popup = crear_boton(
+            info_frame, "Catálogo (F2)", command=self.abrir_catalogo_popup, tipo="info", icono="📦", tam_fuente=9, pady=1, padx=8
+        )
+        self.btn_catalogo_popup.pack(side="left", padx=6, pady=2)
+
+        # Botón Ventas de Operarios con Notificación Dinámica en Rojo/Verde
+        self.btn_operarios_popup = tk.Button(
+            info_frame, text="📥 Operarios [🟢 0]", command=self.abrir_operarios_popup,
+            font=("Segoe UI", 9, "bold"), bg="#16A34A", fg="white",
+            relief="flat", cursor="hand2", padx=8, pady=2
+        )
+        self.btn_operarios_popup.pack(side="left", padx=6, pady=2)
+
+        if self.es_admin:
+            self.btn_venta_atrasada = crear_boton(
+                info_frame, "Venta Atrasada", command=self.abrir_modal_venta_atrasada, tipo="secondary", icono="🕒", tam_fuente=9, pady=1, padx=8
+            )
+            self.btn_venta_atrasada.pack(side="left", padx=6, pady=2)
+
         # Barra de Indicadores de Ventas, Recaudo y Nómina (Fase 6)
         self.indicadores_frame = tk.Frame(central_frame, bg=bg_panel, bd=1, relief="solid")
         self.indicadores_frame.pack(fill="x", pady=(0, 3))
@@ -951,142 +1444,68 @@ class App:
         )
         btn_abrir_banner.pack(side="right", padx=8, pady=2)
 
-        # Contenedor dividido en columnas
+        # Contenedor principal de la Venta (Carrito Dominante a Pantalla Completa)
         self.split_frame = tk.Frame(central_frame, bg=bg_app)
         self.split_frame.pack(fill="both", expand=True, pady=2)
-        self.split_frame.grid_rowconfigure(0, weight=1)
 
-        if self.es_admin:
-            self.split_frame.grid_columnconfigure(0, weight=4) # Catálogo
-            self.split_frame.grid_columnconfigure(1, weight=5) # Carrito Venta
-            self.split_frame.grid_columnconfigure(2, weight=4) # Ventas Operarios
-        else:
-            self.split_frame.grid_columnconfigure(0, weight=5) # Catálogo
-            self.split_frame.grid_columnconfigure(1, weight=6) # Carrito Venta
-
-        # =========================================================================
-        # COLUMNA 0: PANEL CATÁLOGO DE PRODUCTOS / SERVICIOS (CON SELECTOR EN TIEMPO REAL)
-        # =========================================================================
-        catalogo_panel = tk.Frame(self.split_frame, bg=bg_panel, bd=1, relief="solid")
-        catalogo_panel.grid(row=0, column=0, sticky="nsew", padx=3, pady=2)
-
-        # Header catálogo
-        cat_head = tk.Frame(catalogo_panel, bg=bg_panel_head)
-        cat_head.pack(fill="x", padx=2, pady=2)
-        tk.Label(cat_head, text="📦 CATÁLOGO", font=("Segoe UI", 10, "bold"), bg=bg_panel_head, fg=fg_main).pack(side="left", padx=6, pady=4)
-        crear_boton(
-            cat_head, text="🔄", command=self.refrescar_catalogo_central,
-            tipo="info", tam_fuente=7, padx=5, pady=1
-        ).pack(side="right", padx=4, pady=2)
-        if not self.es_admin and str(self.rol).strip().lower() == "operario":
-            crear_boton(
-                cat_head, text="➕ Agregar servicio", command=self._abrir_modal_servicio_operario,
-                tipo="success", tam_fuente=8, padx=6, pady=2
-            ).pack(side="right", padx=5, pady=2)
-
-        # Selector Tipo (Físico vs Servicio) en tiempo real
-        cat_sel_frame = tk.Frame(catalogo_panel, bg=bg_panel)
-        cat_sel_frame.pack(fill="x", padx=6, pady=2)
-        tk.Label(cat_sel_frame, text="Tipo:", font=("Segoe UI", 9, "bold"), bg=bg_panel, fg=fg_main).pack(side="left", padx=(0, 2))
-        
-        for val, txt in [("Todos", "📑 Todos"), ("Fisico", "📦 Físicos"), ("Servicio", "🛎️ Servicios")]:
-            rb = tk.Radiobutton(cat_sel_frame, text=txt, variable=self.tipo_filtro, value=val,
-                                bg=bg_panel, activebackground=bg_panel, font=("Segoe UI", 8, "bold"),
-                                fg=fg_main, selectcolor=bg_panel_head, command=self.actualizar_catalogo_live)
-            rb.pack(side="left", padx=2)
-
-        # Buscador catálogo en vivo
-        cat_busq_frame = tk.Frame(catalogo_panel, bg=bg_panel)
-        cat_busq_frame.pack(fill="x", padx=6, pady=2)
-        tk.Label(cat_busq_frame, text="🔍", font=("Segoe UI", 9), bg=bg_panel, fg=fg_main).pack(side="left", padx=(0, 4))
-        self.entry_busq_cat = tk.Entry(cat_busq_frame, textvariable=self.busqueda_catalogo, font=("Segoe UI", 9), bd=1, relief="solid", 
-                                       bg=self.t["input_bg"], fg=self.t["input_fg"], insertbackground=self.t["input_insert"])
-        self.entry_busq_cat.pack(side="left", fill="x", expand=True)
-        self._debounce_cat_live = None
-        def _on_cat_search(*args):
-            if self._debounce_cat_live:
-                try:
-                    self.ventana.after_cancel(self._debounce_cat_live)
-                except Exception:
-                    pass
-            self._debounce_cat_live = self.ventana.after(150, self.actualizar_catalogo_live)
-        self.busqueda_catalogo.trace_add("write", _on_cat_search)
-
-        # Tabla catálogo
-        cat_table_frame = tk.Frame(catalogo_panel, bg=bg_panel, bd=1, relief="solid")
-        cat_table_frame.pack(fill="both", expand=True, padx=6, pady=(2, 2))
-
-        cols_cat = ("Código", "Nombre", "Stock", "Precio")
-        self.tabla_catalogo = ttk.Treeview(cat_table_frame, columns=cols_cat, show="headings", selectmode="browse")
-        anchos_c = {"Código": 65, "Nombre": 160, "Stock": 55, "Precio": 85}
-        for c in cols_cat:
-            self.tabla_catalogo.heading(c, text=c)
-            self.tabla_catalogo.column(c, width=anchos_c.get(c, 80), anchor="center")
-
-        sc_cat_y = ttk.Scrollbar(cat_table_frame, orient="vertical", command=self.tabla_catalogo.yview)
-        sc_cat_x = ttk.Scrollbar(cat_table_frame, orient="horizontal", command=self.tabla_catalogo.xview)
-        self.tabla_catalogo.configure(yscrollcommand=sc_cat_y.set, xscrollcommand=sc_cat_x.set)
-
-        self.tabla_catalogo.grid(row=0, column=0, sticky="nsew")
-        sc_cat_y.grid(row=0, column=1, sticky="ns")
-        sc_cat_x.grid(row=1, column=0, sticky="ew")
-        cat_table_frame.grid_rowconfigure(0, weight=1)
-        cat_table_frame.grid_columnconfigure(0, weight=1)
-
-        self.tabla_catalogo.bind("<Double-1>", self.on_catalogo_doble_click)
-        self.tabla_catalogo.bind("<Return>", self.on_catalogo_doble_click)
-
-        tk.Label(catalogo_panel, text="💡 Doble clic para añadir a la venta", font=("Segoe UI", 8, "italic"), 
-                 bg=bg_panel, fg=fg_muted).pack(side="bottom", pady=2)
-
-        # =========================================================================
-        # COLUMNA 1: PANEL VENTA ACTUAL (CARRITO)
-        # =========================================================================
+        # PANEL VENTA ACTUAL (CARRITO DOMINANTE - OCUPA EL ESPACIO COMPLETO)
         cart_panel = tk.Frame(self.split_frame, bg=bg_panel, bd=1, relief="solid")
-        cart_panel.grid(row=0, column=1, sticky="nsew", padx=3, pady=2)
+        cart_panel.pack(fill="both", expand=True, padx=2, pady=2)
 
         # Header carrito
         cart_head = tk.Frame(cart_panel, bg=bg_panel_head)
         cart_head.pack(fill="x", padx=2, pady=2)
-        tk.Label(cart_head, text="🛒 VENTA ACTUAL", font=("Segoe UI", 10, "bold"), bg=bg_panel_head, fg=fg_main).pack(side="left", padx=6, pady=4)
+        tk.Label(cart_head, text="🛒 VENTA ACTUAL (CARRITO DE COMPRAS)", font=("Segoe UI", 10, "bold"), bg=bg_panel_head, fg=fg_main).pack(side="left", padx=6, pady=4)
 
-        # Inputs: Doc cliente, Código y Botones rápidos
+        # Inputs: Doc cliente, Código y Botones de acción rápida
         cart_in_frame = tk.Frame(cart_panel, bg=bg_panel)
-        cart_in_frame.pack(fill="x", padx=6, pady=2)
+        cart_in_frame.pack(fill="x", padx=6, pady=3)
 
-        tk.Label(cart_in_frame, text="👤 Doc:", font=("Segoe UI", 8, "bold"), bg=bg_panel, fg=fg_main).pack(side="left", padx=(0, 2))
-        self.entry_doc = tk.Entry(cart_in_frame, textvariable=self.documento, width=10, font=("Segoe UI", 9), 
+        tk.Label(cart_in_frame, text="👤 Doc Cliente:", font=("Segoe UI", 9, "bold"), bg=bg_panel, fg=fg_main).pack(side="left", padx=(0, 2))
+        self.entry_doc = tk.Entry(cart_in_frame, textvariable=self.documento, width=12, font=("Segoe UI", 9), 
                                   bg=self.t["input_bg"], fg=self.t["input_fg"], insertbackground=self.t["input_insert"])
-        self.entry_doc.pack(side="left", padx=(0, 4))
+        self.entry_doc.pack(side="left", padx=(0, 6))
 
-        tk.Label(cart_in_frame, text="🔢 Cód:", font=("Segoe UI", 8, "bold"), bg=bg_panel, fg=fg_main).pack(side="left", padx=(0, 2))
-        self.entry_codigo = tk.Entry(cart_in_frame, textvariable=self.codigo_entrada, width=11, font=("Segoe UI", 9), 
+        tk.Label(cart_in_frame, text="🔢 Cód / Barcode:", font=("Segoe UI", 9, "bold"), bg=bg_panel, fg=fg_main).pack(side="left", padx=(0, 2))
+        self.entry_codigo = tk.Entry(cart_in_frame, textvariable=self.codigo_entrada, width=14, font=("Segoe UI", 9), 
                                      bg=self.t["input_bg"], fg=self.t["input_fg"], insertbackground=self.t["input_insert"])
-        self.entry_codigo.pack(side="left", padx=(0, 3))
+        self.entry_codigo.pack(side="left", padx=(0, 6))
 
-        btn_escanear = crear_boton(cart_in_frame, "📲", command=self.escanear_codigo, tipo="purple", tam_fuente=8, pady=2, padx=6)
-        btn_escanear.pack(side="left", padx=1)
+        btn_cat_rapido = crear_boton(cart_in_frame, "Catálogo (F2)", command=self.abrir_catalogo_popup, tipo="info", icono="📦", tam_fuente=8, pady=2, padx=6)
+        btn_cat_rapido.pack(side="left", padx=2)
 
-        btn_eliminar = crear_boton(cart_in_frame, "🗑️", command=self.eliminar_seleccionado, tipo="danger", tam_fuente=8, pady=2, padx=6)
-        btn_eliminar.pack(side="left", padx=1)
+        btn_escanear = crear_boton(cart_in_frame, "📲 Escanear", command=self.escanear_codigo, tipo="purple", tam_fuente=8, pady=2, padx=6)
+        btn_escanear.pack(side="left", padx=2)
 
         btn_editar = crear_boton(cart_in_frame, "✏️ Modificar", command=self.editar_item_carrito_click, tipo="secondary", tam_fuente=8, pady=2, padx=6, tooltip="Modificar cantidad o precio del ítem")
-        btn_editar.pack(side="left", padx=1)
+        btn_editar.pack(side="left", padx=2)
+
+        btn_eliminar = crear_boton(cart_in_frame, "🗑️ Eliminar", command=self.eliminar_seleccionado, tipo="danger", tam_fuente=8, pady=2, padx=6)
+        btn_eliminar.pack(side="left", padx=2)
+
+        btn_vaciar = crear_boton(cart_in_frame, "🧹 Vaciar", command=self.limpiar_formulario, tipo="secondary", tam_fuente=8, pady=2, padx=6)
+        btn_vaciar.pack(side="left", padx=2)
 
         if self.puede_procesar_venta:
             btn_abrir_caja = crear_boton(cart_in_frame, "💰 Caja", command=self.gestionar_caja_pos, tipo="warning", tam_fuente=8, pady=2, padx=6)
-            btn_abrir_caja.pack(side="right", padx=1)
+            btn_abrir_caja.pack(side="right", padx=2)
 
-        # Tabla carrito
+        # Tabla carrito dominante con columnas claras y código visible
         cart_table_frame = tk.Frame(cart_panel, bg=bg_panel, bd=1, relief="solid")
         cart_table_frame.pack(fill="both", expand=True, padx=6, pady=(2, 4))
 
         cols_cart = ("Producto", "Precio", "Cantidad", "Total")
-        self.tabla = ttk.Treeview(cart_table_frame, columns=cols_cart, show="headings")
-        anchos_cart = {"Producto": 170, "Precio": 85, "Cantidad": 65, "Total": 85}
-        for col in cols_cart:
-            self.tabla.heading(col, text=col)
-            self.tabla.column(col, width=anchos_cart.get(col, 80), anchor="center")
+        self.tabla = ttk.Treeview(cart_table_frame, columns=cols_cart, show="tree headings")
+        self.tabla.heading("#0", text="Código / SKU", anchor="center")
+        self.tabla.column("#0", width=130, anchor="center")
+        self.tabla.heading("Producto", text="Descripción / Nombre del Producto o Servicio", anchor="w")
+        self.tabla.column("Producto", width=420, anchor="w")
+        self.tabla.heading("Precio", text="Precio Unitario", anchor="e")
+        self.tabla.column("Precio", width=140, anchor="e")
+        self.tabla.heading("Cantidad", text="Cantidad", anchor="center")
+        self.tabla.column("Cantidad", width=95, anchor="center")
+        self.tabla.heading("Total", text="Subtotal", anchor="e")
+        self.tabla.column("Total", width=150, anchor="e")
 
         sc_cart_y = ttk.Scrollbar(cart_table_frame, orient="vertical", command=self.tabla.yview)
         sc_cart_x = ttk.Scrollbar(cart_table_frame, orient="horizontal", command=self.tabla.xview)
@@ -1108,51 +1527,9 @@ class App:
         cart_table_frame.grid_rowconfigure(0, weight=1)
         cart_table_frame.grid_columnconfigure(0, weight=1)
 
-        # =========================================================================
-        # COLUMNA 2: PANEL VENTAS DE OPERARIOS (SOLO ADMINISTRADOR - CAJA)
-        # =========================================================================
-        if self.es_admin:
-            operarios_panel = tk.Frame(self.split_frame, bg=bg_panel, bd=1, relief="solid")
-            operarios_panel.grid(row=0, column=2, sticky="nsew", padx=3, pady=2)
-
-            op_head = tk.Frame(operarios_panel, bg=bg_panel_head)
-            op_head.pack(fill="x", padx=2, pady=2)
-            tk.Label(op_head, text="📥 VENTAS OPERARIOS", font=("Segoe UI", 10, "bold"), bg=bg_panel_head, fg=fg_main).pack(side="left", padx=6, pady=4)
-            
-            self.lbl_badge_operarios = tk.Label(op_head, text="🟢 0 Pend.", font=("Segoe UI", 8, "bold"), bg=bg_panel_head, fg=self.t["btn_success_bg"])
-            self.lbl_badge_operarios.pack(side="left", padx=4)
-
-            btn_refresh_op = crear_boton(op_head, "🔄", command=self.actualizar_ventas_operarios, tipo="info", tam_fuente=7, pady=1, padx=4)
-            btn_refresh_op.pack(side="right", padx=4)
-
-            tk.Label(operarios_panel, text="Clic en una orden para cobrarla en caja:", font=("Segoe UI", 8), bg=bg_panel, fg=fg_muted).pack(anchor="w", padx=6, pady=(0, 2))
-
-            op_table_frame = tk.Frame(operarios_panel, bg=bg_panel, bd=1, relief="solid")
-            op_table_frame.pack(fill="both", expand=True, padx=6, pady=2)
-
-            cols_op = ("Venta", "Operario", "Total", "Hora")
-            self.tabla_operarios = ttk.Treeview(op_table_frame, columns=cols_op, show="headings", selectmode="browse")
-            anchos_op = {"Venta": 75, "Operario": 120, "Total": 80, "Hora": 65}
-            for col in cols_op:
-                self.tabla_operarios.heading(col, text=col)
-                self.tabla_operarios.column(col, width=anchos_op.get(col, 80), anchor="center")
-
-            sc_op_y = ttk.Scrollbar(op_table_frame, orient="vertical", command=self.tabla_operarios.yview)
-            sc_op_x = ttk.Scrollbar(op_table_frame, orient="horizontal", command=self.tabla_operarios.xview)
-            self.tabla_operarios.configure(yscrollcommand=sc_op_y.set, xscrollcommand=sc_op_x.set)
-
-            self.tabla_operarios.grid(row=0, column=0, sticky="nsew")
-            sc_op_y.grid(row=0, column=1, sticky="ns")
-            sc_op_x.grid(row=1, column=0, sticky="ew")
-            op_table_frame.grid_rowconfigure(0, weight=1)
-            op_table_frame.grid_columnconfigure(0, weight=1)
-
-            self.tabla_operarios.bind("<<TreeviewSelect>>", self.on_operario_venta_select)
-
-            op_btn_frame = tk.Frame(operarios_panel, bg=bg_panel)
-            op_btn_frame.pack(fill="x", padx=6, pady=(2, 4))
-            btn_descartar = crear_boton(op_btn_frame, "Rechazar Pedido", command=self.descartar_orden_operario, tipo="danger", icono="❌", tam_fuente=8, pady=2)
-            btn_descartar.pack(side="right")
+        # Referencias de compatibilidad retrocompatible
+        self.tabla_catalogo = None
+        self.tabla_operarios = None
 
         # Cargar catálogo inicial y arrancar sondeo de operarios
         self.actualizar_catalogo_live()
@@ -1160,6 +1537,220 @@ class App:
             self.actualizar_ventas_operarios()
         self.actualizar_estado_caja()
         self.actualizar_indicadores_empleado_pos()
+
+    def abrir_catalogo_popup(self, event=None):
+        """Abre o enfoca la ventana emergente no bloqueante del catálogo."""
+        if self.ventana_catalogo_instancia is not None and getattr(self.ventana_catalogo_instancia, "top", None) and self.ventana_catalogo_instancia.top.winfo_exists():
+            self.ventana_catalogo_instancia.top.deiconify()
+            self.ventana_catalogo_instancia.top.lift()
+            self.ventana_catalogo_instancia.top.focus_force()
+            return
+        self.ventana_catalogo_instancia = VentanaCatalogo(self)
+
+    def abrir_operarios_popup(self, event=None):
+        """Abre o enfoca la ventana emergente de ventas de operarios."""
+        if self.ventana_operarios_instancia is not None and getattr(self.ventana_operarios_instancia, "top", None) and self.ventana_operarios_instancia.top.winfo_exists():
+            self.ventana_operarios_instancia.top.deiconify()
+            self.ventana_operarios_instancia.top.lift()
+            self.ventana_operarios_instancia.top.focus_force()
+            return
+        self.ventana_operarios_instancia = VentanaOperarios(self)
+
+    def abrir_modal_venta_atrasada(self):
+        """Permite al administrador fijar una fecha de operación manual/atrasada para la venta actual."""
+        if not self.es_admin:
+            messagebox.showerror("Acceso Denegado", "Solo usuarios administradores pueden registrar ventas con fecha manual o atrasada.", parent=self.ventana)
+            return
+
+        modal = tk.Toplevel(self.ventana)
+        modal.title("🕒 Registrar Venta con Fecha Atrasada / Manual")
+        modal.transient(self.ventana)
+        modal.grab_set()
+        t_m = aplicar_tema(modal)
+        modal.configure(bg=t_m["bg_app"])
+        calcular_geometria_segura(modal, 480, 420, 420, 360)
+
+        # Header
+        head = tk.Frame(modal, bg=t_m["bg_header"], padx=15, pady=10)
+        head.pack(fill="x")
+        tk.Label(head, text="🕒 FECHA DE OPERACIÓN MANUAL", font=("Segoe UI", 12, "bold"), bg=t_m["bg_header"], fg=t_m["text_header"]).pack(anchor="w")
+        tk.Label(head, text="La venta afectará los informes contables de la fecha indicada sin alterar el arqueo físico de la caja de hoy.",
+                 font=("Segoe UI", 8), bg=t_m["bg_header"], fg=t_m["text_header"], wraplength=440, justify="left").pack(anchor="w", pady=(2, 0))
+
+        body = tk.Frame(modal, bg=t_m["bg_app"], padx=20, pady=15)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(body, text="Fecha de Operación (YYYY-MM-DD):", font=("Segoe UI", 9, "bold"), bg=t_m["bg_app"], fg=t_m["text_main"]).pack(anchor="w", pady=(5, 2))
+        fecha_default = self.fecha_operacion_atrasada or datetime.now().strftime("%Y-%m-%d")
+        ent_fecha = tk.Entry(body, font=("Segoe UI", 10), bg=t_m["input_bg"], fg=t_m["input_fg"], insertbackground=t_m["input_insert"])
+        ent_fecha.insert(0, fecha_default)
+        ent_fecha.pack(fill="x", pady=(0, 8))
+
+        tk.Label(body, text="Hora de Operación (HH:MM:SS):", font=("Segoe UI", 9, "bold"), bg=t_m["bg_app"], fg=t_m["text_main"]).pack(anchor="w", pady=(5, 2))
+        hora_default = self.hora_operacion_atrasada or datetime.now().strftime("%H:%M:%S")
+        ent_hora = tk.Entry(body, font=("Segoe UI", 10), bg=t_m["input_bg"], fg=t_m["input_fg"], insertbackground=t_m["input_insert"])
+        ent_hora.insert(0, hora_default)
+        ent_hora.pack(fill="x", pady=(0, 8))
+
+        tk.Label(body, text="Motivo o Justificación (Obligatorio):", font=("Segoe UI", 9, "bold"), bg=t_m["bg_app"], fg=t_m["text_main"]).pack(anchor="w", pady=(5, 2))
+        ent_motivo = tk.Entry(body, font=("Segoe UI", 10), bg=t_m["input_bg"], fg=t_m["input_fg"], insertbackground=t_m["input_insert"])
+        if self.motivo_venta_atrasada:
+            ent_motivo.insert(0, self.motivo_venta_atrasada)
+        else:
+            ent_motivo.insert(0, "Registro de venta física atrasada")
+        ent_motivo.pack(fill="x", pady=(0, 15))
+
+        btn_box = tk.Frame(modal, bg=t_m["bg_app"], padx=15, pady=10)
+        btn_box.pack(fill="x", side="bottom")
+
+        def _aplicar():
+            f_val = ent_fecha.get().strip()
+            h_val = ent_hora.get().strip()
+            m_val = ent_motivo.get().strip()
+
+            try:
+                dt_op = datetime.strptime(f_val, "%Y-%m-%d")
+            except ValueError:
+                messagebox.showerror("Fecha Inválida", "La fecha debe tener el formato YYYY-MM-DD (ejemplo: 2026-11-20).", parent=modal)
+                return
+
+            try:
+                datetime.strptime(h_val, "%H:%M:%S")
+            except ValueError:
+                messagebox.showerror("Hora Inválida", "La hora debe tener el formato HH:MM:SS (ejemplo: 14:30:00).", parent=modal)
+                return
+
+            if not m_val:
+                messagebox.showerror("Motivo Requerido", "Debe ingresar una justificación o motivo para la venta atrasada.", parent=modal)
+                return
+
+            # Comprobar si es fecha futura
+            hoy_dt = datetime.now()
+            if dt_op.date() > hoy_dt.date():
+                if not messagebox.askyesno("Confirmar Fecha Futura", f"La fecha indicada ({f_val}) es posterior a hoy. ¿Desea continuar de todas formas?", parent=modal):
+                    return
+
+            self.fecha_operacion_atrasada = f_val
+            self.hora_operacion_atrasada = h_val
+            self.motivo_venta_atrasada = m_val
+            self._mostrar_banner_venta_atrasada()
+            modal.destroy()
+
+        def _quitar():
+            self.fecha_operacion_atrasada = None
+            self.hora_operacion_atrasada = None
+            self.motivo_venta_atrasada = None
+            self._quitar_banner_venta_atrasada()
+            modal.destroy()
+
+        crear_boton(btn_box, "Aplicar Fecha", command=_aplicar, tipo="success", icono="✅").pack(side="right", padx=4)
+        if self.fecha_operacion_atrasada:
+            crear_boton(btn_box, "Volver a Fecha Actual", command=_quitar, tipo="warning", icono="🔄").pack(side="right", padx=4)
+        crear_boton(btn_box, "Cancelar", command=modal.destroy, tipo="secondary", icono="❌").pack(side="right", padx=4)
+
+    def _mostrar_banner_venta_atrasada(self):
+        """Muestra un banner visible indicando que la próxima venta se registrará con fecha atrasada."""
+        if not self.fecha_operacion_atrasada:
+            self._quitar_banner_venta_atrasada()
+            return
+        if not hasattr(self, "banner_venta_atrasada") or not self.banner_venta_atrasada:
+            self.banner_venta_atrasada = tk.Frame(self.ventana, bg="#FEF3C7", bd=1, relief="solid")
+            lbl = tk.Label(self.banner_venta_atrasada, font=("Segoe UI", 9, "bold"), bg="#FEF3C7", fg="#92400E")
+            lbl.pack(side="left", padx=10, pady=4)
+            btn_q = tk.Button(self.banner_venta_atrasada, text="✖ Volver a Hoy", command=self._restablecer_fecha_hoy, bg="#DC2626", fg="white", font=("Segoe UI", 8, "bold"), relief="flat", cursor="hand2")
+            btn_q.pack(side="right", padx=8, pady=2)
+            self.lbl_texto_banner_atrasada = lbl
+
+        txt = f"⚠️ MODO VENTA ATRASADA ACTIVO: Fecha de Operación = {self.fecha_operacion_atrasada} {self.hora_operacion_atrasada or ''} | Motivo: {self.motivo_venta_atrasada}"
+        self.lbl_texto_banner_atrasada.config(text=txt)
+        self.banner_venta_atrasada.pack(side="top", fill="x", pady=(0, 2), before=self.split_frame)
+
+    def _quitar_banner_venta_atrasada(self):
+        if hasattr(self, "banner_venta_atrasada") and self.banner_venta_atrasada:
+            self.banner_venta_atrasada.pack_forget()
+
+    def _restablecer_fecha_hoy(self):
+        self.fecha_operacion_atrasada = None
+        self.hora_operacion_atrasada = None
+        self.motivo_venta_atrasada = None
+        self._quitar_banner_venta_atrasada()
+
+    def cargar_orden_operario_por_id(self, v_id: int):
+        """Carga una orden de operario específica en el carrito principal."""
+        if not self.verificar_caja_abierta("atender u ordenar cobro de operario"):
+            return False
+        orden = self.ventas_pendientes_cache.get(v_id)
+        if not orden:
+            try:
+                resp = api.get(f"/ventas/{v_id}")
+                if resp.status_code == 200:
+                    orden = resp.json()
+            except Exception:
+                pass
+        if not orden:
+            messagebox.showerror("Error", f"No se encontró la orden #{v_id}.", parent=self.ventana)
+            return False
+
+        self.tabla.delete(*self.tabla.get_children())
+        total_calc = 0.0
+        for d in orden.get("detalles", []):
+            nombre = d.get("item_nombre", "")
+            cod = d.get("item_codigo", "")
+            p_unit = float(d.get("precio_vendido", 0.0))
+            cant = int(float(d.get("cantidad", 1)))
+            sub = float(d.get("subtotal", p_unit * cant))
+            total_calc += sub
+            self.tabla.insert("", tk.END, text=str(cod), values=(
+                nombre,
+                self.formato_peso(p_unit),
+                cant,
+                self.formato_peso(sub)
+            ))
+
+        self.total_general.set(orden.get("total", total_calc))
+        self.actualizar_total()
+        self.orden_id_activa = orden["id"]
+        self.orden_numero_activa = orden.get("numero", "")
+        self.factura_num = self.orden_numero_activa
+        self.lbl_factura.config(text=f"🧾 Factura (Operario): {self.factura_num}")
+        self.cliente_id_seleccionado = orden.get("cliente_id")
+        self.documento.set(orden.get("cliente_documento") or "")
+
+        op_nombre = orden.get("operario_nombre", "Operario")
+        self.lbl_banner_orden.config(text=f"👤 ATENDIENDO ORDEN DE: {op_nombre}  |  🧾 {self.orden_numero_activa}  |  💸 {self.formato_peso(self.total_general.get())}")
+        self.banner_frame.pack(side="top", fill="x", pady=(0, 4), before=self.split_frame)
+
+        self.ventana.lift()
+        self.ventana.focus_force()
+        return True
+
+    def descartar_orden_operario_por_id(self, v_id: int):
+        orden = self.ventas_pendientes_cache.get(v_id)
+        op_nom = orden.get("operario_nombre", "Operario") if orden else "Operario"
+        num = orden.get("numero", "") if orden else f"ID {v_id}"
+
+        confirma = messagebox.askyesno(
+            "Descartar Orden",
+            f"¿Desea rechazar/anular la orden {num} enviada por {op_nom}?\n\nLos productos reservados se devolverán al inventario.",
+            parent=self.ventana
+        )
+        if not confirma:
+            return False
+        try:
+            resp = api.post(f"/ventas/{v_id}/anular")
+            if resp.status_code in (200, 204):
+                messagebox.showinfo("Orden Descartada", f"La orden {num} fue anulada y el stock fue liberado.", parent=self.ventana)
+                if getattr(self, "orden_id_activa", None) == v_id:
+                    self.cancelar_orden_activa()
+                self.actualizar_ventas_operarios()
+                self.productos_inventario = self.obtener_productos()
+                return True
+            else:
+                messagebox.showerror("Error", f"No se pudo anular la orden: {resp.text}", parent=self.ventana)
+                return False
+        except Exception as e:
+            messagebox.showerror("Error", f"Error al anular orden: {e}", parent=self.ventana)
+            return False
 
     def refrescar_catalogo_central(self):
         """Recarga el catálogo en tiempo real desde el servidor central."""
@@ -1214,6 +1805,8 @@ class App:
         self.ventana.bind('<F5>', lambda e: self.limpiar_formulario())
         self.ventana.bind('<F7>', lambda e: self.abrir_cajon_manual())
         self.ventana.bind('<F8>', lambda e: self.abrir_modal_cargar_material())
+        self.ventana.bind('<F2>', self.abrir_catalogo_popup)
+        self.ventana.bind('<F3>', self.abrir_operarios_popup)
 
     def abrir_cajon_manual(self, event=None):
         """Abre el cajón monedero conectado a la impresora térmica (F7 / Botón)."""
@@ -1486,7 +2079,10 @@ class App:
 
     def actualizar_catalogo_live(self):
         """Filtra y actualiza la tabla del catálogo en tiempo real según el Tipo y la búsqueda"""
-        if not hasattr(self, 'tabla_catalogo'):
+        if self.ventana_catalogo_instancia and getattr(self.ventana_catalogo_instancia, 'top', None) and self.ventana_catalogo_instancia.top.winfo_exists():
+            self.ventana_catalogo_instancia.filtrar_catalogo()
+
+        if not hasattr(self, 'tabla_catalogo') or self.tabla_catalogo is None or not getattr(self.tabla_catalogo, 'winfo_exists', lambda: False)():
             return
 
         tipo_sel = self.tipo_filtro.get().strip()
@@ -1807,8 +2403,8 @@ class App:
             messagebox.showerror("Error", f"Ocurrió un error al enviar a caja:\n{e}", parent=self.ventana)
 
     def actualizar_ventas_operarios(self):
-        """Consulta periódicamente las ventas pendientes de caja enviadas por operarios (solo Admin)"""
-        if not getattr(self, 'es_admin', False):
+        """Consulta periódicamente las ventas pendientes de caja enviadas por operarios (Vendedores y Admins)"""
+        if not getattr(self, 'puede_procesar_venta', False):
             return
 
         try:
@@ -1828,26 +2424,37 @@ class App:
                         except:
                             pass
 
-                    sel_prev = self.tabla_operarios.selection()
-                    sel_id = self.tabla_operarios.item(sel_prev[0], "text") if sel_prev else None
+                    if getattr(self, 'tabla_operarios', None) and getattr(self.tabla_operarios, 'winfo_exists', lambda: False)():
+                        sel_prev = self.tabla_operarios.selection()
+                        sel_id = self.tabla_operarios.item(sel_prev[0], "text") if sel_prev else None
 
-                    self.tabla_operarios.delete(*self.tabla_operarios.get_children())
-                    for v in ventas:
-                        v_id = v['id']
-                        num = v.get('numero', '')
-                        operario = v.get('operario_nombre', f"Operario {v.get('usuario_id')}")
-                        total_fmt = self.formato_peso(v.get('total', 0.0))
-                        hora = v.get('hora', '')
-                        item_row = self.tabla_operarios.insert("", tk.END, text=str(v_id), values=(num, operario, total_fmt, hora))
-                        if sel_id and str(v_id) == str(sel_id):
-                            self.tabla_operarios.selection_set(item_row)
+                        self.tabla_operarios.delete(*self.tabla_operarios.get_children())
+                        for v in ventas:
+                            v_id = v['id']
+                            num = v.get('numero', '')
+                            operario = v.get('operario_nombre', f"Operario {v.get('usuario_id')}")
+                            total_fmt = self.formato_peso(v.get('total', 0.0))
+                            hora = v.get('hora', '')
+                            item_row = self.tabla_operarios.insert("", tk.END, text=str(v_id), values=(num, operario, total_fmt, hora))
+                            if sel_id and str(v_id) == str(sel_id):
+                                self.tabla_operarios.selection_set(item_row)
 
                 self.ventas_pendientes_cache = new_cache
 
-                if cant > 0:
-                    self.lbl_badge_operarios.config(text=f"🔴 {cant} Pend.", fg="#DC2626")
-                else:
-                    self.lbl_badge_operarios.config(text="🟢 0 Pend.", fg="#16A34A")
+                if hasattr(self, "btn_operarios_popup") and self.btn_operarios_popup and self.btn_operarios_popup.winfo_exists():
+                    if cant > 0:
+                        self.btn_operarios_popup.config(text=f"📥 Operarios [🔴 {cant}]", bg="#DC2626", fg="white")
+                    else:
+                        self.btn_operarios_popup.config(text="📥 Operarios [🟢 0]", bg="#16A34A", fg="white")
+
+                if getattr(self, 'lbl_badge_operarios', None) and self.lbl_badge_operarios.winfo_exists():
+                    if cant > 0:
+                        self.lbl_badge_operarios.config(text=f"🔴 {cant} Pend.", fg="#DC2626")
+                    else:
+                        self.lbl_badge_operarios.config(text="🟢 0 Pend.", fg="#16A34A")
+
+                if self.ventana_operarios_instancia and getattr(self.ventana_operarios_instancia, 'top', None) and self.ventana_operarios_instancia.top.winfo_exists():
+                    self.ventana_operarios_instancia.actualizar_tabla(ventas)
             else:
                 print(f"DEBUG Admin: Error al consultar pendientes de caja: {resp.status_code}")
         except Exception as e:
@@ -2245,10 +2852,15 @@ class App:
                     p_id = it.get("id")
                     cod_barras = str(it.get("codigo_barras") or "").strip()
 
+                    cat = str(it.get("categoria") or "").strip()
+                    prov_nom = str(it.get("proveedor_nombre") or it.get("proveedor") or "").strip()
+                    marca = str(it.get("marca") or "").strip()
+                    desc = str(it.get("descripcion") or "").strip()
+
                     if tipo_p == "Servicio":
                         es_var = bool(it.get("precio_variable", 0))
                         todos_los_productos.append(
-                            (cod, nom, 9999, precio_v, "Servicio", prov_id, p_id, costo_u, es_var, 0.0, cod_barras)
+                            (cod, nom, 9999, precio_v, "Servicio", prov_id, p_id, costo_u, es_var, 0.0, cod_barras, cat, prov_nom, marca, desc)
                         )
                     else:
                         sv = float(it.get("stock_vitrina", 0.0))
@@ -2259,7 +2871,7 @@ class App:
                             sv_fmt = sv
                         es_var_prod = bool(it.get("precio_variable", 0))
                         todos_los_productos.append(
-                            (cod, nom, sv_fmt, precio_v, "Fisico", prov_id, p_id, costo_u, es_var_prod, sb, cod_barras)
+                            (cod, nom, sv_fmt, precio_v, "Fisico", prov_id, p_id, costo_u, es_var_prod, sb, cod_barras, cat, prov_nom, marca, desc)
                         )
 
                 if todos_los_productos:
@@ -4318,6 +4930,11 @@ class App:
                         "autorizado_exceso_credito": autorizado_exceso,
                         "snapshot_negocio": snapshot_actual,
                     }
+                    if getattr(self, "fecha_operacion_atrasada", None):
+                        payload["fecha"] = self.fecha_operacion_atrasada
+                        payload["hora"] = getattr(self, "hora_operacion_atrasada", None) or "12:00:00"
+                        payload["es_venta_atrasada"] = True
+                        payload["motivo_modificacion_fecha"] = getattr(self, "motivo_venta_atrasada", None) or "Venta atrasada manual"
                     resp_http = api.post("/ventas", json=payload, timeout=12.0)
 
                 # Recuperación segura ante desconexión o timeout después de haber enviado la solicitud
@@ -4405,7 +5022,11 @@ class App:
                             cambio=cambio_payload,
                             numero_factura=numero_factura,
                             snapshot_negocio=snapshot_actual,
-                            pagos=pagos
+                            pagos=pagos,
+                            fecha=getattr(self, "fecha_operacion_atrasada", None),
+                            hora=getattr(self, "hora_operacion_atrasada", None),
+                            es_venta_atrasada=bool(getattr(self, "fecha_operacion_atrasada", None)),
+                            motivo_modificacion_fecha=getattr(self, "motivo_venta_atrasada", None),
                         )
                     except Exception as e_sq:
                         print(f"Aviso en persistencia local SQLite de venta #{id_central}: {e_sq}")
@@ -4689,6 +5310,7 @@ class App:
         self._venta_idempotency_key = None
         self._venta_fingerprint = None
         self.materiales_cargados = []
+        self._restablecer_fecha_hoy()
         if hasattr(self, 'banner_frame'):
             self.banner_frame.pack_forget()
         for item in self.tabla.get_children():
@@ -4742,3 +5364,5 @@ if __name__ == '__main__':
     args, _ = parser.parse_known_args()
 
     iniciar_ventas(user_id=args.user_id, rol=args.rol, parent_pid=args.parent_pid, usuario_nombre=args.usuario)
+# Exportar alias VentaPOS para interoperabilidad completa
+VentaPOS = App

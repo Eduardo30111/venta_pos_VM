@@ -282,16 +282,16 @@ class InventoryBarcodeManager:
 
     @staticmethod
     def obtener_productos(filtro: str = "") -> list[dict]:
-        """Obtiene la lista de productos activos desde el catálogo central."""
+        """Obtiene la lista de productos activos desde el catálogo central o fallback SQLite."""
         productos = []
         try:
             from client.api_client import api
             params = {"solo_activos": True}
             if filtro and filtro.strip():
                 params["filtro"] = filtro.strip()
-            resp = api.get("/inventario/catalogo", params=params)
+            resp = api.get("/inventario/catalogo", params=params, timeout=3.5)
             if resp.status_code == 200:
-                for row in (resp.json() or [])[:100]:
+                for row in (resp.json() or [])[:150]:
                     productos.append({
                         "id": row.get("id"),
                         "codigo": str(row.get("codigo") or ""),
@@ -302,13 +302,34 @@ class InventoryBarcodeManager:
                         "tipo_producto": str(row.get("tipo_producto") or ""),
                         "stock": float(row.get("stock") or 0.0),
                     })
+                if productos:
+                    return productos
         except Exception as e:
-            print(f"Error al obtener productos de inventario central: {e}")
+            print(f"Aviso al obtener productos de inventario central: {e}")
+
+        # Fallback resiliente a inventario local SQLite
+        try:
+            from interface.inventario_manager import obtener_catalogo
+            local_items = obtener_catalogo(filtro=filtro, solo_activos=True)
+            for row in (local_items or [])[:150]:
+                productos.append({
+                    "id": row.get("id"),
+                    "codigo": str(row.get("codigo") or ""),
+                    "nombre": str(row.get("nombre") or ""),
+                    "precio": float(row.get("precio") or 0.0),
+                    "codigo_barras": str(row.get("codigo_barras") or "").strip(),
+                    "categoria": str(row.get("categoria") or ""),
+                    "tipo_producto": str(row.get("tipo_producto") or ""),
+                    "stock": float(row.get("stock") or 0.0),
+                })
+        except Exception as e_loc:
+            print(f"Aviso en fallback local de productos: {e_loc}")
+
         return productos
 
     @staticmethod
     def existe_codigo_barras(codigo_barras: str, excluir_id: int = None) -> bool:
-        """Verifica si un código de barras ya está registrado en otro artículo central."""
+        """Verifica si un código de barras ya está registrado en otro artículo central o local."""
         if not codigo_barras:
             return False
         try:
@@ -316,11 +337,27 @@ class InventoryBarcodeManager:
             params = {"codigo_barras": codigo_barras.strip()}
             if excluir_id is not None:
                 params["excluir_id"] = int(excluir_id)
-            resp = api.get("/inventario/existe-codigo-barras", params=params)
+            resp = api.get("/inventario/existe-codigo-barras", params=params, timeout=2.0)
             if resp.status_code == 200:
                 return bool(resp.json().get("existe", False))
         except Exception as e:
-            print(f"Error al verificar unicidad de código: {e}")
+            pass
+
+        # Verificación local en SQLite
+        try:
+            from interface.database_manager import conectar_db
+            conn = conectar_db()
+            if conn:
+                cur = conn.cursor()
+                if excluir_id is not None:
+                    cur.execute("SELECT 1 FROM productos WHERE codigo_barras = ? AND id != ? LIMIT 1", (codigo_barras.strip(), int(excluir_id)))
+                else:
+                    cur.execute("SELECT 1 FROM productos WHERE codigo_barras = ? LIMIT 1", (codigo_barras.strip(),))
+                found = cur.fetchone() is not None
+                conn.close()
+                return found
+        except Exception:
+            pass
         return False
 
     @classmethod
@@ -334,13 +371,11 @@ class InventoryBarcodeManager:
 
         for intento in range(1, 1000):
             if "EAN" in fmt:
-                # Código interno EAN-13 (rango 200-299 reservado para tiendas minoristas internas)
                 semilla = (producto_id or 1) * 100 + intento
                 cuerpo12 = f"200{semilla:09d}"[:12]
                 check = BarcodeEngine.calcular_checksum_ean13(cuerpo12)
                 candidato = cuerpo12 + check
             else:
-                # CODE128 alfanumérico limpio
                 if producto_id:
                     candidato = f"VM{producto_id:05d}{intento:02d}" if intento > 1 else f"VM{producto_id:05d}"
                 else:
@@ -354,7 +389,7 @@ class InventoryBarcodeManager:
     @classmethod
     def guardar_codigo_en_producto(cls, producto_id: int, nuevo_codigo: str) -> tuple[bool, str]:
         """
-        Asigna de forma persistente el código de barras a un producto en SQLite.
+        Asigna de forma persistente el código de barras a un producto en SQLite / API central.
         Verifica unicidad y preserva la integridad del historial de ventas.
         """
         if not producto_id:
@@ -366,15 +401,33 @@ class InventoryBarcodeManager:
         if cls.existe_codigo_barras(cod, excluir_id=producto_id):
             return False, f"El código '{cod}' ya está asignado a otro producto."
 
+        # Intentar primero por API si está disponible
+        api_actualizado = False
         try:
             from client.api_client import api
-            resp = api.put(f"/inventario/articulo/{producto_id}", json={"codigo_barras": cod})
+            resp = api.put(f"/inventario/articulo/{producto_id}", json={"codigo_barras": cod}, timeout=3.0)
             if resp.status_code in (200, 201):
-                return True, f"Código '{cod}' guardado correctamente en el inventario central."
-            det = resp.json().get("detail", resp.text) if resp.text else f"HTTP {resp.status_code}"
-            return False, f"Error al actualizar en servidor central: {det}"
-        except Exception as e:
-            return False, f"Error al actualizar base de datos: {e}"
+                api_actualizado = True
+        except Exception:
+            pass
+
+        # Actualizar siempre la base de datos local SQLite para resiliencia offline inmediata
+        try:
+            from interface.database_manager import conectar_db
+            conn = conectar_db()
+            if conn:
+                cur = conn.cursor()
+                cur.execute("UPDATE productos SET codigo_barras = ? WHERE id = ? OR codigo = ?", (cod, producto_id, str(producto_id)))
+                conn.commit()
+                conn.close()
+                msg = f"Código '{cod}' guardado exitosamente en inventario central y local." if api_actualizado else f"Código '{cod}' guardado correctamente en la base de datos local."
+                return True, msg
+        except Exception as e_sql:
+            if api_actualizado:
+                return True, f"Código '{cod}' guardado en servidor central."
+            return False, f"Error al actualizar base de datos local: {e_sql}"
+
+        return False, "No se pudo actualizar el producto."
 
 
 # ==============================================================================
@@ -389,9 +442,12 @@ class LabelDesignEngine:
         candidatos = [
             "DejaVuSans-Bold.ttf" if negrita else "DejaVuSans.ttf",
             "Arial Bold.ttf" if negrita else "Arial.ttf",
-            "Helvetica-Bold" if negrita else "Helvetica",
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
-            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "arialbd.ttf" if negrita else "arial.ttf",
+            "C:/Windows/Fonts/arialbd.ttf" if negrita else "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/calibrib.ttf" if negrita else "C:/Windows/Fonts/calibri.ttf",
+            "C:/Windows/Fonts/segoeuib.ttf" if negrita else "C:/Windows/Fonts/segoeui.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if negrita else "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
             "/Library/Fonts/Arial.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if negrita else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
         ]
@@ -430,13 +486,18 @@ class LabelDesignEngine:
 
         cursor_y = pad_y
 
-        # Factores de escala de fuentes según el alto de la etiqueta
-        factor_fuente = max(0.6, (dpi / 300.0) * (alto_mm / 30.0))
-        font_header = cls._obtener_fuente(int(14 * factor_fuente), negrita=True)
-        font_prod = cls._obtener_fuente(int(13 * factor_fuente), negrita=True)
-        font_sub = cls._obtener_fuente(int(10 * factor_fuente), negrita=False)
-        font_barcode = cls._obtener_fuente(int(11 * factor_fuente), negrita=True)
-        font_precio = cls._obtener_fuente(int(16 * factor_fuente), negrita=True)
+        # Escala proporcional de fuentes calculada en función de h_px para nitidez profesional a cualquier resolución
+        tam_header = max(14, int(h_px * 0.085))
+        tam_prod = max(16, int(h_px * 0.105))
+        tam_sub = max(12, int(h_px * 0.070))
+        tam_barcode = max(13, int(h_px * 0.080))
+        tam_precio = max(18, int(h_px * 0.130))
+
+        font_header = cls._obtener_fuente(tam_header, negrita=True)
+        font_prod = cls._obtener_fuente(tam_prod, negrita=True)
+        font_sub = cls._obtener_fuente(tam_sub, negrita=False)
+        font_barcode = cls._obtener_fuente(tam_barcode, negrita=True)
+        font_precio = cls._obtener_fuente(tam_precio, negrita=True)
 
         # 1. Identidad de Negocio (Nombre y Logo)
         mostrar_negocio = config.get("mostrar_negocio", True)
@@ -445,7 +506,7 @@ class LabelDesignEngine:
         nombre_negocio = obtener_nombre_negocio_seguro()
 
         if (mostrar_negocio and nombre_negocio) or mostrar_logo:
-            header_h = int(24 * factor_fuente)
+            header_h = int(tam_header * 1.25)
             # Dibujar logo si está activo y existe
             if mostrar_logo:
                 logo_path = obtener_logo_path_seguro()
@@ -462,7 +523,7 @@ class LabelDesignEngine:
             if mostrar_negocio and nombre_negocio:
                 draw.text((w_px / 2.0, cursor_y), str(nombre_negocio)[:28], fill="black",
                           font=font_header, anchor="mt")
-            cursor_y += header_h + int(4 * factor_fuente)
+            cursor_y += header_h + max(2, int(h_px * 0.015))
 
         # 2. Nombre del Producto
         if config.get("mostrar_nombre_prod", True):
@@ -472,7 +533,7 @@ class LabelDesignEngine:
                 nombre_p = nombre_p[:33] + "..."
             draw.text((w_px / 2.0, cursor_y), nombre_p, fill="black",
                       font=font_prod, anchor="mt")
-            cursor_y += int(18 * factor_fuente)
+            cursor_y += int(tam_prod * 1.25)
 
         # 3. Categoría / SKU
         mostrar_sku = config.get("mostrar_sku", True)
@@ -485,7 +546,7 @@ class LabelDesignEngine:
         if sub_text:
             draw.text((w_px / 2.0, cursor_y), " | ".join(sub_text), fill="#333333",
                       font=font_sub, anchor="mt")
-            cursor_y += int(14 * factor_fuente)
+            cursor_y += int(tam_sub * 1.25)
 
         # 4. Código de Barras (Imagen + Texto numérico)
         mostrar_img_bc = config.get("mostrar_imagen_codigo", True)
@@ -495,8 +556,8 @@ class LabelDesignEngine:
 
         # Reservar espacio para precio en la parte inferior
         mostrar_precio = config.get("mostrar_precio", True)
-        alto_precio = int(22 * factor_fuente) if mostrar_precio else 0
-        alto_txt_bc = int(14 * factor_fuente) if mostrar_txt_bc else 0
+        alto_precio = int(tam_precio * 1.35) if mostrar_precio else 0
+        alto_txt_bc = int(tam_barcode * 1.25) if mostrar_txt_bc else 0
 
         espacio_restante = h_px - cursor_y - pad_y - alto_precio - alto_txt_bc
 
@@ -507,12 +568,12 @@ class LabelDesignEngine:
                 bc_img = BarcodeEngine.generar_imagen_barcode(formato_bc, cod_bc, ancho_bc_px, alto_bc_px)
                 x_bc = int((w_px - bc_img.width) / 2.0)
                 img.paste(bc_img, (x_bc, cursor_y))
-                cursor_y += bc_img.height + int(2 * factor_fuente)
+                cursor_y += bc_img.height + max(2, int(h_px * 0.015))
             except Exception as e:
                 draw.text((w_px / 2.0, cursor_y + 5), f"[{cod_bc}]", fill="red", font=font_sub, anchor="mt")
-                cursor_y += int(16 * factor_fuente)
+                cursor_y += int(tam_sub * 1.25)
         elif not mostrar_img_bc:
-            cursor_y += int(4 * factor_fuente)
+            cursor_y += max(4, int(h_px * 0.02))
 
         if mostrar_txt_bc:
             draw.text((w_px / 2.0, cursor_y), str(cod_bc), fill="black",
@@ -523,7 +584,7 @@ class LabelDesignEngine:
         if mostrar_precio:
             val_p = float(producto.get("precio", 0.0) or 0.0)
             precio_str = f"$ {val_p:,.0f}".replace(",", ".")
-            y_precio = h_px - pad_y - int(4 * factor_fuente)
+            y_precio = h_px - pad_y - max(2, int(h_px * 0.02))
             draw.text((w_px / 2.0, y_precio), precio_str, fill="black",
                       font=font_precio, anchor="mb")
 
@@ -993,12 +1054,12 @@ class GeneradorCodigoBarras:
         search_f = tk.Frame(frame, bg=self.t["bg_surface"])
         search_f.pack(fill="x", padx=8, pady=4)
 
-        tk.Label(search_f, text="Buscar:", bg=self.t["bg_surface"], fg=self.t["fg_primary"],
+        tk.Label(search_f, text="Buscar:", bg=self.t["bg_surface"], fg=self.t["text_main"],
                  font=("Segoe UI", 9, "bold")).pack(side="left")
 
         self.entry_busqueda = tk.Entry(
             search_f, textvariable=self.var_busqueda_prod,
-            bg=self.t["bg_input"], fg=self.t["fg_primary"], insertbackground=self.t["fg_primary"],
+            bg=self.t["input_bg"], fg=self.t["text_main"], insertbackground=self.t["text_main"],
             relief="solid", bd=1, font=("Segoe UI", 9)
         )
         self.entry_busqueda.pack(side="left", fill="x", expand=True, padx=6)
@@ -1014,6 +1075,28 @@ class GeneradorCodigoBarras:
         self.combo_productos = ttk.Combobox(frame, state="readonly", font=("Segoe UI", 9))
         self.combo_productos.pack(fill="x", padx=8, pady=4)
         self.combo_productos.bind("<<ComboboxSelected>>", self._al_seleccionar_producto)
+
+        # Distintivo / Tarjeta limpia de detalles del producto seleccionado
+        self.card_prod_info = tk.Frame(
+            frame, bg=self.t.get("input_bg", "#F8F9FA"),
+            bd=1, relief="solid"
+        )
+        self.card_prod_info.pack(fill="x", padx=8, pady=(2, 6))
+
+        self.lbl_card_prod_nombre = tk.Label(
+            self.card_prod_info, text="📌 Producto: (Ninguno seleccionado)",
+            font=("Segoe UI", 9, "bold"), fg=self.t["text_main"],
+            bg=self.card_prod_info["bg"], anchor="w"
+        )
+        self.lbl_card_prod_nombre.pack(fill="x", padx=6, pady=(3, 1))
+
+        self.lbl_card_prod_meta = tk.Label(
+            self.card_prod_info, text="SKU: — | Código Barras: — | Precio: $0 | Stock: —",
+            font=("Segoe UI", 8), fg=self.t["text_secondary"],
+            bg=self.card_prod_info["bg"], anchor="w"
+        )
+        self.lbl_card_prod_meta.pack(fill="x", padx=6, pady=(1, 3))
+
         self.cargar_lista_productos()
 
         # Edición manual / datos del producto
@@ -1021,33 +1104,33 @@ class GeneradorCodigoBarras:
         detalles_f.pack(fill="x", padx=8, pady=4)
 
         # Nombre producto
-        tk.Label(detalles_f, text="Nombre:", bg=self.t["bg_surface"], fg=self.t["fg_secondary"],
+        tk.Label(detalles_f, text="Nombre:", bg=self.t["bg_surface"], fg=self.t["text_secondary"],
                  font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w", pady=2)
         e_nombre = tk.Entry(
             detalles_f, textvariable=self.var_manual_nombre,
-            bg=self.t["bg_input"], fg=self.t["fg_primary"], insertbackground=self.t["fg_primary"],
+            bg=self.t["input_bg"], fg=self.t["text_main"], insertbackground=self.t["text_main"],
             relief="solid", bd=1, font=("Segoe UI", 9)
         )
         e_nombre.grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=2)
         e_nombre.bind("<KeyRelease>", lambda e: self._actualizar_producto_manual(refrescar_preview=True))
 
         # Precio
-        tk.Label(detalles_f, text="Precio ($):", bg=self.t["bg_surface"], fg=self.t["fg_secondary"],
+        tk.Label(detalles_f, text="Precio ($):", bg=self.t["bg_surface"], fg=self.t["text_secondary"],
                  font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", pady=2)
         e_precio = tk.Entry(
             detalles_f, textvariable=self.var_manual_precio,
-            bg=self.t["bg_input"], fg=self.t["fg_primary"], insertbackground=self.t["fg_primary"],
+            bg=self.t["input_bg"], fg=self.t["text_main"], insertbackground=self.t["text_main"],
             relief="solid", bd=1, font=("Segoe UI", 9)
         )
         e_precio.grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=2)
         e_precio.bind("<KeyRelease>", lambda e: self._actualizar_producto_manual(refrescar_preview=True))
 
         # Código de barras y formato
-        tk.Label(detalles_f, text="Código Barras:", bg=self.t["bg_surface"], fg=self.t["fg_secondary"],
+        tk.Label(detalles_f, text="Código Barras:", bg=self.t["bg_surface"], fg=self.t["text_secondary"],
                  font=("Segoe UI", 8)).grid(row=2, column=0, sticky="w", pady=2)
         e_codigo = tk.Entry(
             detalles_f, textvariable=self.var_manual_codigo,
-            bg=self.t["bg_input"], fg=self.t["fg_primary"], insertbackground=self.t["fg_primary"],
+            bg=self.t["input_bg"], fg=self.t["text_main"], insertbackground=self.t["text_main"],
             relief="solid", bd=1, font=("Segoe UI", 9, "bold")
         )
         e_codigo.grid(row=2, column=1, sticky="ew", padx=(4, 0), pady=2)
@@ -1100,7 +1183,27 @@ class GeneradorCodigoBarras:
             self.var_manual_precio.set(p["precio"])
             # Si no tiene código de barras, dejamos vacío y sugerimos autogenerarlo
             self.var_manual_codigo.set(p["codigo_barras"] or "")
+            self._refrescar_tarjeta_producto(p)
             self.actualizar_vista_previa()
+
+    def _refrescar_tarjeta_producto(self, p=None):
+        if not hasattr(self, "lbl_card_prod_nombre"):
+            return
+        p = p or self.producto_actual
+        nom = p.get("nombre") or self.var_manual_nombre.get() or "(Sin nombre)"
+        sku = p.get("codigo") or "—"
+        bc = self.var_manual_codigo.get().strip() or p.get("codigo_barras") or "Sin código asignado"
+        try:
+            precio = float(self.var_manual_precio.get() or p.get("precio", 0.0))
+        except Exception:
+            precio = float(p.get("precio", 0.0) or 0.0)
+        cat = p.get("categoria") or "General"
+        stock = p.get("stock", "—")
+
+        self.lbl_card_prod_nombre.config(text=f"📌 {nom}")
+        self.lbl_card_prod_meta.config(
+            text=f"SKU: {sku} | Cód. Barras: {bc} | Precio: ${precio:,.0f} | Cat: {cat} | Stock: {stock}".replace(",", ".")
+        )
 
     def _actualizar_producto_manual(self, refrescar_preview=False):
         self.producto_actual["nombre"] = self.var_manual_nombre.get()
@@ -1109,6 +1212,7 @@ class GeneradorCodigoBarras:
         except Exception:
             pass
         self.producto_actual["codigo_barras"] = self.var_manual_codigo.get().strip()
+        self._refrescar_tarjeta_producto()
         if refrescar_preview:
             self.actualizar_vista_previa()
 
@@ -1169,9 +1273,9 @@ class GeneradorCodigoBarras:
             c = i % 2
             cb = tk.Checkbutton(
                 chk_grid, text=txt, variable=var,
-                bg=self.t["bg_surface"], fg=self.t["fg_primary"],
-                selectcolor=self.t["bg_input"], activebackground=self.t["bg_surface"],
-                activeforeground=self.t["fg_primary"], font=("Segoe UI", 8),
+                bg=self.t["bg_surface"], fg=self.t["text_main"],
+                selectcolor=self.t["input_bg"], activebackground=self.t["bg_surface"],
+                activeforeground=self.t["text_main"], font=("Segoe UI", 8),
                 command=self.actualizar_vista_previa
             )
             cb.grid(row=r, column=c, sticky="w", padx=4, pady=2)
@@ -1180,7 +1284,7 @@ class GeneradorCodigoBarras:
         fmt_f = tk.Frame(frame, bg=self.t["bg_surface"])
         fmt_f.pack(fill="x", padx=8, pady=(4, 6))
 
-        tk.Label(fmt_f, text="Estándar:", bg=self.t["bg_surface"], fg=self.t["fg_secondary"],
+        tk.Label(fmt_f, text="Estándar:", bg=self.t["bg_surface"], fg=self.t["text_secondary"],
                  font=("Segoe UI", 8, "bold")).pack(side="left")
 
         cb_fmt = ttk.Combobox(
@@ -1208,19 +1312,19 @@ class GeneradorCodigoBarras:
 
         tk.Radiobutton(
             tipo_f, text="📄 Hoja Etiquetas", variable=self.var_tipo_impresion, value="hoja",
-            bg=self.t["bg_surface"], fg=self.t["fg_primary"], selectcolor=self.t["bg_input"],
+            bg=self.t["bg_surface"], fg=self.t["text_main"], selectcolor=self.t["input_bg"],
             font=("Segoe UI", 9, "bold"), command=self._al_cambiar_tipo_impresion
         ).pack(side="left", padx=(0, 10))
 
         tk.Radiobutton(
             tipo_f, text="🏷️ Térmica Etiquetas", variable=self.var_tipo_impresion, value="termica",
-            bg=self.t["bg_surface"], fg=self.t["fg_primary"], selectcolor=self.t["bg_input"],
+            bg=self.t["bg_surface"], fg=self.t["text_main"], selectcolor=self.t["input_bg"],
             font=("Segoe UI", 9, "bold"), command=self._al_cambiar_tipo_impresion
         ).pack(side="left", padx=5)
 
         tk.Radiobutton(
             tipo_f, text="📜 Rollo Continuo", variable=self.var_tipo_impresion, value="continuo",
-            bg=self.t["bg_surface"], fg=self.t["fg_primary"], selectcolor=self.t["bg_input"],
+            bg=self.t["bg_surface"], fg=self.t["text_main"], selectcolor=self.t["input_bg"],
             font=("Segoe UI", 9, "bold"), command=self._al_cambiar_tipo_impresion
         ).pack(side="left", padx=5)
 
@@ -1228,7 +1332,7 @@ class GeneradorCodigoBarras:
         self.papel_f = tk.Frame(frame, bg=self.t["bg_surface"])
         self.papel_f.pack(fill="x", padx=8, pady=2)
 
-        tk.Label(self.papel_f, text="Papel:", bg=self.t["bg_surface"], fg=self.t["fg_secondary"],
+        tk.Label(self.papel_f, text="Papel:", bg=self.t["bg_surface"], fg=self.t["text_secondary"],
                  font=("Segoe UI", 8)).pack(side="left")
         cb_papel = ttk.Combobox(
             self.papel_f, textvariable=self.var_tamano_papel,
@@ -1243,11 +1347,11 @@ class GeneradorCodigoBarras:
         dim_grid.pack(fill="x", padx=8, pady=4)
 
         def _crear_spin(parent, r, c, label, var, from_=1.0, to_=500.0, step=1.0):
-            tk.Label(parent, text=label, bg=self.t["bg_surface"], fg=self.t["fg_secondary"],
+            tk.Label(parent, text=label, bg=self.t["bg_surface"], fg=self.t["text_secondary"],
                      font=("Segoe UI", 8)).grid(row=r, column=c*2, sticky="w", padx=2, pady=2)
             sp = tk.Spinbox(
                 parent, textvariable=var, from_=from_, to=to_, increment=step, width=6,
-                bg=self.t["bg_input"], fg=self.t["fg_primary"], insertbackground=self.t["fg_primary"],
+                bg=self.t["input_bg"], fg=self.t["text_main"], insertbackground=self.t["text_main"],
                 relief="solid", bd=1, font=("Segoe UI", 8), command=self.actualizar_vista_previa
             )
             sp.grid(row=r, column=c*2+1, sticky="w", padx=4, pady=2)
@@ -1270,10 +1374,10 @@ class GeneradorCodigoBarras:
         copias_f = tk.Frame(frame, bg=self.t["bg_surface"])
         copias_f.pack(fill="x", padx=8, pady=4)
         tk.Label(copias_f, text="Copias totales a imprimir:", bg=self.t["bg_surface"],
-                 fg=self.t["fg_primary"], font=("Segoe UI", 9, "bold")).pack(side="left")
+                 fg=self.t["text_main"], font=("Segoe UI", 9, "bold")).pack(side="left")
         sp_copias = tk.Spinbox(
             copias_f, textvariable=self.var_copias, from_=1, to=10000, increment=1, width=7,
-            bg=self.t["bg_input"], fg=self.t["fg_primary"], insertbackground=self.t["fg_primary"],
+            bg=self.t["input_bg"], fg=self.t["text_main"], insertbackground=self.t["text_main"],
             relief="solid", bd=1, font=("Segoe UI", 9, "bold"), command=self.actualizar_vista_previa
         )
         sp_copias.pack(side="left", padx=8)
@@ -1283,7 +1387,7 @@ class GeneradorCodigoBarras:
         imp_f = tk.Frame(frame, bg=self.t["bg_surface"])
         imp_f.pack(fill="x", padx=8, pady=(4, 6))
 
-        tk.Label(imp_f, text="Impresora:", bg=self.t["bg_surface"], fg=self.t["fg_secondary"],
+        tk.Label(imp_f, text="Impresora:", bg=self.t["bg_surface"], fg=self.t["text_secondary"],
                  font=("Segoe UI", 8)).pack(side="left")
 
         self.combo_impresoras = ttk.Combobox(
@@ -1347,7 +1451,7 @@ class GeneradorCodigoBarras:
         # Barra informativa superior de vista previa
         self.info_preview_lbl = tk.Label(
             preview_box, text="Cálculo de grilla: ...",
-            bg=self.t["bg_surface"], fg=self.t["fg_secondary"], font=("Segoe UI", 9)
+            bg=self.t["bg_surface"], fg=self.t["text_secondary"], font=("Segoe UI", 9)
         )
         self.info_preview_lbl.pack(fill="x", padx=8, pady=4)
 

@@ -242,24 +242,48 @@ async def obtener_catalogo_endpoint(
 @router.get("/sugerir-codigo")
 async def sugerir_codigo_endpoint(
     tipo: str = "Fisico",
+    prefijo: Optional[str] = None,
+    separador: Optional[str] = None,
+    digitos: Optional[int] = None,
+    numero_inicial: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ):
+    import re
     res_p = await db.execute(select(Producto.codigo))
     res_s = await db.execute(select(Servicio.codigo))
-    codigos = [c for c in list(res_p.scalars().all()) + list(res_s.scalars().all()) if c]
-    prefix = "S" if (tipo or "").strip() == "Servicio" else ""
-    max_num = 0
-    for c in codigos:
-        c_str = str(c).strip()
-        if prefix and c_str.upper().startswith(prefix):
-            num_part = c_str[len(prefix) :]
-            if num_part.isdigit():
-                max_num = max(max_num, int(num_part))
-        elif not prefix and c_str.isdigit():
-            max_num = max(max_num, int(c_str))
-    sugerido = f"{prefix}{max_num + 1:05d}" if prefix else f"{max_num + 1:05d}"
-    return {"codigo": sugerido}
+    codigos = set(str(c).strip() for c in list(res_p.scalars().all()) + list(res_s.scalars().all()) if c)
+
+    es_servicio = (tipo or "").strip().lower() == "servicio"
+    pref = prefijo if prefijo is not None else ("S" if es_servicio else "")
+    sep = separador if separador is not None else ""
+    cant_dig = max(1, min(12, int(digitos or 5)))
+    num_ini = max(1, int(numero_inicial or 1))
+
+    prefix_full = f"{pref}{sep}".upper()
+    max_num = num_ini - 1
+
+    for c_str in codigos:
+        c_upper = c_str.upper()
+        if prefix_full:
+            if c_upper.startswith(prefix_full):
+                num_part = c_upper[len(prefix_full):]
+                m = re.match(r"^(\d+)", num_part)
+                if m:
+                    max_num = max(max_num, int(m.group(1)))
+        else:
+            m = re.match(r"^(\d+)$", c_str)
+            if m:
+                max_num = max(max_num, int(m.group(1)))
+
+    siguiente = max_num + 1
+    while True:
+        candidato = f"{pref}{sep}{siguiente:0{cant_dig}d}"
+        if candidato not in codigos:
+            break
+        siguiente += 1
+
+    return {"codigo": candidato}
 
 
 @router.get("/articulo/{codigo}")

@@ -271,6 +271,9 @@ class ThemeTokens(dict):
             "tree_heading_bg": self.get("table_header_bg", "#F1F5F9"),
             "tree_heading_fg": self.get("table_header_fg", "#0F172A"),
             "text_primary": self.get("text_main", "#0F172A"),
+            "bg_input": self.get("input_bg", "#FFFFFF"),
+            "fg_primary": self.get("text_main", "#0F172A"),
+            "fg_secondary": self.get("text_secondary", "#334155"),
             "border": self.get("border_main", "#CBD5E1"),
         }
         if key in fallbacks:

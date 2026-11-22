@@ -71,7 +71,12 @@ CONFIG_POR_DEFECTO = {
     "color_barra": "#DB2777",
     "color_login": "#DB2777",
     "logo_path": "",
-    "logo_thermal_path": ""
+    "logo_thermal_path": "",
+    "sku_auto_generar": True,
+    "sku_prefijo": "",
+    "sku_separador": "",
+    "sku_digitos": 5,
+    "sku_numero_inicial": 1
 }
 
 PRINTER_CONFIG_POR_DEFECTO = {

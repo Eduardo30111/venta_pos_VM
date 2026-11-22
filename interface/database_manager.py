@@ -326,7 +326,10 @@ def inicializar_base_datos(db_path=None):
 
         for col_vta in [
             "cliente_id INTEGER DEFAULT NULL",
-            "saldo_pendiente REAL DEFAULT 0.0"
+            "saldo_pendiente REAL DEFAULT 0.0",
+            "fecha_registro TEXT DEFAULT NULL",
+            "es_venta_atrasada INTEGER DEFAULT 0",
+            "motivo_modificacion_fecha TEXT DEFAULT NULL"
         ]:
             _safe_alter_column(cursor, f"ALTER TABLE ventas ADD COLUMN {col_vta}", f"ventas.{col_vta.split()[0]}")
 

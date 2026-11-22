@@ -68,6 +68,10 @@ async def create_usuario(
         if exist_doc.scalars().first():
             raise HTTPException(status_code=400, detail=f"El documento '{user.documento}' ya está registrado.")
 
+    tipo_rem = user.tipo_remuneracion or "Porcentual"
+    salario_final = (user.salario_diario or 0.0) if tipo_rem == "Fija" else 0.0
+    comision_final = (user.porcentaje_comision or 0.0) if tipo_rem == "Porcentual" else 0.0
+
     db_user = Usuario(
         nombre=user.nombre or "",
         apellidos=user.apellidos or "",
@@ -75,9 +79,9 @@ async def create_usuario(
         usuario=user.usuario,
         password_hash=hash_password(user.password),
         rol=user.rol,
-        tipo_remuneracion=user.tipo_remuneracion or "Porcentual",
-        salario_diario=user.salario_diario or 0.0,
-        porcentaje_comision=user.porcentaje_comision or 0.0,
+        tipo_remuneracion=tipo_rem,
+        salario_diario=salario_final,
+        porcentaje_comision=comision_final,
         estado=user.estado or "Activo",
         requiere_cambio_password=False,
     )
@@ -161,6 +165,12 @@ async def update_usuario(
 
     for key, value in update_data.items():
         setattr(user, key, value)
+
+    # Limpieza absoluta de residuos cruzados al cambiar esquema de remuneración
+    if user.tipo_remuneracion == "Fija":
+        user.porcentaje_comision = 0.0
+    elif user.tipo_remuneracion == "Porcentual":
+        user.salario_diario = 0.0
 
     valor_nuevo = {
         "usuario": user.usuario,

@@ -30,6 +30,8 @@ class Venta(Base):
     anulada_at = Column(String, nullable=True)
     modificado_por = Column(String, nullable=True)
     fecha_modificacion = Column(String, nullable=True)
+    es_venta_atrasada = Column(Boolean, default=False, nullable=True)
+    motivo_modificacion_fecha = Column(String, nullable=True)
     snapshot_negocio = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

@@ -355,6 +355,12 @@ def sincronizar_usuario_desde_dict(
                 ex_sal = u_salario
                 ex_com = u_comision
 
+            # Limpieza rigurosa del esquema inactivo en nómina local
+            if ex_tipo == "Fija":
+                ex_com = 0.0
+            elif ex_tipo == "Porcentual":
+                ex_sal = 0.0
+
             cur.execute("""
                 UPDATE usuarios
                 SET nombre = ?,

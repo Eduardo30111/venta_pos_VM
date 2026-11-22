@@ -30,7 +30,12 @@ rol_var = None
 estado_var = None
 tipo_nomina_var = None
 salario_diario_var = None
+comision_porcentaje_var = None
 id_usuario_seleccionado = None
+filtro_usuarios_var = None
+lbl_modo_formulario = None
+entrada_salario_widget = None
+entrada_comision_widget = None
 
 def _sincronizar_local_nomina(user_dict, forzar_config=True):
     """Sincroniza el usuario creado/editado con usuarios.db para Nómina y Comisiones."""
@@ -45,20 +50,46 @@ def _sincronizar_local_nomina(user_dict, forzar_config=True):
             print(f"Aviso sincronizando usuario local: {e_sync}")
 
 def obtener_usuarios():
-    """Obtiene la lista de usuarios desde la API REST y sincroniza con usuarios.db"""
+    """Obtiene la lista de usuarios desde la API REST con fallback offline a SQLite."""
     try:
-        resp = api.get("/usuarios?size=1000")
+        resp = api.get("/usuarios?size=1000", timeout=3.0)
         if resp.status_code == 200:
             data = resp.json()
             items = data.get("items", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
             for it in items:
                 _sincronizar_local_nomina(it, forzar_config=False)
             return items
-        else:
-            return []
     except Exception as e:
-        print(f"Error al obtener usuarios: {e}")
-        return []
+        print(f"Aviso al obtener usuarios de API: {e}")
+
+    # Fallback offline resiliente a usuarios.db
+    items = []
+    try:
+        from interface.database_manager import conectar_usuarios_db
+        conn = conectar_usuarios_db()
+        if conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM usuarios ORDER BY id ASC")
+            for r in cur.fetchall():
+                rd = dict(r)
+                items.append({
+                    "id": rd.get("id"),
+                    "usuario": rd.get("usuario"),
+                    "nombre": rd.get("nombre", ""),
+                    "apellidos": rd.get("apellidos", ""),
+                    "documento": rd.get("documento", ""),
+                    "rol": rd.get("rol", "Vendedor"),
+                    "estado": rd.get("estado", "Activo"),
+                    "tipo_remuneracion": rd.get("tipo_nomina", "Porcentual"),
+                    "salario_diario": float(rd.get("salario_diario") or 0.0),
+                    "porcentaje_comision": float(rd.get("comision_porcentaje") or 0.0),
+                    "ultimo_acceso": None,
+                    "fecha_registro": None
+                })
+            conn.close()
+    except Exception as e_sql:
+        print(f"Aviso en fallback local de usuarios: {e_sql}")
+    return items
 
 def insertar_usuario(usuario, password, rol, estado, comision=0.0, nombre="", apellidos="", tipo_nom="Porcentual", salario=0.0, documento=""):
     """Crea un nuevo usuario a través de la API REST y lo sincroniza en usuarios.db"""
@@ -136,8 +167,23 @@ def eliminar_usuario_db(id_usuario):
     except Exception as e:
         return False, f"Error de conexión:\n{e}"
 
+def _actualizar_estado_entradas_remuneracion(*args):
+    """Activa el campo de salario o comisión según el tipo de remuneración, desactivando y reseteando a cero el otro."""
+    t_nom = tipo_nomina_var.get() if tipo_nomina_var else "Porcentual"
+    if entrada_salario_widget and entrada_comision_widget:
+        if t_nom == "Fija":
+            entrada_salario_widget.config(state="normal")
+            entrada_comision_widget.config(state="disabled")
+            if comision_porcentaje_var and comision_porcentaje_var.get() != "0.0":
+                comision_porcentaje_var.set("0.0")
+        else:
+            entrada_comision_widget.config(state="normal")
+            entrada_salario_widget.config(state="disabled")
+            if salario_diario_var and salario_diario_var.get() != "0.0":
+                salario_diario_var.set("0.0")
+
 def actualizar_tabla():
-    """Actualiza la tabla con los datos más recientes de la API"""
+    """Actualiza la tabla con los datos más recientes de la API o SQLite local"""
     global tabla
     if not tabla:
         return
@@ -146,7 +192,19 @@ def actualizar_tabla():
         tabla.delete(item)
 
     usuarios = obtener_usuarios()
+    filtro = filtro_usuarios_var.get().strip().lower() if filtro_usuarios_var else ""
+
     for u in usuarios:
+        nombre_completo = f"{u.get('nombre', '')} {u.get('apellidos', '')}".strip() or u.get("usuario")
+        u_login = str(u.get("usuario") or "")
+        u_rol = str(u.get("rol") or "")
+        u_doc = str(u.get("documento") or "")
+
+        if filtro:
+            txt_match = f"{u_login} {nombre_completo} {u_rol} {u_doc}".lower()
+            if filtro not in txt_match:
+                continue
+
         fecha_registro = u.get("fecha_registro", "")
         if isinstance(fecha_registro, str) and fecha_registro:
             try:
@@ -167,7 +225,6 @@ def actualizar_tabla():
         else:
             ultimo_acceso = "Nunca"
 
-        nombre_completo = f"{u.get('nombre', '')} {u.get('apellidos', '')}".strip() or u.get("usuario")
         remun = f"{u.get('tipo_remuneracion', 'Porcentual')}"
         if u.get("tipo_remuneracion") == "Fija":
             remun += f" (${u.get('salario_diario', 0):,.0f})"
@@ -187,7 +244,7 @@ def actualizar_tabla():
         )
         tabla.insert("", "end", values=valores)
 
-def seleccionar_usuario(event):
+def seleccionar_usuario(event=None):
     """
     Carga los datos del usuario seleccionado en los campos de edición.
     """
@@ -239,19 +296,28 @@ def seleccionar_usuario(event):
             
             if tipo_nom == 'Fija':
                 salario_diario_var.set(str(u_encontrado.get('salario_diario', 0.0)))
+                if comision_porcentaje_var:
+                    comision_porcentaje_var.set("0.0")
             else:
-                salario_diario_var.set(str(u_encontrado.get('porcentaje_comision') or u_encontrado.get('comision_porcentaje', 0.0)))
+                comision_val = u_encontrado.get('porcentaje_comision') if u_encontrado.get('porcentaje_comision') is not None else u_encontrado.get('comision_porcentaje', 0.0)
+                if comision_porcentaje_var:
+                    comision_porcentaje_var.set(str(comision_val))
+                salario_diario_var.set("0.0")
+            _actualizar_estado_entradas_remuneracion()
         else:
             rol_var.set(rol_tabla)
             estado_var.set(estado_tabla)
         
+        if lbl_modo_formulario:
+            lbl_modo_formulario.config(text=f"✏️ Modo: Editando Usuario '{valores[1]}' (ID: {id_usuario_seleccionado})", fg="#E67E22")
+
         print(f"👤 Usuario seleccionado: {valores[1]} (ID: {id_usuario_seleccionado})")
     except Exception as e:
         print(f"❌ Error al seleccionar usuario: {e}")
 
 def guardar_usuario():
     """
-    Guarda o actualiza un usuario en la base de datos.
+    Guarda o actualiza un usuario en la base de datos con campos estrictamente aislados.
     """
     global id_usuario_seleccionado
     
@@ -265,13 +331,19 @@ def guardar_usuario():
     estado = estado_var.get()
     tipo_nom = tipo_nomina_var.get()
     
-    try:
-        valor_nom = float(salario_diario_var.get())
-    except ValueError:
-        valor_nom = 0.0
-        
-    salario = valor_nom if tipo_nom == "Fija" else 0.0
-    comision = valor_nom if tipo_nom == "Porcentual" else 0.0
+    # Manejo estricto e independiente de esquemas de remuneración:
+    if tipo_nom == "Fija":
+        try:
+            salario = float(salario_diario_var.get())
+        except ValueError:
+            salario = 0.0
+        comision = 0.0
+    else:
+        try:
+            comision = float(comision_porcentaje_var.get()) if comision_porcentaje_var else 0.0
+        except ValueError:
+            comision = 0.0
+        salario = 0.0
     
     if not usuario:
         messagebox.showerror("Error", "El campo Usuario es obligatorio.", parent=ventana_usuarios)
@@ -353,10 +425,12 @@ def eliminar_usuario():
         messagebox.showerror("Error", msg, parent=ventana_usuarios)
 
 def limpiar_campos(reset_id=True):
-    """Limpia los campos del formulario"""
+    """Limpia los campos del formulario y restablece el modo"""
     global id_usuario_seleccionado
     if reset_id:
         id_usuario_seleccionado = None
+        if lbl_modo_formulario:
+            lbl_modo_formulario.config(text="➕ Modo: Crear Nuevo Usuario", fg="#007BFF")
 
     for campo in ["Usuario", "Password", "Nombre", "Apellidos", "Documento"]:
         if campo in entradas:
@@ -370,7 +444,10 @@ def limpiar_campos(reset_id=True):
         if tipo_nomina_var:
             tipo_nomina_var.set("Porcentual")
         if salario_diario_var:
-            salario_diario_var.set("0")
+            salario_diario_var.set("0.0")
+        if comision_porcentaje_var:
+            comision_porcentaje_var.set("0.0")
+        _actualizar_estado_entradas_remuneracion()
 
 def probar_login():
     """Prueba si las credenciales son válidas directamente con la API"""
@@ -392,7 +469,9 @@ def probar_login():
 
 def iniciar_usuarios(parent_pid="", parent=None):
     """Inicializa la ventana de gestión de usuarios"""
-    global tabla, entradas, ventana_usuarios, rol_var, estado_var, tipo_nomina_var, salario_diario_var
+    global tabla, entradas, ventana_usuarios, rol_var, estado_var, tipo_nomina_var
+    global salario_diario_var, comision_porcentaje_var, filtro_usuarios_var
+    global lbl_modo_formulario, entrada_salario_widget, entrada_comision_widget
 
     try:
         if parent:
@@ -406,7 +485,7 @@ def iniciar_usuarios(parent_pid="", parent=None):
         ventana_usuarios.title("👥 Gestión de Usuarios - VmPOS")
         
         t = aplicar_tema(ventana_usuarios)
-        calcular_geometria_segura(ventana_usuarios, 1100, 720, min_w=880, min_h=540)
+        calcular_geometria_segura(ventana_usuarios, 1100, 740, min_w=880, min_h=560)
         ventana_usuarios.configure(bg=t["bg_app"])
 
         style = ttk.Style()
@@ -429,7 +508,7 @@ def iniciar_usuarios(parent_pid="", parent=None):
         main_frame.pack(fill="both", expand=True, padx=15, pady=5)
 
         form_frame = tk.LabelFrame(main_frame, text="✨ Ficha de Usuario", font=("Segoe UI", 10, "bold"),
-                                   bg=t["bg_surface"], fg=t["btn_primary_bg"], padx=12, pady=8, relief="solid", bd=1)
+                                   bg=t["bg_surface"], fg=t["btn_primary_bg"], padx=12, pady=6, relief="solid", bd=1)
         form_frame.pack(fill="x", padx=5, pady=3)
 
         roles = ["Administrador", "Vendedor", "Operario"]
@@ -438,81 +517,151 @@ def iniciar_usuarios(parent_pid="", parent=None):
         rol_var = tk.StringVar(value="Vendedor")
         estado_var = tk.StringVar(value="Activo")
         tipo_nomina_var = tk.StringVar(value="Porcentual")
-        salario_diario_var = tk.StringVar(value="0")
+        salario_diario_var = tk.StringVar(value="0.0")
+        comision_porcentaje_var = tk.StringVar(value="0.0")
+        filtro_usuarios_var = tk.StringVar(value="")
 
-        tk.Label(form_frame, text="👤 Usuario:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=0, column=0, padx=5, pady=3, sticky="w")
+        # Indicador de modo
+        lbl_modo_formulario = tk.Label(
+            form_frame, text="➕ Modo: Crear Nuevo Usuario",
+            font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg="#007BFF"
+        )
+        lbl_modo_formulario.grid(row=0, column=0, columnspan=4, sticky="w", padx=5, pady=(0, 4))
+
+        tk.Label(form_frame, text="👤 Usuario:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=1, column=0, padx=5, pady=2, sticky="w")
         entrada_usuario = tk.Entry(form_frame, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid")
-        entrada_usuario.grid(row=0, column=1, padx=5, pady=3, sticky="w")
+        entrada_usuario.grid(row=1, column=1, padx=5, pady=2, sticky="w")
         entradas["Usuario"] = entrada_usuario
 
-        tk.Label(form_frame, text="🔒 Contraseña:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=0, column=2, padx=(15, 5), pady=3, sticky="w")
+        tk.Label(form_frame, text="🔒 Contraseña:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=1, column=2, padx=(15, 5), pady=2, sticky="w")
         entrada_password = tk.Entry(form_frame, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid", show="*")
-        entrada_password.grid(row=0, column=3, padx=5, pady=3, sticky="w")
+        entrada_password.grid(row=1, column=3, padx=5, pady=2, sticky="w")
         entradas["Password"] = entrada_password
 
-        tk.Label(form_frame, text="📛 Nombre:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=1, column=0, padx=5, pady=3, sticky="w")
+        tk.Label(form_frame, text="📛 Nombre:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=2, column=0, padx=5, pady=2, sticky="w")
         entrada_nombre = tk.Entry(form_frame, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid")
-        entrada_nombre.grid(row=1, column=1, padx=5, pady=3, sticky="w")
+        entrada_nombre.grid(row=2, column=1, padx=5, pady=2, sticky="w")
         entradas["Nombre"] = entrada_nombre
 
-        tk.Label(form_frame, text="📛 Apellidos:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=1, column=2, padx=(15, 5), pady=3, sticky="w")
+        tk.Label(form_frame, text="📛 Apellidos:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=2, column=2, padx=(15, 5), pady=2, sticky="w")
         entrada_apellidos = tk.Entry(form_frame, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid")
-        entrada_apellidos.grid(row=1, column=3, padx=5, pady=3, sticky="w")
+        entrada_apellidos.grid(row=2, column=3, padx=5, pady=2, sticky="w")
         entradas["Apellidos"] = entrada_apellidos
 
-        tk.Label(form_frame, text="🪪 Documento/NIT:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=2, column=0, padx=5, pady=3, sticky="w")
+        tk.Label(form_frame, text="🪪 Documento/NIT:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=3, column=0, padx=5, pady=2, sticky="w")
         entrada_doc = tk.Entry(form_frame, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid")
-        entrada_doc.grid(row=2, column=1, padx=5, pady=3, sticky="w")
+        entrada_doc.grid(row=3, column=1, padx=5, pady=2, sticky="w")
         entradas["Documento"] = entrada_doc
 
-        tk.Label(form_frame, text="👑 Rol:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=2, column=2, padx=(15, 5), pady=3, sticky="w")
+        tk.Label(form_frame, text="👑 Rol:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=3, column=2, padx=(15, 5), pady=2, sticky="w")
         combo_rol = ttk.Combobox(form_frame, textvariable=rol_var, values=roles, state="readonly", width=22, font=("Segoe UI", 9))
-        combo_rol.grid(row=2, column=3, padx=5, pady=3, sticky="w")
+        combo_rol.grid(row=3, column=3, padx=5, pady=2, sticky="w")
 
+        # Fila 4: Esquema Remuneración y Estado
         lbl_tipo_nomina = tk.Label(form_frame, text="📄 Remuneración:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"])
-        lbl_tipo_nomina.grid(row=3, column=0, padx=5, pady=3, sticky="w")
+        lbl_tipo_nomina.grid(row=4, column=0, padx=5, pady=2, sticky="w")
         combo_tipo_nomina = ttk.Combobox(form_frame, textvariable=tipo_nomina_var, values=["Porcentual", "Fija"], state="readonly", width=22, font=("Segoe UI", 9))
-        combo_tipo_nomina.grid(row=3, column=1, padx=5, pady=3, sticky="w")
+        combo_tipo_nomina.grid(row=4, column=1, padx=5, pady=2, sticky="w")
+        combo_tipo_nomina.bind("<<ComboboxSelected>>", lambda e: _actualizar_estado_entradas_remuneracion())
 
-        lbl_valor_nomina = tk.Label(form_frame, text="💰 Comisión (%):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"])
-        lbl_valor_nomina.grid(row=3, column=2, padx=(15, 5), pady=3, sticky="w")
-        entrada_valor_nomina = tk.Entry(form_frame, textvariable=salario_diario_var, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid")
-        entrada_valor_nomina.grid(row=3, column=3, padx=5, pady=3, sticky="w")
-
-        tk.Label(form_frame, text="📊 Estado:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=4, column=0, padx=5, pady=3, sticky="w")
+        tk.Label(form_frame, text="📊 Estado:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=4, column=2, padx=(15, 5), pady=2, sticky="w")
         combo_estado = ttk.Combobox(form_frame, textvariable=estado_var, values=estados, state="readonly", width=22, font=("Segoe UI", 9))
-        combo_estado.grid(row=4, column=1, padx=5, pady=3, sticky="w")
+        combo_estado.grid(row=4, column=3, padx=5, pady=2, sticky="w")
 
-        def on_tipo_nomina_change(*args):
-            if combo_tipo_nomina.get() == "Fija":
-                lbl_valor_nomina.config(text="💰 Salario Diario ($ COP):")
-            else:
-                lbl_valor_nomina.config(text="💰 Comisión (%):")
+        # Fila 5: Salario Diario ($) y Comisión (%) estrictamente independientes
+        tk.Label(form_frame, text="💵 Salario Diario ($ COP):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=5, column=0, padx=5, pady=2, sticky="w")
+        entrada_salario_widget = tk.Entry(form_frame, textvariable=salario_diario_var, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid")
+        entrada_salario_widget.grid(row=5, column=1, padx=5, pady=2, sticky="w")
 
-        tipo_nomina_var.trace_add("write", on_tipo_nomina_change)
-        combo_tipo_nomina.bind("<<ComboboxSelected>>", lambda e: combo_tipo_nomina.after(50, on_tipo_nomina_change))
+        tk.Label(form_frame, text="📈 Comisión (%):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).grid(row=5, column=2, padx=(15, 5), pady=2, sticky="w")
+        entrada_comision_widget = tk.Entry(form_frame, textvariable=comision_porcentaje_var, font=("Segoe UI", 9), width=24, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid")
+        entrada_comision_widget.grid(row=5, column=3, padx=5, pady=2, sticky="w")
+
+        # Inicializar estado de campos según tipo de remuneración
+        _actualizar_estado_entradas_remuneracion()
 
         botones_frame = tk.Frame(form_frame, bg=t["bg_surface"])
-        botones_frame.grid(row=5, column=0, columnspan=4, pady=(8, 3))
+        botones_frame.grid(row=6, column=0, columnspan=4, pady=(8, 3))
 
-        btn_guardar = crear_boton(botones_frame, text="💾 Guardar Usuario", command=guardar_usuario, tipo="success", font=("Segoe UI", 9, "bold"), padx=10, pady=5)
-        btn_guardar.pack(side="left", padx=4)
+        btn_nuevo = crear_boton(botones_frame, text="➕ Nuevo Usuario", command=lambda: limpiar_campos(reset_id=True), tipo="primary", font=("Segoe UI", 9, "bold"), padx=8, pady=5)
+        btn_nuevo.pack(side="left", padx=3)
 
-        btn_eliminar = crear_boton(botones_frame, text="🗑️ Eliminar", command=eliminar_usuario, tipo="danger", font=("Segoe UI", 9, "bold"), padx=10, pady=5)
-        btn_eliminar.pack(side="left", padx=4)
+        btn_guardar = crear_boton(botones_frame, text="💾 Guardar", command=guardar_usuario, tipo="success", font=("Segoe UI", 9, "bold"), padx=10, pady=5)
+        btn_guardar.pack(side="left", padx=3)
 
-        btn_limpiar = crear_boton(botones_frame, text="🧹 Limpiar Campos", command=lambda: limpiar_campos(reset_id=True), tipo="secondary", font=("Segoe UI", 9, "bold"), padx=10, pady=5)
-        btn_limpiar.pack(side="left", padx=4)
+        btn_eliminar = crear_boton(botones_frame, text="🗑️ Eliminar", command=eliminar_usuario, tipo="danger", font=("Segoe UI", 9, "bold"), padx=8, pady=5)
+        btn_eliminar.pack(side="left", padx=3)
 
-        btn_login = crear_boton(botones_frame, text="🔑 Probar Login", command=probar_login, tipo="purple", font=("Segoe UI", 9, "bold"), padx=10, pady=5)
-        btn_login.pack(side="left", padx=4)
+        btn_limpiar = crear_boton(botones_frame, text="🧹 Limpiar", command=lambda: limpiar_campos(reset_id=True), tipo="secondary", font=("Segoe UI", 9, "bold"), padx=8, pady=5)
+        btn_limpiar.pack(side="left", padx=3)
 
-        btn_refrescar = crear_boton(botones_frame, text="🔄 Refrescar", command=actualizar_tabla, tipo="primary", font=("Segoe UI", 9, "bold"), padx=10, pady=5)
-        btn_refrescar.pack(side="left", padx=4)
+        btn_login = crear_boton(botones_frame, text="🔑 Probar Login", command=probar_login, tipo="purple", font=("Segoe UI", 9, "bold"), padx=8, pady=5)
+        btn_login.pack(side="left", padx=3)
 
-        # Frame de tabla responsiva con dual scrollbars
-        tabla_frame = tk.LabelFrame(main_frame, text="📋 Lista de Usuarios", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["btn_primary_bg"], padx=6, pady=6, relief="solid", bd=1)
+        btn_refrescar = crear_boton(botones_frame, text="🔄 Refrescar", command=actualizar_tabla, tipo="secondary", font=("Segoe UI", 9, "bold"), padx=8, pady=5)
+        btn_refrescar.pack(side="left", padx=3)
+
+        # Frame de tabla responsiva con barra de búsqueda y dual scrollbars
+        tabla_frame = tk.LabelFrame(main_frame, text="📋 Lista de Usuarios Registrados", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["btn_primary_bg"], padx=6, pady=4, relief="solid", bd=1)
         tabla_frame.pack(fill="both", expand=True, padx=5, pady=3)
+        tabla_frame.rowconfigure(1, weight=1)
+        tabla_frame.columnconfigure(0, weight=1)
+
+        # Barra de búsqueda rápida de usuarios
+        search_f = tk.Frame(tabla_frame, bg=t["bg_surface"])
+        search_f.grid(row=0, column=0, columnspan=2, sticky="ew", padx=4, pady=(2, 6))
+
+        tk.Label(search_f, text="🔍 Buscar:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(side="left", padx=(0, 4))
+        entry_b = tk.Entry(search_f, textvariable=filtro_usuarios_var, font=("Segoe UI", 9), width=28, bg=t["input_bg"], fg=t["input_fg"], insertbackground=t["input_fg"], bd=1, relief="solid")
+        entry_b.pack(side="left", padx=4)
+        entry_b.bind("<KeyRelease>", lambda e: actualizar_tabla())
+
+        btn_clear_b = crear_boton(search_f, text="✖ Limpiar", command=lambda: [filtro_usuarios_var.set(""), actualizar_tabla()], tipo="secondary", font=("Segoe UI", 8), padx=6, pady=2)
+        btn_clear_b.pack(side="left", padx=4)
+
+        columnas = ("ID", "Usuario", "Nombre", "Documento", "Rol", "Remuneración", "Estado", "Último Acceso", "Registro")
+        tabla = ttk.Treeview(tabla_frame, columns=columnas, show="headings")
+
+        anchos = {
+            "ID": 45,
+            "Usuario": 110,
+            "Nombre": 180,
+            "Documento": 110,
+            "Rol": 110,
+            "Remuneración": 150,
+            "Estado": 85,
+            "Último Acceso": 130,
+            "Registro": 130
+        }
+
+        for col in columnas:
+            tabla.heading(col, text=col)
+            tabla.column(col, width=anchos.get(col, 100), minwidth=60, anchor="center")
+
+        scroll_y = ttk.Scrollbar(tabla_frame, orient="vertical", command=tabla.yview)
+        scroll_x = ttk.Scrollbar(tabla_frame, orient="horizontal", command=tabla.xview)
+        tabla.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        
+        tabla.grid(row=1, column=0, sticky="nsew")
+        scroll_y.grid(row=1, column=1, sticky="ns")
+        scroll_x.grid(row=2, column=0, sticky="ew")
+
+        tabla.bind("<<TreeviewSelect>>", seleccionar_usuario)
+
+        footer = tk.Frame(ventana_usuarios, bg=t["btn_primary_bg"])
+        footer.pack(fill="x", side="bottom")
+
+        try:
+            from business_manager import business_mgr as _bm_u
+        except ImportError:
+            from interface.business_manager import business_mgr as _bm_u
+        _bm_u.recargar()
+        tk.Label(footer, text=f"{_bm_u.obtener_texto_ubicacion_contacto()}  |  {_bm_u.nombre}", font=("Segoe UI", 9), bg=t["btn_primary_bg"], fg=fg_h).pack(pady=6)
+
+        actualizar_tabla()
+        if not parent:
+            ventana_usuarios.mainloop()
+        return ventana_usuarios
         tabla_frame.rowconfigure(0, weight=1)
         tabla_frame.columnconfigure(0, weight=1)
 

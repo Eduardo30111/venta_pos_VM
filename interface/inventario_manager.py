@@ -357,13 +357,104 @@ def obtener_articulo_por_codigo(codigo, conn=None) -> Optional[Dict[str, Any]]:
 
 
 def sugerir_proximo_codigo(tipo="Fisico", conn=None) -> str:
-    resp = api.get("/inventario/sugerir-codigo", params={"tipo": str(tipo or "Fisico")})
-    if resp.status_code == 200:
-        data = resp.json()
-        if isinstance(data, dict) and data.get("codigo"):
-            return str(data["codigo"])
-    prefix = "S" if tipo == "Servicio" else ""
-    return f"{prefix}00001"
+    import re
+    try:
+        from interface.business_manager import business_mgr
+    except ImportError:
+        try:
+            from business_manager import business_mgr
+        except ImportError:
+            business_mgr = None
+
+    auto_gen = business_mgr.obtener("sku_auto_generar", True) if business_mgr else True
+    if not auto_gen:
+        return ""
+
+    pref = str(business_mgr.obtener("sku_prefijo", "") if business_mgr else "")
+    sep = str(business_mgr.obtener("sku_separador", "") if business_mgr else "")
+    try:
+        cant_dig = int(business_mgr.obtener("sku_digitos", 5) if business_mgr else 5)
+    except Exception:
+        cant_dig = 5
+    try:
+        num_ini = int(business_mgr.obtener("sku_numero_inicial", 1) if business_mgr else 1)
+    except Exception:
+        num_ini = 1
+
+    es_servicio = (str(tipo or "").strip().lower() == "servicio")
+    if es_servicio and not pref:
+        pref = "S"
+
+    params = {
+        "tipo": str(tipo or "Fisico"),
+        "prefijo": pref,
+        "separador": sep,
+        "digitos": cant_dig,
+        "numero_inicial": num_ini
+    }
+
+    try:
+        resp = api.get("/inventario/sugerir-codigo", params=params, timeout=3.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and data.get("codigo"):
+                return str(data["codigo"])
+    except Exception:
+        pass
+
+    # Fallback local a SQLite
+    codigos = set()
+    cerrar_conn = False
+    if conn is None:
+        try:
+            from interface.database_manager import conectar_db
+        except ImportError:
+            from database_manager import conectar_db
+        conn = conectar_db()
+        cerrar_conn = True
+
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT codigo FROM productos WHERE codigo IS NOT NULL AND codigo != ''")
+            for r in cur.fetchall():
+                codigos.add(str(r[0]).strip())
+            try:
+                cur.execute("SELECT codigo FROM servicios WHERE codigo IS NOT NULL AND codigo != ''")
+                for r in cur.fetchall():
+                    codigos.add(str(r[0]).strip())
+            except Exception:
+                pass
+        except Exception:
+            pass
+        finally:
+            if cerrar_conn:
+                conn.close()
+
+    prefix_full = f"{pref}{sep}".upper()
+    max_num = max(1, num_ini) - 1
+
+    for c_str in codigos:
+        c_upper = c_str.upper()
+        if prefix_full:
+            if c_upper.startswith(prefix_full):
+                num_part = c_upper[len(prefix_full):]
+                m = re.match(r"^(\d+)", num_part)
+                if m:
+                    max_num = max(max_num, int(m.group(1)))
+        else:
+            m = re.match(r"^(\d+)$", c_str)
+            if m:
+                max_num = max(max_num, int(m.group(1)))
+
+    siguiente = max_num + 1
+    while True:
+        candidato = f"{pref}{sep}{siguiente:0{cant_dig}d}"
+        if candidato not in codigos:
+            break
+        siguiente += 1
+
+    return candidato
 
 
 def upsert_articulo_sqlite(datos: Dict[str, Any], conn=None):

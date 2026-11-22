@@ -591,6 +591,20 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
         cb_m = ttk.Combobox(met_frame, textvariable=var_nuevo_metodo, values=["Efectivo", "Transferencia", "Fiado"], state="readonly", width=14)
         cb_m.pack(side="left")
 
+        # Modificación de Fecha y Hora Operativa (con validación y auditoría)
+        fecha_frame = tk.Frame(modal, bg=t_m["bg_surface"])
+        fecha_frame.pack(fill="x", padx=20, pady=4)
+
+        tk.Label(fecha_frame, text="📅 Fecha Operativa:", font=("Segoe UI", 9, "bold"), bg=t_m["bg_surface"], fg=t_m["text_main"]).pack(side="left", padx=(0, 4))
+        var_nueva_fecha = tk.StringVar(value=str(vals[2]))
+        e_nueva_fecha = tk.Entry(fecha_frame, textvariable=var_nueva_fecha, font=("Segoe UI", 9), width=12, bg=t_m["input_bg"], fg=t_m["input_fg"], insertbackground=t_m["input_insert"], relief="solid", bd=1)
+        e_nueva_fecha.pack(side="left", padx=(0, 10))
+
+        tk.Label(fecha_frame, text="🕒 Hora:", font=("Segoe UI", 9, "bold"), bg=t_m["bg_surface"], fg=t_m["text_main"]).pack(side="left", padx=(0, 4))
+        var_nueva_hora = tk.StringVar(value=str(vals[3]) if len(vals) > 3 else "12:00:00")
+        e_nueva_hora = tk.Entry(fecha_frame, textvariable=var_nueva_hora, font=("Segoe UI", 9), width=10, bg=t_m["input_bg"], fg=t_m["input_fg"], insertbackground=t_m["input_insert"], relief="solid", bd=1)
+        e_nueva_hora.pack(side="left")
+
         # Lista de items editables
         items_frame = tk.LabelFrame(modal, text=" Items de la Venta ", font=("Segoe UI", 9, "bold"), bg=t_m["bg_card"], fg=t_m["text_main"], padx=10, pady=6)
         items_frame.pack(fill="both", expand=True, padx=20, pady=6)
@@ -673,18 +687,50 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                 messagebox.showwarning("Atención", "La venta debe conservar al menos un ítem.", parent=modal)
                 return
 
+            f_nueva = var_nueva_fecha.get().strip()
+            h_nueva = var_nueva_hora.get().strip()
+            f_orig = str(vals[2])
+            cambio_fecha = (f_nueva != f_orig)
+
+            if cambio_fecha:
+                try:
+                    datetime.strptime(f_nueva, "%Y-%m-%d")
+                except ValueError:
+                    messagebox.showwarning("Fecha Inválida", "La nueva fecha debe tener formato YYYY-MM-DD (ej: 2026-11-20).", parent=modal)
+                    e_nueva_fecha.focus_set()
+                    return
+
+                # Diálogo explícito de confirmación para modificación de fecha operativa
+                conf = messagebox.askyesno(
+                    "Confirmar Cambio de Fecha Operativa",
+                    f"⚠️ ATENCIÓN: Vas a modificar la fecha operativa de la venta #{id_venta}.\n\n"
+                    f"• Fecha Actual: {f_orig}\n"
+                    f"• Nueva Fecha: {f_nueva}\n"
+                    f"• Motivo: {motivo}\n\n"
+                    f"Esta modificación quedará registrada en auditoría y reajustará los balances contables de la fecha correspondiente.\n\n"
+                    f"¿Deseas continuar?",
+                    parent=modal
+                )
+                if not conf:
+                    return
+
             try:
                 res = editar_venta_completa(
                     id_venta=id_venta,
                     usuario_admin=usuario_actual,
                     nuevo_metodo=var_nuevo_metodo.get(),
                     nuevos_items=nuevos_items,
-                    motivo=motivo
+                    motivo=motivo,
+                    nueva_fecha=f_nueva if cambio_fecha else None,
+                    nueva_hora=h_nueva if cambio_fecha else None
                 )
                 modal.destroy()
                 cargar_ventas()
                 tot_nuevo = res.get("nuevo_total", res.get("total", 0.0))
-                messagebox.showinfo("Venta Modificada", f"Venta #{id_venta} actualizada exitosamente.\nNuevo total: ${tot_nuevo:,.0f} COP.", parent=dialog)
+                msg_exito = f"Venta #{id_venta} actualizada exitosamente.\nNuevo total: ${tot_nuevo:,.0f} COP."
+                if cambio_fecha:
+                    msg_exito += f"\nFecha operativa actualizada a: {f_nueva}."
+                messagebox.showinfo("Venta Modificada", msg_exito, parent=dialog)
             except Exception as e:
                 messagebox.showerror("Error al Editar Venta", f"No se pudo guardar la modificación:\n{e}", parent=modal)
 
