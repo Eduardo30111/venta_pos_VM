@@ -13,6 +13,7 @@ from tkinter import ttk, messagebox
 from datetime import datetime, timedelta, date
 import os
 import sys
+import re
 
 try:
     from theme_manager import (
@@ -70,6 +71,77 @@ def _normalizar_fecha(txt):
             elif len(partes[2]) == 4:
                 return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
     return txt
+
+
+def _normalizar_hora(hora_str):
+    """
+    Normaliza cualquier formato de hora (12h con am/pm, a. m./p. m., o 24h, con o sin segundos)
+    a formato canónico 'HH:MM:SS' de 24 horas.
+    Lanza ValueError si no es un formato de hora válido.
+    """
+    if not hora_str:
+        return ""
+    txt = str(hora_str).strip()
+    if not txt:
+        return ""
+
+    t_clean = txt.lower().replace(".", "").strip()
+    t_clean = re.sub(r"\s+", " ", t_clean)
+    t_clean = t_clean.replace("a m", "am").replace("p m", "pm")
+
+    formatos = [
+        "%H:%M:%S", "%H:%M",
+        "%I:%M:%S %p", "%I:%M %p",
+        "%I:%M:%S%p", "%I:%M%p",
+    ]
+    for fmt in formatos:
+        try:
+            dt = datetime.strptime(t_clean, fmt)
+            return dt.strftime("%H:%M:%S")
+        except ValueError:
+            pass
+
+    for fmt in ["%H:%M:%S", "%H:%M", "%I:%M:%S %p", "%I:%M %p", "%I:%M:%S%p", "%I:%M%p"]:
+        try:
+            dt = datetime.strptime(txt, fmt)
+            return dt.strftime("%H:%M:%S")
+        except ValueError:
+            pass
+
+    m = re.match(r"^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?\s*(am|pm|a\.?\s*m\.?|p\.?\s*m\.?)?$", txt, re.IGNORECASE)
+    if m:
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        ss = int(m.group(3)) if m.group(3) else 0
+        ampm = m.group(4)
+        if ampm:
+            ampm_norm = ampm.lower().replace(".", "").replace(" ", "")
+            if ampm_norm == "pm" and hh < 12:
+                hh += 12
+            elif ampm_norm == "am" and hh == 12:
+                hh = 0
+        if 0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59:
+            return f"{hh:02d}:{mm:02d}:{ss:02d}"
+
+    raise ValueError(f"Formato de hora no reconocido: '{hora_str}'. Use HH:MM o HH:MM a. m. / p. m.")
+
+
+def _formatear_hora_display(hora_str):
+    """
+    Convierte una hora en formato HH:MM:SS o cualquier formato reconocido
+    a una representación amigable de 12 horas en español: ej. '08:30 a. m.' o '06:45 p. m.'.
+    Si no se puede parsear, retorna el texto original.
+    """
+    if not hora_str:
+        return ""
+    try:
+        norm = _normalizar_hora(hora_str)
+        dt = datetime.strptime(norm, "%H:%M:%S")
+        hora_12 = dt.strftime("%I:%M")
+        ampm = "a. m." if dt.hour < 12 else "p. m."
+        return f"{hora_12} {ampm}"
+    except Exception:
+        return str(hora_str).strip()
 
 
 def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid=""):
@@ -381,6 +453,7 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                         fac = v.get("numero") or f"V-{id_v:06d}"
                         f_v = v.get("fecha") or (v.get("created_at", "")[:10] if v.get("created_at") else "")
                         h_v = v.get("hora") or (v.get("created_at", "")[11:19] if v.get("created_at") else "")
+                        h_disp = _formatear_hora_display(h_v)
                         op = v.get("operario_nombre") or "Administrador"
                         doc = v.get("cliente_documento") or "Consumidor Final"
                         pags = v.get("pagos") or []
@@ -393,7 +466,7 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                         ventas_contador += 1
 
                         tree.insert("", "end", values=(
-                            id_v, fac, f_v, h_v,
+                            id_v, fac, f_v, h_disp,
                             op, doc, met,
                             f"${tot:,.0f}", est
                         ), tags=(est,))
@@ -445,8 +518,9 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                         ventas_totales_sum += tot_item
                     ventas_contador += 1
 
+                    h_disp = _formatear_hora_display(r["hora_venta"])
                     tree.insert("", "end", values=(
-                        id_v, fac, r["fecha_venta"], r["hora_venta"],
+                        id_v, fac, r["fecha_venta"], h_disp,
                         op, doc, r["metodo_pago"] or "Efectivo",
                         f"${tot_item:,.0f}", est
                     ), tags=(est,))
@@ -601,8 +675,9 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
         e_nueva_fecha.pack(side="left", padx=(0, 10))
 
         tk.Label(fecha_frame, text="🕒 Hora:", font=("Segoe UI", 9, "bold"), bg=t_m["bg_surface"], fg=t_m["text_main"]).pack(side="left", padx=(0, 4))
-        var_nueva_hora = tk.StringVar(value=str(vals[3]) if len(vals) > 3 else "12:00:00")
-        e_nueva_hora = tk.Entry(fecha_frame, textvariable=var_nueva_hora, font=("Segoe UI", 9), width=10, bg=t_m["input_bg"], fg=t_m["input_fg"], insertbackground=t_m["input_insert"], relief="solid", bd=1)
+        h_orig_disp = _formatear_hora_display(vals[3]) if len(vals) > 3 else "12:00 p. m."
+        var_nueva_hora = tk.StringVar(value=h_orig_disp)
+        e_nueva_hora = tk.Entry(fecha_frame, textvariable=var_nueva_hora, font=("Segoe UI", 9), width=14, bg=t_m["input_bg"], fg=t_m["input_fg"], insertbackground=t_m["input_insert"], relief="solid", bd=1)
         e_nueva_hora.pack(side="left")
 
         # Lista de items editables
@@ -687,27 +762,60 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                 messagebox.showwarning("Atención", "La venta debe conservar al menos un ítem.", parent=modal)
                 return
 
-            f_nueva = var_nueva_fecha.get().strip()
-            h_nueva = var_nueva_hora.get().strip()
-            f_orig = str(vals[2])
+            f_nueva_raw = var_nueva_fecha.get().strip()
+            h_nueva_raw = var_nueva_hora.get().strip()
+            f_orig_raw = str(vals[2]).strip()
+            h_orig_raw = str(vals[3]).strip()
+
+            f_nueva = _normalizar_fecha(f_nueva_raw)
+            f_orig = _normalizar_fecha(f_orig_raw)
+
+            if not f_nueva:
+                messagebox.showwarning("Fecha Inválida", "La fecha operativa no puede estar vacía.", parent=modal)
+                e_nueva_fecha.focus_set()
+                return
+
+            try:
+                datetime.strptime(f_nueva, "%Y-%m-%d")
+            except ValueError:
+                messagebox.showwarning("Fecha Inválida", "La nueva fecha debe tener formato YYYY-MM-DD o DD/MM/YYYY.", parent=modal)
+                e_nueva_fecha.focus_set()
+                return
+
+            if not h_nueva_raw:
+                messagebox.showwarning("Hora Inválida", "La hora operativa no puede estar vacía.", parent=modal)
+                e_nueva_hora.focus_set()
+                return
+
+            try:
+                h_nueva = _normalizar_hora(h_nueva_raw)
+            except ValueError as ve:
+                messagebox.showwarning("Hora Inválida", f"Formato de hora no válido: '{h_nueva_raw}'.\nEjemplo: 06:45 p. m. o 18:45", parent=modal)
+                e_nueva_hora.focus_set()
+                return
+
+            try:
+                h_orig = _normalizar_hora(h_orig_raw)
+            except Exception:
+                h_orig = h_orig_raw
+
             cambio_fecha = (f_nueva != f_orig)
+            cambio_hora = (h_nueva != h_orig)
 
-            if cambio_fecha:
-                try:
-                    datetime.strptime(f_nueva, "%Y-%m-%d")
-                except ValueError:
-                    messagebox.showwarning("Fecha Inválida", "La nueva fecha debe tener formato YYYY-MM-DD (ej: 2026-11-20).", parent=modal)
-                    e_nueva_fecha.focus_set()
-                    return
+            if cambio_fecha or cambio_hora:
+                detalles_cambio = []
+                if cambio_fecha:
+                    detalles_cambio.append(f"• Fecha Operativa: {f_orig} ➔ {f_nueva}")
+                if cambio_hora:
+                    detalles_cambio.append(f"• Hora Operativa: {_formatear_hora_display(h_orig)} ➔ {_formatear_hora_display(h_nueva)}")
 
-                # Diálogo explícito de confirmación para modificación de fecha operativa
+                txt_detalles = "\n".join(detalles_cambio)
                 conf = messagebox.askyesno(
-                    "Confirmar Cambio de Fecha Operativa",
-                    f"⚠️ ATENCIÓN: Vas a modificar la fecha operativa de la venta #{id_venta}.\n\n"
-                    f"• Fecha Actual: {f_orig}\n"
-                    f"• Nueva Fecha: {f_nueva}\n"
+                    "Confirmar Cambio Operativo de Fecha / Hora",
+                    f"⚠️ ATENCIÓN: Vas a modificar los datos temporales de la venta #{id_venta}.\n\n"
+                    f"{txt_detalles}\n"
                     f"• Motivo: {motivo}\n\n"
-                    f"Esta modificación quedará registrada en auditoría y reajustará los balances contables de la fecha correspondiente.\n\n"
+                    f"Esta modificación quedará registrada en auditoría y reajustará los balances contables correspondientes.\n\n"
                     f"¿Deseas continuar?",
                     parent=modal
                 )
@@ -722,14 +830,16 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                     nuevos_items=nuevos_items,
                     motivo=motivo,
                     nueva_fecha=f_nueva if cambio_fecha else None,
-                    nueva_hora=h_nueva if cambio_fecha else None
+                    nueva_hora=h_nueva if cambio_hora else None
                 )
                 modal.destroy()
                 cargar_ventas()
                 tot_nuevo = res.get("nuevo_total", res.get("total", 0.0))
                 msg_exito = f"Venta #{id_venta} actualizada exitosamente.\nNuevo total: ${tot_nuevo:,.0f} COP."
                 if cambio_fecha:
-                    msg_exito += f"\nFecha operativa actualizada a: {f_nueva}."
+                    msg_exito += f"\n• Fecha operativa: {f_nueva}"
+                if cambio_hora:
+                    msg_exito += f"\n• Hora operativa: {_formatear_hora_display(h_nueva)}"
                 messagebox.showinfo("Venta Modificada", msg_exito, parent=dialog)
             except Exception as e:
                 messagebox.showerror("Error al Editar Venta", f"No se pudo guardar la modificación:\n{e}", parent=modal)

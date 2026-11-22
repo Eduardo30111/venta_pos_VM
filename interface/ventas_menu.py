@@ -51,11 +51,13 @@ except ImportError:
 
 try:
     from caja_manager import (
-        obtener_sesion_activa, abrir_sesion_caja, registrar_movimiento_caja, registrar_movimiento_financiero
+        obtener_sesion_activa, abrir_sesion_caja, registrar_movimiento_caja, registrar_movimiento_financiero,
+        normalizar_hora, normalizar_fecha
     )
 except ImportError:
     from interface.caja_manager import (
-        obtener_sesion_activa, abrir_sesion_caja, registrar_movimiento_caja, registrar_movimiento_financiero
+        obtener_sesion_activa, abrir_sesion_caja, registrar_movimiento_caja, registrar_movimiento_financiero,
+        normalizar_hora, normalizar_fecha
     )
 
 def guardar_venta_sqlite(
@@ -1604,20 +1606,21 @@ class App:
         btn_box.pack(fill="x", side="bottom")
 
         def _aplicar():
-            f_val = ent_fecha.get().strip()
-            h_val = ent_hora.get().strip()
+            f_raw = ent_fecha.get().strip()
+            h_raw = ent_hora.get().strip()
             m_val = ent_motivo.get().strip()
 
+            f_val = normalizar_fecha(f_raw)
             try:
                 dt_op = datetime.strptime(f_val, "%Y-%m-%d")
             except ValueError:
-                messagebox.showerror("Fecha Inválida", "La fecha debe tener el formato YYYY-MM-DD (ejemplo: 2026-11-20).", parent=modal)
+                messagebox.showerror("Fecha Inválida", "La fecha debe tener el formato YYYY-MM-DD o DD/MM/YYYY.", parent=modal)
                 return
 
             try:
-                datetime.strptime(h_val, "%H:%M:%S")
+                h_val = normalizar_hora(h_raw)
             except ValueError:
-                messagebox.showerror("Hora Inválida", "La hora debe tener el formato HH:MM:SS (ejemplo: 14:30:00).", parent=modal)
+                messagebox.showerror("Hora Inválida", "La hora debe tener formato válido (ejemplo: 14:30:00 o 02:30 p. m.).", parent=modal)
                 return
 
             if not m_val:

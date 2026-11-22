@@ -424,6 +424,22 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                     "liquidaciones.metodo_pago",
                 )
 
+            # 9c. Ventas columnas operativas y trazabilidad
+            cur.execute("PRAGMA table_info(ventas);")
+            cols_vta = {r[1] for r in cur.fetchall()}
+            if cols_vta:
+                cols_v_defs = [
+                    ("fecha", "TEXT"),
+                    ("hora", "TEXT"),
+                    ("es_venta_atrasada", "INTEGER DEFAULT 0"),
+                    ("motivo_modificacion_fecha", "TEXT"),
+                    ("fecha_modificacion", "TEXT"),
+                    ("modificado_por", "TEXT"),
+                ]
+                for c_nom, c_def in cols_v_defs:
+                    if c_nom not in cols_vta:
+                        _safe_alter_column_direct(cur, f"ALTER TABLE ventas ADD COLUMN {c_nom} {c_def};", f"ventas.{c_nom}")
+
             for t_nom in idem_tablas:
                 cur.execute(f"PRAGMA table_info({t_nom});")
                 t_cols = {r[1] for r in cur.fetchall()}

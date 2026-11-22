@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,6 +40,78 @@ def normalizar_metodo_pago(metodo: str) -> str:
         status_code=400,
         detail=f"Método de pago inválido: '{metodo}'. Use Efectivo, Transferencia o Fiado.",
     )
+
+
+def normalizar_fecha(fecha_str: str) -> str:
+    """Normaliza formatos de fecha DD/MM/YYYY o YYYY-MM-DD a YYYY-MM-DD."""
+    if not fecha_str:
+        return ""
+    txt = str(fecha_str).strip()
+    if "/" in txt:
+        partes = txt.split("/")
+        if len(partes) == 3 and len(partes[2]) == 4:
+            return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
+    elif "-" in txt:
+        partes = txt.split("-")
+        if len(partes) == 3:
+            if len(partes[0]) == 4:
+                return f"{partes[0]}-{partes[1].zfill(2)}-{partes[2].zfill(2)}"
+            elif len(partes[2]) == 4:
+                return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
+    return txt
+
+
+def normalizar_hora(hora_str: str) -> str:
+    """
+    Normaliza cualquier formato de hora (12h con am/pm, a. m./p. m., o 24h, con o sin segundos)
+    a formato canónico 'HH:MM:SS' de 24 horas.
+    Lanza ValueError si no es un formato de hora válido.
+    """
+    if not hora_str:
+        return ""
+    txt = str(hora_str).strip()
+    if not txt:
+        return ""
+
+    t_clean = txt.lower().replace(".", "").strip()
+    t_clean = re.sub(r"\s+", " ", t_clean)
+    t_clean = t_clean.replace("a m", "am").replace("p m", "pm")
+
+    formatos = [
+        "%H:%M:%S", "%H:%M",
+        "%I:%M:%S %p", "%I:%M %p",
+        "%I:%M:%S%p", "%I:%M%p",
+    ]
+    for fmt in formatos:
+        try:
+            dt = datetime.strptime(t_clean, fmt)
+            return dt.strftime("%H:%M:%S")
+        except ValueError:
+            pass
+
+    for fmt in ["%H:%M:%S", "%H:%M", "%I:%M:%S %p", "%I:%M %p", "%I:%M:%S%p", "%I:%M%p"]:
+        try:
+            dt = datetime.strptime(txt, fmt)
+            return dt.strftime("%H:%M:%S")
+        except ValueError:
+            pass
+
+    m = re.match(r"^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?\s*(am|pm|a\.?\s*m\.?|p\.?\s*m\.?)?$", txt, re.IGNORECASE)
+    if m:
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        ss = int(m.group(3)) if m.group(3) else 0
+        ampm = m.group(4)
+        if ampm:
+            ampm_norm = ampm.lower().replace(".", "").replace(" ", "")
+            if ampm_norm == "pm" and hh < 12:
+                hh += 12
+            elif ampm_norm == "am" and hh == 12:
+                hh = 0
+        if 0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59:
+            return f"{hh:02d}:{mm:02d}:{ss:02d}"
+
+    raise ValueError(f"Formato de hora no reconocido: '{hora_str}'. Use HH:MM o HH:MM a. m. / p. m.")
 
 
 class VentaService:
@@ -151,16 +224,20 @@ class VentaService:
                 es_atrasada = bool(getattr(venta_data, "es_venta_atrasada", False))
                 custom_fecha = getattr(venta_data, "fecha", None)
                 if custom_fecha and str(custom_fecha).strip():
+                    f_c_norm = normalizar_fecha(str(custom_fecha).strip())
                     try:
-                        datetime.strptime(str(custom_fecha).strip()[:10], "%Y-%m-%d")
-                        fecha_operacion = str(custom_fecha).strip()[:10]
+                        datetime.strptime(f_c_norm[:10], "%Y-%m-%d")
+                        fecha_operacion = f_c_norm[:10]
                         if fecha_operacion != f_str:
                             es_atrasada = True
                     except ValueError:
                         pass
                 custom_hora = getattr(venta_data, "hora", None)
                 if custom_hora and str(custom_hora).strip():
-                    hora_operacion = str(custom_hora).strip()[:8]
+                    try:
+                        hora_operacion = normalizar_hora(str(custom_hora).strip())
+                    except ValueError:
+                        hora_operacion = str(custom_hora).strip()[:8]
 
                 op_nombre = (f"{usuario.nombre or ''} {usuario.apellidos or ''}".strip() or usuario.usuario)
 
@@ -1760,22 +1837,32 @@ class VentaService:
                 nueva_f = getattr(req, "nueva_fecha", None)
                 nueva_h = getattr(req, "nueva_hora", None)
                 cambio_fecha = False
+                cambio_hora = False
+
                 if nueva_f and str(nueva_f).strip():
+                    f_norm = normalizar_fecha(str(nueva_f).strip())
                     try:
-                        datetime.strptime(str(nueva_f).strip()[:10], "%Y-%m-%d")
-                        venta.fecha = str(nueva_f).strip()[:10]
-                        venta.es_venta_atrasada = True
-                        venta.motivo_modificacion_fecha = req.motivo
-                        cambio_fecha = True
+                        datetime.strptime(f_norm[:10], "%Y-%m-%d")
+                        if f_norm[:10] != fecha_anterior:
+                            venta.fecha = f_norm[:10]
+                            venta.es_venta_atrasada = True
+                            venta.motivo_modificacion_fecha = req.motivo
+                            cambio_fecha = True
+                        else:
+                            venta.fecha = f_norm[:10]
                     except ValueError:
-                        raise HTTPException(status_code=400, detail="El formato de la nueva fecha debe ser YYYY-MM-DD.")
+                        raise HTTPException(status_code=400, detail="El formato de la nueva fecha debe ser YYYY-MM-DD o DD/MM/YYYY.")
+
                 if nueva_h and str(nueva_h).strip():
                     try:
-                        datetime.strptime(str(nueva_h).strip()[:8], "%H:%M:%S")
-                        venta.hora = str(nueva_h).strip()[:8]
-                        cambio_fecha = True
-                    except ValueError:
-                        pass
+                        h_norm = normalizar_hora(str(nueva_h).strip())
+                        if h_norm != hora_anterior:
+                            venta.hora = h_norm
+                            cambio_hora = True
+                        else:
+                            venta.hora = h_norm
+                    except ValueError as ve:
+                        raise HTTPException(status_code=400, detail=f"Formato de hora inválido: {ve}")
 
                 venta.subtotal = nuevo_total
                 venta.total = nuevo_total
@@ -1798,7 +1885,15 @@ class VentaService:
                     "ventas",
                     str(venta.id),
                     valor_anterior={"total": total_anterior, "metodo": metodo_anterior, "fecha": fecha_anterior, "hora": hora_anterior},
-                    valor_nuevo={"total": nuevo_total, "metodo": nuevo_metodo, "fecha": venta.fecha, "hora": venta.hora, "motivo": req.motivo, "cambio_fecha": cambio_fecha},
+                    valor_nuevo={
+                        "total": nuevo_total,
+                        "metodo": nuevo_metodo,
+                        "fecha": venta.fecha,
+                        "hora": venta.hora,
+                        "motivo": req.motivo,
+                        "cambio_fecha": cambio_fecha,
+                        "cambio_hora": cambio_hora,
+                    },
                 )
                 return {
                     "ok": True,
@@ -1808,6 +1903,10 @@ class VentaService:
                     "nuevo_total": nuevo_total,
                     "delta_monto": round(nuevo_total - total_anterior, 2),
                     "motivo": req.motivo,
+                    "fecha": venta.fecha,
+                    "hora": venta.hora,
+                    "cambio_fecha": cambio_fecha,
+                    "cambio_hora": cambio_hora,
                 }
             except HTTPException:
                 await db.rollback()

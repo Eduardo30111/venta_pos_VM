@@ -10,6 +10,7 @@ Regla de oro: Total Facturado != Dinero Real en Caja.
 
 import json
 import sqlite3
+import re
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 import os
@@ -34,6 +35,78 @@ except ImportError:
     except ImportError:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from database_manager import conectar_db
+
+
+def normalizar_fecha(fecha_str: str) -> str:
+    """Normaliza formatos de fecha DD/MM/YYYY o YYYY-MM-DD a YYYY-MM-DD."""
+    if not fecha_str:
+        return ""
+    txt = str(fecha_str).strip()
+    if "/" in txt:
+        partes = txt.split("/")
+        if len(partes) == 3 and len(partes[2]) == 4:
+            return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
+    elif "-" in txt:
+        partes = txt.split("-")
+        if len(partes) == 3:
+            if len(partes[0]) == 4:
+                return f"{partes[0]}-{partes[1].zfill(2)}-{partes[2].zfill(2)}"
+            elif len(partes[2]) == 4:
+                return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
+    return txt
+
+
+def normalizar_hora(hora_str: str) -> str:
+    """
+    Normaliza cualquier formato de hora (12h con am/pm, a. m./p. m., o 24h, con o sin segundos)
+    a formato canónico 'HH:MM:SS' de 24 horas.
+    Lanza ValueError si no es un formato de hora válido.
+    """
+    if not hora_str:
+        return ""
+    txt = str(hora_str).strip()
+    if not txt:
+        return ""
+
+    t_clean = txt.lower().replace(".", "").strip()
+    t_clean = re.sub(r"\s+", " ", t_clean)
+    t_clean = t_clean.replace("a m", "am").replace("p m", "pm")
+
+    formatos = [
+        "%H:%M:%S", "%H:%M",
+        "%I:%M:%S %p", "%I:%M %p",
+        "%I:%M:%S%p", "%I:%M%p",
+    ]
+    for fmt in formatos:
+        try:
+            dt = datetime.strptime(t_clean, fmt)
+            return dt.strftime("%H:%M:%S")
+        except ValueError:
+            pass
+
+    for fmt in ["%H:%M:%S", "%H:%M", "%I:%M:%S %p", "%I:%M %p", "%I:%M:%S%p", "%I:%M%p"]:
+        try:
+            dt = datetime.strptime(txt, fmt)
+            return dt.strftime("%H:%M:%S")
+        except ValueError:
+            pass
+
+    m = re.match(r"^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?\s*(am|pm|a\.?\s*m\.?|p\.?\s*m\.?)?$", txt, re.IGNORECASE)
+    if m:
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        ss = int(m.group(3)) if m.group(3) else 0
+        ampm = m.group(4)
+        if ampm:
+            ampm_norm = ampm.lower().replace(".", "").replace(" ", "")
+            if ampm_norm == "pm" and hh < 12:
+                hh += 12
+            elif ampm_norm == "am" and hh == 12:
+                hh = 0
+        if 0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59:
+            return f"{hh:02d}:{mm:02d}:{ss:02d}"
+
+    raise ValueError(f"Formato de hora no reconocido: '{hora_str}'. Use HH:MM o HH:MM a. m. / p. m.")
 
 
 def obtener_sesion_activa(conn: Optional[sqlite3.Connection] = None) -> Optional[Dict[str, Any]]:
@@ -1487,6 +1560,9 @@ def editar_venta_completa(
     if not motivo or len(motivo.strip()) < 3:
         raise ValueError("El motivo de edición es obligatorio (mínimo 3 caracteres).")
 
+    f_norm = normalizar_fecha(nueva_fecha) if (nueva_fecha and str(nueva_fecha).strip()) else None
+    h_norm = normalizar_hora(nueva_hora) if (nueva_hora and str(nueva_hora).strip()) else None
+
     if api is not None:
         try:
             import urllib.parse
@@ -1507,10 +1583,10 @@ def editar_venta_completa(
                 "items": norm_items,
                 "motivo": motivo.strip(),
             }
-            if nueva_fecha and str(nueva_fecha).strip():
-                req_json["nueva_fecha"] = str(nueva_fecha).strip()
-            if nueva_hora and str(nueva_hora).strip():
-                req_json["nueva_hora"] = str(nueva_hora).strip()
+            if f_norm:
+                req_json["nueva_fecha"] = f_norm
+            if h_norm:
+                req_json["nueva_hora"] = h_norm
 
             resp = api.put(
                 f"/ventas/{id_venta}?motivo={q_motivo}",
@@ -1518,7 +1594,37 @@ def editar_venta_completa(
                 timeout=8.0,
             )
             if resp.status_code == 200:
-                return resp.json()
+                resp_data = resp.json()
+                try:
+                    conn_loc = conectar_db()
+                    if conn_loc:
+                        cur_loc = conn_loc.cursor()
+                        campos_upd = ["estado = 'Modificada'", "modificado_por = ?", "fecha_modificacion = ?"]
+                        prms = [usuario_admin, datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+
+                        nuevo_tot = resp_data.get("nuevo_total") or resp_data.get("total")
+                        if nuevo_tot is not None:
+                            campos_upd.append("total_venta = ?")
+                            prms.append(float(nuevo_tot))
+                        if nuevo_metodo:
+                            campos_upd.append("metodo_pago = ?")
+                            prms.append(nuevo_metodo)
+                        if f_norm:
+                            campos_upd.append("fecha_venta = ?")
+                            campos_upd.append("es_venta_atrasada = 1")
+                            campos_upd.append("motivo_modificacion_fecha = ?")
+                            prms.extend([f_norm, motivo])
+                        if h_norm:
+                            campos_upd.append("hora_venta = ?")
+                            prms.append(h_norm)
+
+                        prms.append(id_venta)
+                        cur_loc.execute(f"UPDATE ventas SET {', '.join(campos_upd)} WHERE id_venta = ?", prms)
+                        conn_loc.commit()
+                        conn_loc.close()
+                except Exception as e_loc:
+                    print(f"Aviso actualizando SQLite local tras edición en API: {e_loc}")
+                return resp_data
             elif resp.status_code in (400, 404, 422):
                 det = resp.json().get("detail", "Error al editar venta en servidor")
                 if isinstance(det, list):
@@ -1654,8 +1760,8 @@ def editar_venta_completa(
             """, (delta_fiado, doc_cliente))
 
         # 5. Actualizar venta
-        fecha_final_op = str(nueva_fecha).strip() if nueva_fecha and str(nueva_fecha).strip() else fecha_venta_orig
-        hora_final_op = str(nueva_hora).strip() if nueva_hora and str(nueva_hora).strip() else hora_venta_orig
+        fecha_final_op = f_norm if f_norm else fecha_venta_orig
+        hora_final_op = h_norm if h_norm else hora_venta_orig
         cur.execute("""
             UPDATE ventas SET
                 total_venta = ?,
