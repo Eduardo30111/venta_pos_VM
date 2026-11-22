@@ -273,6 +273,16 @@ class VmPOSDashboard(tk.Toplevel):
             except:
                 pass  # Ventana ya destruida
 
+        # Asegurar visibilidad, foco y estado activo de la ventana principal
+        try:
+            if hasattr(self, "state") and self.state() == "iconic":
+                self.state("normal")
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except Exception as e_vis:
+            print(f"Aviso asegurando visibilidad del Dashboard: {e_vis}")
+
     def _on_close_window(self):
         """Maneja el evento de cierre de ventana desde el sistema operativo (X superior)."""
         self._salir_sistema()
@@ -1005,6 +1015,8 @@ class VmPOSDashboard(tk.Toplevel):
     def _recordar_asistencia_admin(self):
         """Muestra un recordatorio al administrador para comprobar la asistencia del personal (máximo 1 vez al día)."""
         global _RECORDATORIO_ASISTENCIA_FECHA
+        if os.environ.get("VMPOS_TEST_MODE") == "1":
+            return
         try:
             import datetime
             hoy = datetime.date.today().strftime('%Y-%m-%d')
@@ -2443,10 +2455,20 @@ def iniciar_dashboard(usuario, datos_usuario, login_window=None):
     """
     try:
         app = VmPOSDashboard(usuario=usuario, datos_usuario=datos_usuario, parent=login_window)
+        try:
+            if hasattr(app, "state") and app.state() == "iconic":
+                app.state("normal")
+            app.deiconify()
+            app.lift()
+            app.focus_force()
+        except Exception as e_foc:
+            print(f"Aviso enfocando dashboard: {e_foc}")
         if not login_window:
             app.mainloop()
         return app
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"Error iniciando dashboard: {e}")
         messagebox.showerror("Error Fatal", f"Error iniciando el dashboard:\n{e}")
         return None

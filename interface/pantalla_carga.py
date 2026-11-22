@@ -181,13 +181,14 @@ def reproducir_bienvenida_asincrona(nombre, forzar=False):
 
     threading.Thread(target=_hilo_tts, daemon=True, name="VmPOS-TTS-Bienvenida").start()
 
-def mostrar_carga(nombre="Usuario", usuario_info=None, parent=None):
+def mostrar_carga(nombre="Usuario", usuario_info=None, parent=None, on_complete=None):
     """
     Muestra la pantalla de carga original de VmPOS con animaciones y bienvenida por voz.
     Args:
         nombre (str): Nombre del usuario (se usará como fallback si no hay usuario_info)
         usuario_info (dict): Información completa del usuario (con claves 'usuario', 'nombre', 'rol')
         parent (tk.Widget): Ventana padre si existe, para integrarse cleanly como Toplevel
+        on_complete (callable): Callback a ejecutar al finalizar la pantalla de carga y cerrarse la ventana.
     """
     # Determinar el nombre real del usuario de forma dinámica
     nombre_real = ""
@@ -203,10 +204,13 @@ def mostrar_carga(nombre="Usuario", usuario_info=None, parent=None):
     t = theme_mgr.get_theme_tokens()
     if parent is not None:
         ventana = tk.Toplevel(parent)
+        es_toplevel = True
     elif tk._default_root is not None:
         ventana = tk.Toplevel(tk._default_root)
+        es_toplevel = True
     else:
         ventana = tk.Tk()
+        es_toplevel = False
     ventana.title(f"VmPOS - Bienvenido {nombre_real} ✨")
     ventana.geometry("550x350")
     ventana.configure(bg=t["accent"])
@@ -376,28 +380,64 @@ def mostrar_carga(nombre="Usuario", usuario_info=None, parent=None):
                 message_index = min(ciclos // (total_cycles // len(status_messages)), len(status_messages) - 1)
                 status_label.config(text=status_messages[message_index])
                 
-                ventana.update()
+                try:
+                    ventana.update_idletasks()
+                except Exception:
+                    pass
                 ventana.after(50, lambda: animar_loader((indice + 1) % 8, ciclos + 1))
             elif ventana.winfo_exists():
                 # Finalizar
                 status_label.config(text="¡Listo! 🎉")
                 progress_bar.config(width=max_width, bg="#10B981")
-                ventana.update()
-                ventana.after(200, ventana.destroy)
+                try:
+                    ventana.update_idletasks()
+                except Exception:
+                    pass
+                ventana.after(200, _finalizar_carga)
         except tk.TclError:
             pass
+
+    _finalizado = False
+
+    def _finalizar_carga():
+        nonlocal _finalizado
+        if _finalizado:
+            return
+        _finalizado = True
+        try:
+            if ventana.winfo_exists():
+                ventana.destroy()
+        except Exception:
+            pass
+        if on_complete:
+            try:
+                on_complete()
+            except Exception as e_cb:
+                print(f"Error en callback tras pantalla de carga: {e_cb}")
 
     # Iniciar animaciones
     ventana.after(100, animar_iconos)
     ventana.after(100, animar_loader)
     
     # Auto-cerrar de seguridad
-    ventana.after(3000, lambda: ventana.destroy() if ventana.winfo_exists() else None)
+    ventana.after(3000, lambda: _finalizar_carga() if not _finalizado else None)
     
-    try:
-        ventana.mainloop()
-    except tk.TclError:
-        pass
+    if on_complete is not None:
+        # En modo con callback (asíncrono), la animación se ejecuta en el loop de eventos activo
+        return ventana
+
+    if es_toplevel:
+        # Si es Toplevel sin callback (modo síncrono en tests), esperar al cierre con wait_window
+        try:
+            (parent or tk._default_root).wait_window(ventana)
+        except tk.TclError:
+            pass
+    else:
+        # Si es tk.Tk independiente (ejecución directa de script), ejecutar su propio mainloop
+        try:
+            ventana.mainloop()
+        except tk.TclError:
+            pass
     
     return ventana
 

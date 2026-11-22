@@ -366,6 +366,51 @@ def _iniciar_flujo_principal_ejecutar(datos_usuario, usuario_actual):
     except Exception:
         pass
 
+    def _abrir_dashboard_seguro():
+        try:
+            logger.info("Iniciando creación y despliegue del Dashboard principal para usuario: %s", usuario_actual)
+            from interface.menu_inicio import iniciar_dashboard
+            app = iniciar_dashboard(usuario_actual, datos_usuario, login_window=ventana)
+            if app:
+                session_mgr.registrar_ventana(app)
+                try:
+                    if hasattr(app, "state") and app.state() == "iconic":
+                        app.state("normal")
+                    app.deiconify()
+                    app.lift()
+                    app.focus_force()
+                except Exception:
+                    pass
+                logger.info("Dashboard principal de VmPOS desplegado y activo con éxito.")
+                return app
+            else:
+                raise RuntimeError("iniciar_dashboard retornó None sin lanzar excepción.")
+        except Exception as e:
+            import traceback
+            err_detallado = traceback.format_exc()
+            logger.critical("Fallo crítico abriendo dashboard para %s: %s", usuario_actual, err_detallado)
+            try:
+                from interface.config import LOGS_DIR
+                os.makedirs(LOGS_DIR, exist_ok=True)
+                with open(os.path.join(LOGS_DIR, "dashboard_error.log"), "a", encoding="utf-8") as _ef:
+                    _ef.write(f"--- ERROR AL ABRIR DASHBOARD ({datetime.now()}) ---\n")
+                    _ef.write(err_detallado + "\n\n")
+            except Exception:
+                pass
+            try:
+                ventana.deiconify()
+                ventana.lift()
+                ventana.focus_force()
+            except Exception:
+                pass
+            messagebox.showerror(
+                "Error al Iniciar el Menú Principal",
+                f"Ocurrió un error al cargar el menú principal de VmPOS:\n\n{e}\n\n"
+                f"La pantalla de inicio de sesión ha sido restaurada para que pueda reintentar.\n"
+                f"Se generó un registro técnico detallado en logs/dashboard_error.log."
+            )
+            return None
+
     # Mostrar la pantalla de carga original con animación y bienvenida por voz
     try:
         from interface.pantalla_carga import mostrar_carga
@@ -377,29 +422,17 @@ def _iniciar_flujo_principal_ejecutar(datos_usuario, usuario_actual):
 
     if mostrar_carga:
         try:
-            datos_usuario['ventana_carga'] = mostrar_carga(nombre=usuario_actual, usuario_info=datos_usuario, parent=ventana)
+            datos_usuario['ventana_carga'] = mostrar_carga(
+                nombre=usuario_actual,
+                usuario_info=datos_usuario,
+                parent=ventana,
+                on_complete=_abrir_dashboard_seguro
+            )
         except Exception as e_carga:
-            print(f"Aviso al mostrar pantalla de carga: {e_carga}")
-
-    try:
-        from interface.menu_inicio import iniciar_dashboard
-        iniciar_dashboard(usuario_actual, datos_usuario, login_window=ventana)
-    except Exception as e:
-        import traceback
-        try:
-            from interface.config import LOGS_DIR
-            os.makedirs(LOGS_DIR, exist_ok=True)
-            with open(os.path.join(LOGS_DIR, "dashboard_error.log"), "a", encoding="utf-8") as _ef:
-                _ef.write(traceback.format_exc() + "\n")
-        except Exception:
-            pass
-        try:
-            ventana.deiconify()
-            ventana.lift()
-            ventana.focus_force()
-        except Exception:
-            pass
-        messagebox.showerror("Error", f"Fallo al abrir dashboard: {e}")
+            logger.warning("Aviso al mostrar pantalla de carga: %s. Abriendo dashboard directamente.", e_carga)
+            _abrir_dashboard_seguro()
+    else:
+        _abrir_dashboard_seguro()
 
 def mostrar_alerta_bonita(titulo, mensaje, tipo="error"):
     alerta = tk.Toplevel()
@@ -506,6 +539,10 @@ def validar_usuario(event=None):
 def limpiar_campos(event=None):
     usuario_var.set("")
     pass_var.set("")
+    if 'entry_pass' in globals() and entry_pass.winfo_exists():
+        entry_pass.config(show="*")
+    if 'lbl_toggle_pass' in globals() and lbl_toggle_pass.winfo_exists():
+        lbl_toggle_pass.config(text="👁️ Mostrar contraseña")
     entry_user.focus()
 
 ventana = tk.Tk()
@@ -691,7 +728,31 @@ entry_user = tk.Entry(
 )
 entry_user.pack(fill="x", ipady=4, pady=(0, 12))
 
-crear_etiqueta(login_content, text="🔒 CONTRASEÑA", font=(FONT_FAMILY, 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"], anchor="w").pack(fill="x", pady=(0, 3))
+pass_header = tk.Frame(login_content, bg=t["bg_surface"])
+pass_header.pack(fill="x", pady=(0, 3))
+
+crear_etiqueta(pass_header, text="🔒 CONTRASEÑA", font=(FONT_FAMILY, 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"], anchor="w").pack(side="left")
+
+def alternar_mostrar_contrasena(event=None):
+    """Alterna la visibilidad de la contraseña escrita sin alterar el contenido del campo."""
+    if entry_pass.cget("show") == "*":
+        entry_pass.config(show="")
+        lbl_toggle_pass.config(text="👁️ Ocultar contraseña")
+    else:
+        entry_pass.config(show="*")
+        lbl_toggle_pass.config(text="👁️ Mostrar contraseña")
+
+lbl_toggle_pass = tk.Label(
+    pass_header,
+    text="👁️ Mostrar contraseña",
+    font=(FONT_FAMILY, 8, "underline"),
+    bg=t["bg_surface"],
+    fg=COLOR_LOGIN if COLOR_LOGIN != "#FFFFFF" else t["accent"],
+    cursor="hand2"
+)
+lbl_toggle_pass.pack(side="right")
+lbl_toggle_pass.bind("<Button-1>", alternar_mostrar_contrasena)
+
 entry_pass = tk.Entry(
     login_content,
     textvariable=pass_var,
@@ -772,6 +833,8 @@ def recargar_identidad_login():
         btn_net_login.configure(bg=c_login, fg=fg_login, activebackground=c_login, activeforeground=fg_login, highlightbackground=c_login)
         btn_login.configure(bg=c_login, fg=fg_login)
         btn_red_link.configure(fg=c_login if c_login != "#FFFFFF" else t["accent"], activeforeground=c_login)
+        if 'lbl_toggle_pass' in globals() and lbl_toggle_pass.winfo_exists():
+            lbl_toggle_pass.configure(bg=t["bg_surface"], fg=c_login if c_login != "#FFFFFF" else t["accent"])
     except Exception as e_ref:
         print(f"Aviso refrescando identidad en login: {e_ref}")
 
@@ -787,6 +850,9 @@ def limpiar_para_nuevo_login():
     try:
         if 'entry_pass' in globals() and entry_pass.winfo_exists():
             entry_pass.delete(0, tk.END)
+            entry_pass.config(show="*")
+        if 'lbl_toggle_pass' in globals() and lbl_toggle_pass.winfo_exists():
+            lbl_toggle_pass.config(text="👁️ Mostrar contraseña")
         if 'entry_user' in globals() and entry_user.winfo_exists():
             entry_user.delete(0, tk.END)
             entry_user.focus_set()
@@ -848,9 +914,8 @@ def _autoarrancar_o_sincronizar_red():
         print(f"Aviso en sincronización inicial de red: {e_srv}")
 
 
-threading.Thread(target=_autoarrancar_o_sincronizar_red, daemon=True).start()
-
 if __name__ == "__main__":
+    threading.Thread(target=_autoarrancar_o_sincronizar_red, daemon=True).start()
     # Verificación fail-closed de activación inicial (solo en nodo servidor / standalone)
     try:
         try:
