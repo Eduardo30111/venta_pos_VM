@@ -214,6 +214,36 @@ class TestLoginMostrarPasswordYArranqueDashboard(unittest.TestCase):
         dash.destroy()
         login_mod.ventana.update_idletasks()
 
+    def test_07_iniciar_flujo_principal_ejecutar_logger_y_apertura(self):
+        """Prueba E: _iniciar_flujo_principal_ejecutar ejecuta pantalla de carga y callback sin NameError."""
+        # Verificar que logger y datetime están presentes en login_mod
+        self.assertTrue(hasattr(login_mod, "logger"), "login_mod debe definir logger")
+        self.assertTrue(hasattr(login_mod, "datetime"), "login_mod debe definir datetime")
+
+        mock_user = {
+            'id': 1,
+            'nombre': 'Eduardo Admin',
+            'usuario': 'admin_test_flow',
+            'rol': 'Administrador'
+        }
+
+        # Ejecutar flujo principal
+        login_mod._iniciar_flujo_principal_ejecutar(mock_user, "admin_test_flow")
+        
+        # Bombear idle tasks para procesar eventos
+        login_mod.ventana.update_idletasks()
+
+        # Si hay ventana de carga en datos_usuario, esperar a que complete
+        if 'ventana_carga' in mock_user and mock_user['ventana_carga'] and mock_user['ventana_carga'].winfo_exists():
+            try:
+                login_mod.ventana.wait_window(mock_user['ventana_carga'])
+            except Exception:
+                pass
+
+        # Limpiar ventanas de sesión activas
+        session_mgr.cerrar_todas_las_ventanas()
+        login_mod.ventana.update_idletasks()
+
 
 if __name__ == "__main__":
     unittest.main()

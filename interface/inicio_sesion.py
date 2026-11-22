@@ -74,6 +74,10 @@ if "--self-test-imports" in sys.argv:
 import tkinter as tk
 from tkinter import ttk, messagebox
 import io
+import logging
+from datetime import datetime
+
+logger = logging.getLogger("inicio_sesion")
 
 try:
     log_file = open("vmpos.log", "a", encoding="utf-8")
