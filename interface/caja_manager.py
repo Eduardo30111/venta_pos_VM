@@ -38,14 +38,19 @@ except ImportError:
 
 
 def normalizar_fecha(fecha_str: str) -> str:
-    """Normaliza formatos de fecha DD/MM/YYYY o YYYY-MM-DD a YYYY-MM-DD."""
+    """Normaliza formatos de fecha DD/MM/YYYY, YYYY-MM-DD, DD-MM-YYYY, YYYY/MM/DD a YYYY-MM-DD."""
     if not fecha_str:
         return ""
     txt = str(fecha_str).strip()
+    if len(txt) >= 10 and txt[10:11] in (" ", "T"):
+        txt = txt[:10].strip()
     if "/" in txt:
         partes = txt.split("/")
-        if len(partes) == 3 and len(partes[2]) == 4:
-            return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
+        if len(partes) == 3:
+            if len(partes[2]) == 4:
+                return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
+            elif len(partes[0]) == 4:
+                return f"{partes[0]}-{partes[1].zfill(2)}-{partes[2].zfill(2)}"
     elif "-" in txt:
         partes = txt.split("-")
         if len(partes) == 3:
@@ -53,7 +58,7 @@ def normalizar_fecha(fecha_str: str) -> str:
                 return f"{partes[0]}-{partes[1].zfill(2)}-{partes[2].zfill(2)}"
             elif len(partes[2]) == 4:
                 return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
-    return txt
+    return txt[:10]
 
 
 def normalizar_hora(hora_str: str) -> str:
@@ -1762,19 +1767,40 @@ def editar_venta_completa(
         # 5. Actualizar venta
         fecha_final_op = f_norm if f_norm else fecha_venta_orig
         hora_final_op = h_norm if h_norm else hora_venta_orig
-        cur.execute("""
-            UPDATE ventas SET
-                total_venta = ?,
-                metodo_pago = ?,
-                estado = 'Modificada',
-                modificado_por = ?,
-                fecha_modificacion = ?,
-                fecha_venta = ?,
-                hora_venta = ?,
-                es_venta_atrasada = CASE WHEN ? != fecha_venta THEN 1 ELSE es_venta_atrasada END,
-                motivo_modificacion_fecha = CASE WHEN ? != fecha_venta THEN ? ELSE motivo_modificacion_fecha END
-            WHERE id_venta = ?
-        """, (nuevo_total, nuevo_metodo, usuario_admin, f"{fecha_str} {hora_str}", fecha_final_op, hora_final_op, fecha_final_op, fecha_final_op, motivo, id_venta))
+        cur.execute("PRAGMA table_info(ventas)")
+        cols_v = [c[1] for c in cur.fetchall()]
+        campos_update = [
+            "total_venta = ?",
+            "metodo_pago = ?",
+            "estado = 'Modificada'",
+            "modificado_por = ?",
+            "fecha_modificacion = ?",
+            "fecha_venta = ?",
+            "hora_venta = ?"
+        ]
+        params_update = [
+            nuevo_total,
+            nuevo_metodo,
+            usuario_admin,
+            f"{fecha_str} {hora_str}",
+            fecha_final_op,
+            hora_final_op
+        ]
+        if "fecha" in cols_v:
+            campos_update.append("fecha = ?")
+            params_update.append(fecha_final_op)
+        if "hora" in cols_v:
+            campos_update.append("hora = ?")
+            params_update.append(hora_final_op)
+        if "es_venta_atrasada" in cols_v:
+            campos_update.append("es_venta_atrasada = CASE WHEN ? != fecha_venta THEN 1 ELSE es_venta_atrasada END")
+            params_update.append(fecha_final_op)
+        if "motivo_modificacion_fecha" in cols_v:
+            campos_update.append("motivo_modificacion_fecha = CASE WHEN ? != fecha_venta THEN ? ELSE motivo_modificacion_fecha END")
+            params_update.extend([fecha_final_op, motivo])
+
+        params_update.append(id_venta)
+        cur.execute(f"UPDATE ventas SET {', '.join(campos_update)} WHERE id_venta = ?", params_update)
 
         # 6. Registrar en auditoría
         cur.execute("PRAGMA table_info(auditoria_ventas)")

@@ -33,14 +33,19 @@ if ROOT_DIR not in sys.path:
 from interface.ventas_admin_dialog import _normalizar_fecha, _normalizar_hora, _formatear_hora_display
 from interface.caja_manager import editar_venta_completa, normalizar_hora as cm_normalizar_hora, normalizar_fecha as cm_normalizar_fecha
 from interface.database_manager import conectar_db, inicializar_base_datos
-from server.services.venta_service import normalizar_hora as srv_normalizar_hora, normalizar_fecha as srv_normalizar_fecha, VentaService
-from server.schemas.venta import EditarVentaRequest, EditarVentaItemRequest
-from server.database import get_db, Base, engine, SessionLocal, asegurar_migraciones_sqlite
-from server.models.usuario import Usuario
-from server.models.venta import Venta, DetalleVenta
-from server.models.terminal import Terminal
-from server.models.caja import SesionCaja
-from sqlalchemy.future import select
+
+try:
+    from server.services.venta_service import normalizar_hora as srv_normalizar_hora, normalizar_fecha as srv_normalizar_fecha, VentaService
+    from server.schemas.venta import EditarVentaRequest, EditarVentaItemRequest
+    from server.database import get_db, Base, engine, SessionLocal, asegurar_migraciones_sqlite
+    from server.models.usuario import Usuario
+    from server.models.venta import Venta, DetalleVenta
+    from server.models.terminal import Terminal
+    from server.models.caja import SesionCaja
+    from sqlalchemy.future import select
+    HAS_SERVER_DEPS = True
+except ImportError:
+    HAS_SERVER_DEPS = False
 
 
 class TestCambioFechaHoraVentas(unittest.TestCase):
@@ -314,6 +319,8 @@ class TestCambioFechaHoraVentas(unittest.TestCase):
     # =========================================================================
     def test_08_sincronizacion_entre_terminales_y_api(self):
         """Valida que el servicio del servidor (FastAPI / SQLAlchemy) procesa y sincroniza la hora correctamente."""
+        if not HAS_SERVER_DEPS:
+            self.skipTest("Dependencias de servidor (sqlalchemy) no instaladas en este entorno")
         async def _test_async_server_sync():
             async with SessionLocal() as session:
                 # 0. Asegurar terminal y usuario en servidor

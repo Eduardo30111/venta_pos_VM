@@ -755,8 +755,8 @@ class VmPOSDashboard(tk.Toplevel):
                 try:
                     res_fin = obtener_resumen_financiero(fecha=hoy_iso)
                     if res_fin:
-                        ventas_hoy = res_fin.get("ventas_totales_facturadas", 0.0)
-                        pedidos_hoy = res_fin.get("cantidad_ventas", 0)
+                        ventas_hoy = res_fin.get("total_ventas", res_fin.get("ventas_totales_facturadas", 0.0))
+                        pedidos_hoy = res_fin.get("cant_ventas", res_fin.get("cantidad_ventas", 0))
                         ganancias_hoy = res_fin.get("ganancia_neta_estimada", 0.0)
                 except Exception as e_rf:
                     print(f"Aviso resumen financiero: {e_rf}")
@@ -777,9 +777,8 @@ class VmPOSDashboard(tk.Toplevel):
                     if row_v and row_v[0] is not None:
                         v_sql = float(row_v[0])
                         p_sql = int(row_v[1])
-                        if v_sql > 0 or ventas_hoy == 0.0:
-                            ventas_hoy = max(ventas_hoy, v_sql)
-                            pedidos_hoy = max(pedidos_hoy, p_sql)
+                        ventas_hoy = v_sql
+                        pedidos_hoy = p_sql
                 except Exception as e_v:
                     print(f"Aviso consultando ventas hoy: {e_v}")
 

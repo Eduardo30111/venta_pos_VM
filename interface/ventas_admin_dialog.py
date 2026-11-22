@@ -55,14 +55,19 @@ except ImportError:
 
 
 def _normalizar_fecha(txt):
-    """Normaliza formatos de fecha DD/MM/YYYY o YYYY-MM-DD a YYYY-MM-DD."""
+    """Normaliza formatos de fecha DD/MM/YYYY, YYYY-MM-DD, DD-MM-YYYY, YYYY/MM/DD a YYYY-MM-DD."""
     if not txt:
         return ""
-    txt = txt.strip()
+    txt = str(txt).strip()
+    if len(txt) >= 10 and txt[10:11] in (" ", "T"):
+        txt = txt[:10].strip()
     if "/" in txt:
         partes = txt.split("/")
-        if len(partes) == 3 and len(partes[2]) == 4:
-            return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
+        if len(partes) == 3:
+            if len(partes[2]) == 4:
+                return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
+            elif len(partes[0]) == 4:
+                return f"{partes[0]}-{partes[1].zfill(2)}-{partes[2].zfill(2)}"
     elif "-" in txt:
         partes = txt.split("-")
         if len(partes) == 3:
@@ -70,7 +75,7 @@ def _normalizar_fecha(txt):
                 return f"{partes[0]}-{partes[1].zfill(2)}-{partes[2].zfill(2)}"
             elif len(partes[2]) == 4:
                 return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
-    return txt
+    return txt[:10]
 
 
 def _normalizar_hora(hora_str):
@@ -419,16 +424,37 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
         f_raw = var_fecha.get().strip()
         fecha_filtro = ""
 
-        if p_sel == "Hoy":
-            fecha_filtro = datetime.now().strftime("%Y-%m-%d")
-        elif p_sel == "Ayer":
-            fecha_filtro = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        elif p_sel == "Antes de ayer":
-            fecha_filtro = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
-        elif p_sel == "Todas las fechas":
+        hoy_iso = datetime.now().strftime("%Y-%m-%d")
+        ayer_iso = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        antier_iso = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+
+        if p_sel == "Todas las fechas" and not f_raw:
             fecha_filtro = ""
-        else:
+        elif f_raw:
             fecha_filtro = _normalizar_fecha(f_raw)
+            if fecha_filtro == hoy_iso:
+                var_periodo.set("Hoy")
+            elif fecha_filtro == ayer_iso:
+                var_periodo.set("Ayer")
+            elif fecha_filtro == antier_iso:
+                var_periodo.set("Antes de ayer")
+            else:
+                var_periodo.set("Por fecha")
+        else:
+            if p_sel == "Hoy":
+                fecha_filtro = hoy_iso
+                var_fecha.set(fecha_filtro)
+            elif p_sel == "Ayer":
+                fecha_filtro = ayer_iso
+                var_fecha.set(fecha_filtro)
+            elif p_sel == "Antes de ayer":
+                fecha_filtro = antier_iso
+                var_fecha.set(fecha_filtro)
+            elif p_sel == "Todas las fechas":
+                fecha_filtro = ""
+                var_fecha.set("")
+            else:
+                fecha_filtro = ""
 
         ventas_totales_sum = 0.0
         ventas_contador = 0
@@ -601,6 +627,34 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                 )
                 modal.destroy()
                 cargar_ventas()
+
+                if parent is not None:
+                    try:
+                        if hasattr(parent, "_actualizar_estadisticas"):
+                            parent._actualizar_estadisticas()
+                        if hasattr(parent, "_actualizar_estadisticas_empleado"):
+                            parent._actualizar_estadisticas_empleado()
+                        if hasattr(parent, "actualizar_indicadores_empleado_pos"):
+                            parent.actualizar_indicadores_empleado_pos()
+                        if hasattr(parent, "actualizar_dashboard"):
+                            parent.actualizar_dashboard()
+                    except Exception as e_p:
+                        print(f"Aviso actualizando dashboard padre tras anular: {e_p}")
+
+                try:
+                    from session_manager import session_mgr
+                    p_mod = session_mgr.obtener_modulo("menu_inicio") or session_mgr.obtener_modulo("principal")
+                    if p_mod and p_mod != parent:
+                        if hasattr(p_mod, "_actualizar_estadisticas"):
+                            p_mod._actualizar_estadisticas()
+                        if hasattr(p_mod, "_actualizar_estadisticas_empleado"):
+                            p_mod._actualizar_estadisticas_empleado()
+                    v_mod = session_mgr.obtener_modulo("ventas")
+                    if v_mod and hasattr(v_mod, "actualizar_indicadores_empleado_pos"):
+                        v_mod.actualizar_indicadores_empleado_pos()
+                except Exception:
+                    pass
+
                 messagebox.showinfo("Venta Anulada", f"La venta #{id_venta} fue anulada exitosamente.\nStock y balances revertidos.", parent=dialog)
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo anular la venta: {e}", parent=modal)
@@ -833,13 +887,70 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                     nueva_hora=h_nueva if cambio_hora else None
                 )
                 modal.destroy()
+
+                # Si hubo cambio de fecha operativa, actualizar el filtro a la nueva fecha
+                if cambio_fecha and f_nueva:
+                    var_fecha.set(f_nueva)
+                    hoy_iso = datetime.now().strftime("%Y-%m-%d")
+                    ayer_iso = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                    antier_iso = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+                    if f_nueva == hoy_iso:
+                        var_periodo.set("Hoy")
+                    elif f_nueva == ayer_iso:
+                        var_periodo.set("Ayer")
+                    elif f_nueva == antier_iso:
+                        var_periodo.set("Antes de ayer")
+                    else:
+                        var_periodo.set("Por fecha")
+
                 cargar_ventas()
+
+                # Resaltar la venta editada en la tabla
+                for item in tree.get_children():
+                    v_row = tree.item(item, "values")
+                    if v_row and str(v_row[0]) == str(id_venta):
+                        tree.selection_set(item)
+                        tree.focus(item)
+                        tree.see(item)
+                        break
+
                 tot_nuevo = res.get("nuevo_total", res.get("total", 0.0))
                 msg_exito = f"Venta #{id_venta} actualizada exitosamente.\nNuevo total: ${tot_nuevo:,.0f} COP."
                 if cambio_fecha:
                     msg_exito += f"\n• Fecha operativa: {f_nueva}"
                 if cambio_hora:
                     msg_exito += f"\n• Hora operativa: {_formatear_hora_display(h_nueva)}"
+                if cambio_fecha:
+                    msg_exito += f"\n\nℹ️ La vista se actualizó a la fecha {f_nueva} donde ahora reside la venta."
+
+                # Notificar a la ventana padre (Dashboard / Ventas POS)
+                if parent is not None:
+                    try:
+                        if hasattr(parent, "_actualizar_estadisticas"):
+                            parent._actualizar_estadisticas()
+                        if hasattr(parent, "_actualizar_estadisticas_empleado"):
+                            parent._actualizar_estadisticas_empleado()
+                        if hasattr(parent, "actualizar_indicadores_empleado_pos"):
+                            parent.actualizar_indicadores_empleado_pos()
+                        if hasattr(parent, "actualizar_dashboard"):
+                            parent.actualizar_dashboard()
+                    except Exception as e_p:
+                        print(f"Aviso actualizando dashboard padre tras editar: {e_p}")
+
+                try:
+                    from session_manager import session_mgr
+                    p_mod = session_mgr.obtener_modulo("menu_inicio") or session_mgr.obtener_modulo("principal")
+                    if p_mod and p_mod != parent:
+                        if hasattr(p_mod, "_actualizar_estadisticas"):
+                            p_mod._actualizar_estadisticas()
+                        if hasattr(p_mod, "_actualizar_estadisticas_empleado"):
+                            p_mod._actualizar_estadisticas_empleado()
+                    v_mod = session_mgr.obtener_modulo("ventas")
+                    if v_mod and hasattr(v_mod, "actualizar_indicadores_empleado_pos"):
+                        v_mod.actualizar_indicadores_empleado_pos()
+                except Exception:
+                    pass
+
                 messagebox.showinfo("Venta Modificada", msg_exito, parent=dialog)
             except Exception as e:
                 messagebox.showerror("Error al Editar Venta", f"No se pudo guardar la modificación:\n{e}", parent=modal)
