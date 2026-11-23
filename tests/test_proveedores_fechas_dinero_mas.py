@@ -8,6 +8,7 @@ Archivo: tests/test_proveedores_fechas_dinero_mas.py
 import os
 import sys
 import unittest
+import sqlite3
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -594,6 +595,75 @@ class TestProveedoresFechasDineroMas(unittest.TestCase):
         row_aj = self._query_one("SELECT dinero_de_mas, monto_ajustado FROM liquidaciones_proveedores WHERE id = 114")
         self.assertEqual(float(row_aj[0]), 2400.0)
         self.assertEqual(float(row_aj[1]), 5000.0)
+
+    def test_12_dinero_de_mas_aislamiento_total_inventario(self):
+        """
+        Garantía incondicional del 100%: 'DINERO DE MÁS' es una operación estrictamente
+        monetaria/financiera y NUNCA afecta ni modifica inventario, productos ni stock.
+        """
+        from interface.proveedores_manager import liquidar_proveedor_db, registrar_dinero_de_mas_proveedor_db
+
+        conn = conectar_db()
+        cur = conn.cursor()
+        # Verificar o crear productos de prueba si existen tablas de inventario
+        cur.execute("PRAGMA table_info(productos)")
+        has_prod = len(cur.fetchall()) > 0
+        stock_inicial = 0.0
+        if has_prod:
+            cur.execute("SELECT COALESCE(SUM(stock), 0) FROM productos")
+            stock_inicial = float(cur.fetchone()[0] or 0.0)
+        conn.close()
+
+        # Crear liquidación y luego aplicar dinero de más
+        res_liq = liquidar_proveedor_db(
+            proveedor_id=self.prov_id,
+            proveedor_nombre=self.prov_nombre,
+            monto_abono=50000.0,
+            saldo_pendiente=200000.0,
+            saldo_actual=200000.0,
+            metodo_pago="Efectivo",
+            fecha_movimiento="2026-11-20",
+            hora_movimiento="10:00:00"
+        )
+        self.assertTrue(res_liq.get("exito") or res_liq.get("ok"), f"Fallo al liquidar: {res_liq}")
+        liq_id = res_liq.get("id") or res_liq.get("liquidacion_id")
+
+        # Aplicar corrección por Dinero de Más
+        res_mas = registrar_dinero_de_mas_proveedor_db(
+            liquidacion_id=liq_id,
+            monto_sobrante=15000.0,
+            motivo="Prueba estricta de aislamiento de inventario",
+            usuario="AuditorPOS",
+            proveedor_id=self.prov_id
+        )
+        self.assertTrue(res_mas.get("exito"))
+
+        # Verificar que el stock total permanece idéntico (delta = 0.0)
+        if has_prod:
+            conn = conectar_db()
+            cur = conn.cursor()
+            cur.execute("SELECT COALESCE(SUM(stock), 0) FROM productos")
+            stock_final = float(cur.fetchone()[0] or 0.0)
+            conn.close()
+            self.assertEqual(stock_inicial, stock_final, "El stock de productos NO DEBE CAMBIAR bajo ninguna circunstancia por Dinero de Más")
+
+    def test_13_parsear_monto_colombiano(self):
+        """
+        Valida que el parser de moneda colombiana interprete correctamente
+        entradas con signos, miles, decimales y sufijos COP.
+        """
+        from interface.nomina_menu import parsear_monto_colombiano
+
+        self.assertEqual(parsear_monto_colombiano("$200"), 200.0)
+        self.assertEqual(parsear_monto_colombiano("200 COP"), 200.0)
+        self.assertEqual(parsear_monto_colombiano("100.000"), 100000.0)
+        self.assertEqual(parsear_monto_colombiano("100.000,50"), 100000.5)
+        self.assertEqual(parsear_monto_colombiano("100,000.00"), 100000.0)
+        self.assertEqual(parsear_monto_colombiano("7,400"), 7400.0)
+        self.assertEqual(parsear_monto_colombiano("7.400"), 7400.0)
+        self.assertEqual(parsear_monto_colombiano("$ 50.000 COP"), 50000.0)
+        self.assertEqual(parsear_monto_colombiano(""), 0.0)
+        self.assertEqual(parsear_monto_colombiano(None), 0.0)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ import re
 from datetime import datetime
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, cast, String, or_
+from sqlalchemy import func, cast, String, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.exc import IntegrityError
@@ -568,6 +568,7 @@ async def liquidar_proveedor(
                 prov.total_pagado = round(float(prov.total_pagado or 0.0) + monto_pagar, 2)
 
             ref_val = (req.comprobante or req.referencia or "").strip()
+            num_liq = f"LIQ-PROV-{ahora.strftime('%Y%m%d%H%M%S')}-{prov.id}"
 
             gasto = Gasto(
                 concepto=f"Liquidación proveedor: {prov.nombre}",
@@ -582,10 +583,10 @@ async def liquidar_proveedor(
                 metodo_pago=metodo,
                 tipo="Proveedor",
                 proveedor=prov.nombre,
-                comprobante=ref_val,
+                comprobante=num_liq,
                 usuario_id=current_user.id,
                 usuario_nombre=u_nom,
-                observacion=req.observaciones or "",
+                observacion=f"{req.observaciones or ''} Ref: {ref_val}".strip() if ref_val else (req.observaciones or ""),
             )
             db.add(gasto)
             await db.flush()
@@ -599,14 +600,13 @@ async def liquidar_proveedor(
                 metodo_pago=metodo,
                 cuenta_afectada=cuenta_af,
                 usuario=u_nom,
-                referencia_origen=f"PROVEEDOR-{prov.id}",
+                referencia_origen=num_liq,
                 observaciones=req.observaciones or "",
                 sincronizar_caja=(metodo == "Efectivo"),
                 fecha_str=f_str,
                 hora_str=h_str,
             )
 
-            num_liq = f"LIQ-PROV-{ahora.strftime('%Y%m%d%H%M%S')}-{prov.id}"
             saldo_restante_final = max(0.0, round(saldo_total - monto_pagar, 2))
             liq = LiquidacionProveedor(
                 numero_liquidacion=num_liq,
@@ -775,26 +775,52 @@ async def editar_fecha_liquidacion(
         nueva_h = req.nueva_hora.strip()[:8] if req.nueva_hora else h_ant
         u_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
         recibo = f"LQ-{liq.id:05d}"
+        num_liq = liq.numero_liquidacion or ""
+        rec_lp = f"LP-{liq.id:04d}"
 
         liq.fecha = nueva_f
         liq.hora = nueva_h
 
-        # Actualizar gastos asociados
+        # Actualizar gastos asociados (abarcando todas las categorías y referencias posibles)
         res_g = await db.execute(
             select(Gasto).where(
-                Gasto.categoria == "Pago Proveedores",
-                Gasto.descripcion.like(f"%{recibo}%")
+                or_(
+                    Gasto.comprobante == num_liq,
+                    Gasto.comprobante == recibo,
+                    Gasto.comprobante == rec_lp,
+                    Gasto.comprobante == liq.referencia,
+                    Gasto.descripcion.like(f"%{num_liq}%"),
+                    Gasto.descripcion.like(f"%{recibo}%"),
+                    Gasto.descripcion.like(f"%{rec_lp}%"),
+                    and_(
+                        Gasto.proveedor == liq.proveedor_nombre,
+                        Gasto.fecha == f_ant,
+                        func.abs(Gasto.valor - float(liq.monto_pagado or 0.0)) < 0.01
+                    )
+                )
             )
         )
         for g in res_g.scalars().all():
             g.fecha = nueva_f
+            g.hora = nueva_h
+            g.fecha_pago = f"{nueva_f} {nueva_h}"
 
         # Actualizar movimientos de caja asociados
         res_mc = await db.execute(
             select(MovimientoCaja).where(
                 or_(
+                    MovimientoCaja.referencia_id == num_liq,
                     MovimientoCaja.referencia_id == recibo,
-                    MovimientoCaja.descripcion.like(f"%{recibo}%")
+                    MovimientoCaja.referencia_id == rec_lp,
+                    MovimientoCaja.referencia_id == f"PROVEEDOR-{liq.proveedor_id}",
+                    MovimientoCaja.descripcion.like(f"%{num_liq}%"),
+                    MovimientoCaja.descripcion.like(f"%{recibo}%"),
+                    MovimientoCaja.descripcion.like(f"%{rec_lp}%"),
+                    and_(
+                        MovimientoCaja.tipo == "EGRESO",
+                        MovimientoCaja.fecha == f_ant,
+                        func.abs(MovimientoCaja.monto - float(liq.monto_pagado or 0.0)) < 0.01
+                    )
                 )
             )
         )
@@ -806,8 +832,18 @@ async def editar_fecha_liquidacion(
         res_mf = await db.execute(
             select(MovimientoFinanciero).where(
                 or_(
+                    MovimientoFinanciero.referencia_origen == num_liq,
                     MovimientoFinanciero.referencia_origen == recibo,
-                    MovimientoFinanciero.concepto.like(f"%{recibo}%")
+                    MovimientoFinanciero.referencia_origen == rec_lp,
+                    MovimientoFinanciero.referencia_origen == f"PROVEEDOR-{liq.proveedor_id}",
+                    MovimientoFinanciero.concepto.like(f"%{num_liq}%"),
+                    MovimientoFinanciero.concepto.like(f"%{recibo}%"),
+                    MovimientoFinanciero.concepto.like(f"%{rec_lp}%"),
+                    and_(
+                        MovimientoFinanciero.tipo == "PAGO_PROVEEDOR",
+                        MovimientoFinanciero.fecha == f_ant,
+                        func.abs(MovimientoFinanciero.monto - float(liq.monto_pagado or 0.0)) < 0.01
+                    )
                 )
             )
         )
@@ -818,7 +854,7 @@ async def editar_fecha_liquidacion(
         # Registrar auditoria
         aud = AuditoriaLiquidacion(
             liquidacion_id=liq.id,
-            numero_recibo=recibo,
+            numero_recibo=num_liq or recibo,
             proveedor_id=liq.proveedor_id,
             proveedor_nombre=liq.proveedor_nombre,
             accion="EDITAR_FECHA",
@@ -836,10 +872,14 @@ async def editar_fecha_liquidacion(
             "ok": True,
             "exito": True,
             "liquidacion_id": liq.id,
-            "numero_recibo": recibo,
+            "numero_recibo": num_liq or recibo,
+            "proveedor_id": liq.proveedor_id,
+            "proveedor_nombre": liq.proveedor_nombre,
+            "monto": float(liq.monto_pagado or 0.0),
             "fecha_anterior": f_ant,
-            "fecha_nueva": nueva_f,
-            "hora_nueva": nueva_h
+            "nueva_fecha": nueva_f,
+            "nueva_hora": nueva_h,
+            "mensaje": f"Fecha de liquidación trasladada del {f_ant} al {nueva_f} exitosamente."
         }
 
 
@@ -883,7 +923,7 @@ async def registrar_dinero_de_mas(
         liq.dinero_de_mas = nuevo_dinero_de_mas
         liq.monto_ajustado = nuevo_monto_ajustado
 
-        # 2. Registrar ajuste
+        # 2. Registrar ajuste monetario (estrictamente financiero, NUNCA toca inventario ni productos)
         ajuste = AjusteLiquidacionProveedor(
             numero_ajuste=num_ajuste,
             liquidacion_id=liq.id,
@@ -902,13 +942,22 @@ async def registrar_dinero_de_mas(
 
         # 3. Registrar contra-gasto (gasto negativo para reducir egresos contables en f_mov)
         contra_gasto = Gasto(
+            concepto=f"Ajuste Dinero de Más {recibo} - {liq.proveedor_nombre}",
             descripcion=f"Ajuste Dinero de Más {recibo} - {liq.proveedor_nombre} [{num_ajuste}]",
-            categoria="Pago Proveedores",
+            categoria="Operativo diario",
+            clasificacion="Operativo diario",
             valor=-monto_sobrante,
             fecha=f_mov,
             hora=h_mov,
-            usuario=u_nom,
-            comprobante=num_ajuste
+            fecha_pago=f"{f_mov} {h_mov}",
+            estado="Pagado",
+            metodo_pago=liq.metodo_pago or "Efectivo",
+            tipo="Proveedor",
+            proveedor=liq.proveedor_nombre,
+            comprobante=num_ajuste,
+            usuario_id=current_user.id,
+            usuario_nombre=u_nom,
+            observacion=req.motivo or "Ajuste por dinero de más"
         )
         db.add(contra_gasto)
 

@@ -3,6 +3,7 @@ from tkinter import ttk, messagebox
 from datetime import datetime, date
 import sys
 import os
+import re
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from client.api_client import api
@@ -88,6 +89,44 @@ def _fmt_cop(valor):
         return f"${float(valor or 0.0):,.0f} COP"
     except Exception:
         return "$0 COP"
+
+
+def parsear_monto_colombiano(txt):
+    if txt is None:
+        return 0.0
+    s = str(txt).strip()
+    if not s:
+        return 0.0
+    s = re.sub(r'[^\d.,\-]', '', s)
+    if not s:
+        return 0.0
+    if '.' in s and ',' in s:
+        if s.rfind(',') > s.rfind('.'):
+            s = s.replace('.', '').replace(',', '.')
+        else:
+            s = s.replace(',', '')
+    elif '.' in s and ',' not in s:
+        partes = s.split('.')
+        if len(partes) > 2:
+            s = s.replace('.', '')
+        elif len(partes) == 2:
+            if len(partes[1]) == 3 and int(partes[0]) > 0:
+                s = partes[0] + partes[1]
+            else:
+                pass
+    elif ',' in s and '.' not in s:
+        partes = s.split(',')
+        if len(partes) > 2:
+            s = s.replace(',', '')
+        elif len(partes) == 2:
+            if len(partes[1]) == 3 and int(partes[0]) > 0:
+                s = partes[0] + partes[1]
+            else:
+                s = partes[0] + '.' + partes[1]
+    try:
+        return round(float(s), 2)
+    except Exception:
+        return 0.0
 
 
 def iniciar_nomina(parent_pid="", parent=None):
@@ -2174,20 +2213,12 @@ def iniciar_nomina(parent_pid="", parent=None):
         btn_save.pack(side="right", padx=6)
 
     def abrir_dialogo_dinero_de_mas():
-        if not messagebox.askyesno(
-            "Dinero de más",
-            "¿Hay dinero de más que deba corregirse?",
-            parent=ventana
-        ):
-            return
-
         sel_hist = tree_hist_prov.selection()
-        liq_target = None
-
+        sel_target = None
         if sel_hist:
             item_id = sel_hist[0]
             if item_id in mapa_historial_prov:
-                liq_target = dict(mapa_historial_prov[item_id])
+                sel_target = dict(mapa_historial_prov[item_id])
             else:
                 vals = tree_hist_prov.item(item_id, "values")
                 recibo = vals[0]
@@ -2200,8 +2231,7 @@ def iniciar_nomina(parent_pid="", parent=None):
                     liq_id = int(clean_recibo)
                 except Exception:
                     liq_id = str(recibo)
-
-                liq_target = {
+                sel_target = {
                     "id": liq_id,
                     "numero_recibo": recibo,
                     "fecha": fecha_liq,
@@ -2209,73 +2239,40 @@ def iniciar_nomina(parent_pid="", parent=None):
                     "monto_str": monto_str,
                     "estado": estado
                 }
-        else:
-            datos_prov = obtener_datos_proveedor_seleccionado()
-            if datos_prov:
-                prov_id = datos_prov["id"]
-                prov_nom = datos_prov["nombre"]
-                hist_prov = obtener_historial_liquidaciones_proveedor(proveedor_id=prov_id)
-                liqs_validas = [
-                    l for l in hist_prov
-                    if l.get("estado") != "Revertida" and "Revertid" not in str(l.get("estado", ""))
-                ]
-                if not liqs_validas:
-                    messagebox.showinfo(
-                        "Sin liquidaciones",
-                        f"El proveedor '{prov_nom}' no tiene liquidaciones activas registradas para corregir.",
-                        parent=ventana
-                    )
-                    return
-                liq_target = dict(liqs_validas[0])
-            else:
-                messagebox.showwarning(
-                    "Selección requerida",
-                    "Por favor seleccione una liquidación en la tabla de Historial o un proveedor en la lista para registrar el dinero de más.",
-                    parent=ventana
-                )
-                return
 
-        recibo_real = liq_target.get("numero_recibo") or f"LP-{liq_target.get('id', 0):04d}"
-        estado = str(liq_target.get("estado", "Aplicado"))
-        if "Revertid" in estado or "Anulad" in estado:
-            messagebox.showwarning(
-                "No ajustable",
-                f"La liquidación {recibo_real} está anulada o revertida y no puede ajustarse.",
-                parent=ventana
-            )
-            return
+        datos_prov = obtener_datos_proveedor_seleccionado()
+        prov_id = datos_prov["id"] if datos_prov else (sel_target.get("proveedor_id") if sel_target else None)
 
-        prov_nom_real = liq_target.get("proveedor_nombre") or "Proveedor"
-        prov_id_real = liq_target.get("proveedor_id")
-        liq_id_real = liq_target.get("id")
-        monto_pagado_orig = float(liq_target.get("monto_liquidado") or liq_target.get("monto_pagado") or 0.0)
-        dinero_previo = float(liq_target.get("dinero_de_mas") or 0.0)
-        limite_ajustable = max(0.0, round(monto_pagado_orig - dinero_previo, 2))
-        fecha_orig = str(liq_target.get("fecha") or liq_target.get("fecha_pago") or "")
-        hora_orig = str(liq_target.get("hora") or "")
-        metodo_liq = str(liq_target.get("metodo_pago") or "Efectivo")
+        # Obtener historial de liquidaciones válidas
+        hist_prov = obtener_historial_liquidaciones_proveedor(proveedor_id=prov_id)
+        liqs_validas = [
+            dict(l) for l in hist_prov
+            if "Revertid" not in str(l.get("estado", "")) and "Anulad" not in str(l.get("estado", ""))
+        ]
 
-        # Intentar enriquecer o verificar con búsqueda flexible local si existe
-        row_flexible = buscar_liquidacion_proveedor_flexible(
-            identificador=liq_id_real or recibo_real,
-            proveedor_id=prov_id_real,
-            proveedor_nombre=prov_nom_real,
-            monto=monto_pagado_orig,
-            fecha=fecha_orig
-        )
-        if row_flexible:
-            liq_id_real = row_flexible.get("id", liq_id_real)
-            recibo_real = row_flexible.get("numero_recibo", recibo_real)
-            monto_pagado_orig = float(row_flexible.get("monto_liquidado", monto_pagado_orig))
-            dinero_previo = float(row_flexible.get("dinero_de_mas", dinero_previo))
-            limite_ajustable = max(0.0, round(monto_pagado_orig - dinero_previo, 2))
-            fecha_orig = row_flexible.get("fecha", fecha_orig)
-            metodo_liq = row_flexible.get("metodo_pago", metodo_liq)
+        # Si el usuario seleccionó un registro de la tabla pero no está en liqs_validas, insertarlo al inicio
+        if sel_target:
+            match_found = False
+            sel_recibo = sel_target.get("numero_recibo") or f"LP-{sel_target.get('id', 0):04d}"
+            for lv in liqs_validas:
+                r_num = lv.get("numero_recibo") or f"LP-{lv.get('id', 0):04d}"
+                if r_num == sel_recibo or str(lv.get("id")) == str(sel_target.get("id")):
+                    match_found = True
+                    break
+            if not match_found:
+                liqs_validas.insert(0, sel_target)
 
-        if limite_ajustable <= 0.0:
+        if not liqs_validas:
+            all_hist = obtener_historial_liquidaciones_proveedor()
+            liqs_validas = [
+                dict(l) for l in all_hist
+                if "Revertid" not in str(l.get("estado", "")) and "Anulad" not in str(l.get("estado", ""))
+            ]
+
+        if not liqs_validas:
             messagebox.showinfo(
-                "Sin saldo corregible",
-                f"La liquidación {recibo_real} ya ha sido ajustada en su totalidad por dinero de más ($0 COP restantes corregibles).",
+                "Sin liquidaciones",
+                "No se encontraron liquidaciones activas registradas para corregir.",
                 parent=ventana
             )
             return
@@ -2286,7 +2283,7 @@ def iniciar_nomina(parent_pid="", parent=None):
         dlg_mas.transient(ventana)
         dlg_mas.grab_set()
         dlg_mas.configure(bg=t["bg_app"])
-        calcular_geometria_segura(dlg_mas, 520, 520, min_w=480, min_h=460)
+        calcular_geometria_segura(dlg_mas, 540, 560, min_w=500, min_h=500)
 
         f_hdr = tk.Frame(dlg_mas, bg="#D97706", padx=16, pady=12)
         f_hdr.pack(fill="x")
@@ -2294,24 +2291,50 @@ def iniciar_nomina(parent_pid="", parent=None):
             f_hdr, text="💰 CORRECCIÓN POR DINERO DE MÁS",
             font=("Segoe UI", 12, "bold"), fg="white", bg="#D97706"
         ).pack(anchor="w")
-        tk.Label(
-            f_hdr, text=f"Recibo: {recibo_real} | Proveedor: {prov_nom_real}",
+        lbl_sub_hdr = tk.Label(
+            f_hdr, text="",
             font=("Segoe UI", 10), fg="#FEF3C7", bg="#D97706"
-        ).pack(anchor="w", pady=(2, 0))
+        )
+        lbl_sub_hdr.pack(anchor="w", pady=(2, 0))
 
         b_mas = tk.Frame(dlg_mas, bg=t["bg_app"], padx=20, pady=14)
         b_mas.pack(fill="both", expand=True)
 
+        # 1. Selector de Liquidación
+        f_sel_liq = tk.Frame(b_mas, bg=t["bg_app"])
+        f_sel_liq.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            f_sel_liq, text="Liquidación a Corregir:",
+            font=("Segoe UI", 10, "bold"), bg=t["bg_app"], fg=t["text_primary"]
+        ).pack(anchor="w", pady=(0, 2))
+
+        opciones_combo = []
+        for l in liqs_validas:
+            r_str = l.get("numero_recibo") or f"LP-{l.get('id', 0):04d}"
+            p_nom = l.get("proveedor_nombre") or "Proveedor"
+            f_str = l.get("fecha") or l.get("fecha_pago") or ""
+            m_val = float(l.get("monto_liquidado") or l.get("monto_pagado") or 0.0)
+            d_mas = float(l.get("dinero_de_mas") or 0.0)
+            disp = max(0.0, round(m_val - d_mas, 2))
+            opciones_combo.append(f"{r_str} | {p_nom} | {f_str} | {_fmt_cop(m_val)} (Disp: {_fmt_cop(disp)})")
+
+        combo_liqs = ttk.Combobox(f_sel_liq, state="readonly", values=opciones_combo, font=("Segoe UI", 10))
+        combo_liqs.pack(fill="x")
+
+        # 2. Tarjeta con detalles de la liquidación seleccionada
         f_card = tk.Frame(b_mas, bg=t["bg_surface"], bd=1, relief="ridge", padx=12, pady=10)
-        f_card.pack(fill="x", pady=(0, 14))
+        f_card.pack(fill="x", pady=(0, 12))
 
-        tk.Label(f_card, text=f"Monto Liquidado Original: {_fmt_cop(monto_pagado_orig)}", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(anchor="w")
-        if dinero_previo > 0:
-            tk.Label(f_card, text=f"Dinero de Más Corregido Anteriormente: {_fmt_cop(dinero_previo)}", font=("Segoe UI", 9), bg=t["bg_surface"], fg="#D97706").pack(anchor="w")
-        tk.Label(f_card, text=f"Máximo Dinero de Más Corregible: {_fmt_cop(limite_ajustable)}", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["danger"]).pack(anchor="w", pady=(2, 0))
-        tk.Label(f_card, text=f"Método de Pago: {metodo_liq} | Fecha Movimiento: {fecha_orig}", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_secondary"]).pack(anchor="w")
+        lbl_card_orig = tk.Label(f_card, text="", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["text_primary"])
+        lbl_card_orig.pack(anchor="w")
+        lbl_card_prev = tk.Label(f_card, text="", font=("Segoe UI", 9), bg=t["bg_surface"], fg="#D97706")
+        lbl_card_prev.pack(anchor="w")
+        lbl_card_lim = tk.Label(f_card, text="", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["danger"])
+        lbl_card_lim.pack(anchor="w", pady=(2, 0))
+        lbl_card_info = tk.Label(f_card, text="", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_secondary"])
+        lbl_card_info.pack(anchor="w")
 
-        # Pregunta: ¿Cuánto dinero hay de más?
+        # 3. Pregunta: ¿Cuánto dinero hay de más?
         tk.Label(
             b_mas, text="¿Cuánto dinero hay de más?",
             font=("Segoe UI", 12, "bold"), bg=t["bg_app"], fg="#D97706"
@@ -2322,28 +2345,12 @@ def iniciar_nomina(parent_pid="", parent=None):
         e_monto_mas.focus()
 
         lbl_mas_preview = tk.Label(
-            b_mas, text=f"Ingrese el valor exacto sobrante (máx: {_fmt_cop(limite_ajustable)})",
+            b_mas, text="",
             font=("Segoe UI", 9, "italic"), bg=t["bg_app"], fg=t["text_secondary"]
         )
         lbl_mas_preview.pack(anchor="w", pady=(0, 10))
 
-        def on_monto_mas_change(*args):
-            txt = e_monto_mas.get().strip().replace("$", "").replace(",", "")
-            try:
-                v = float(txt or 0.0)
-                if v <= 0:
-                    lbl_mas_preview.config(text="⚠️ Ingrese un valor mayor a $0", fg=t["danger"])
-                elif v > limite_ajustable:
-                    lbl_mas_preview.config(text=f"⚠️ Supera el límite corregible ({_fmt_cop(limite_ajustable)})", fg=t["danger"])
-                else:
-                    restante_neto = max(0.0, limite_ajustable - v)
-                    lbl_mas_preview.config(text=f"Monto neto final de la liquidación: {_fmt_cop(restante_neto)}", fg=t["success"])
-            except Exception:
-                lbl_mas_preview.config(text="⚠️ Monto no válido", fg=t["danger"])
-
-        e_monto_mas.bind("<KeyRelease>", on_monto_mas_change)
-
-        # Motivo obligatorio
+        # 4. Motivo obligatorio
         tk.Label(
             b_mas, text="Motivo de la corrección (Requerido):",
             font=("Segoe UI", 10, "bold"), bg=t["bg_app"], fg=t["text_primary"]
@@ -2352,7 +2359,7 @@ def iniciar_nomina(parent_pid="", parent=None):
         e_motivo_mas.insert(0, "Ajuste por dinero de más registrado erróneamente")
         e_motivo_mas.pack(fill="x", pady=(0, 10))
 
-        # Fecha contable de afectación
+        # 5. Fecha contable de afectación
         tk.Label(
             b_mas, text="Fecha del Ajuste Contable (AAAA-MM-DD):",
             font=("Segoe UI", 10, "bold"), bg=t["bg_app"], fg=t["text_primary"]
@@ -2361,12 +2368,13 @@ def iniciar_nomina(parent_pid="", parent=None):
         f_row_fmas = tk.Frame(b_mas, bg=t["bg_app"])
         f_row_fmas.pack(fill="x", pady=(0, 10))
 
-        var_f_ajuste = tk.StringVar(value=fecha_orig or datetime.now().strftime("%Y-%m-%d"))
+        var_f_ajuste = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
         e_f_ajuste = ttk.Entry(f_row_fmas, textvariable=var_f_ajuste, font=("Segoe UI", 10), width=14)
         e_f_ajuste.pack(side="left", padx=(0, 6))
 
         def set_fmas_orig():
-            var_f_ajuste.set(fecha_orig)
+            if cur_liq["val"]:
+                var_f_ajuste.set(cur_liq["val"]["fecha_orig"] or datetime.now().strftime("%Y-%m-%d"))
 
         def set_fmas_hoy():
             var_f_ajuste.set(datetime.now().strftime("%Y-%m-%d"))
@@ -2374,30 +2382,106 @@ def iniciar_nomina(parent_pid="", parent=None):
         tk.Button(f_row_fmas, text="Fecha Liquidación", command=set_fmas_orig, font=("Segoe UI", 8), bg=t["bg_surface"], relief="groove", padx=6, pady=1).pack(side="left", padx=2)
         tk.Button(f_row_fmas, text="Hoy", command=set_fmas_hoy, font=("Segoe UI", 8), bg=t["bg_surface"], relief="groove", padx=6, pady=1).pack(side="left", padx=2)
 
+        cur_liq = {"val": None}
+
+        def on_monto_mas_change(*args):
+            v = parsear_monto_colombiano(e_monto_mas.get())
+            lim = cur_liq["val"]["limite_ajustable"] if cur_liq["val"] else 0.0
+            if v <= 0:
+                lbl_mas_preview.config(text=f"Ingrese el valor exacto sobrante (máx: {_fmt_cop(lim)})", fg=t["text_secondary"])
+            elif v > lim:
+                lbl_mas_preview.config(text=f"⚠️ Supera el límite corregible ({_fmt_cop(lim)})", fg=t["danger"])
+            else:
+                restante_neto = max(0.0, lim - v)
+                lbl_mas_preview.config(text=f"Monto neto final de la liquidación: {_fmt_cop(restante_neto)}", fg=t["success"])
+
+        e_monto_mas.bind("<KeyRelease>", on_monto_mas_change)
+
+        def actualizar_datos_liq(event=None):
+            idx = combo_liqs.current()
+            if idx < 0 or idx >= len(liqs_validas):
+                idx = 0
+            target = dict(liqs_validas[idx])
+            rec_r = target.get("numero_recibo") or f"LP-{target.get('id', 0):04d}"
+            p_nom = target.get("proveedor_nombre") or "Proveedor"
+            p_id = target.get("proveedor_id")
+            l_id = target.get("id")
+            m_orig = float(target.get("monto_liquidado") or target.get("monto_pagado") or 0.0)
+            d_prev = float(target.get("dinero_de_mas") or 0.0)
+            f_orig = str(target.get("fecha") or target.get("fecha_pago") or "")
+            metodo = str(target.get("metodo_pago") or "Efectivo")
+
+            row_flex = buscar_liquidacion_proveedor_flexible(
+                identificador=l_id or rec_r,
+                proveedor_id=p_id,
+                proveedor_nombre=p_nom,
+                monto=m_orig,
+                fecha=f_orig
+            )
+            if row_flex:
+                l_id = row_flex.get("id", l_id)
+                rec_r = row_flex.get("numero_recibo", rec_r)
+                m_orig = float(row_flex.get("monto_liquidado", m_orig))
+                d_prev = float(row_flex.get("dinero_de_mas", d_prev))
+                f_orig = str(row_flex.get("fecha", f_orig))
+                metodo = str(row_flex.get("metodo_pago", metodo))
+
+            lim_aj = max(0.0, round(m_orig - d_prev, 2))
+            cur_liq["val"] = {
+                "id": l_id,
+                "recibo": rec_r,
+                "proveedor_id": p_id,
+                "proveedor_nombre": p_nom,
+                "monto_orig": m_orig,
+                "dinero_previo": d_prev,
+                "limite_ajustable": lim_aj,
+                "fecha_orig": f_orig,
+                "metodo": metodo
+            }
+
+            lbl_sub_hdr.config(text=f"Recibo: {rec_r} | Proveedor: {p_nom}")
+            lbl_card_orig.config(text=f"Monto Liquidado Original: {_fmt_cop(m_orig)}")
+            if d_prev > 0:
+                lbl_card_prev.config(text=f"Dinero de Más Corregido Anteriormente: {_fmt_cop(d_prev)}")
+            else:
+                lbl_card_prev.config(text="")
+            lbl_card_lim.config(text=f"Máximo Dinero de Más Corregible: {_fmt_cop(lim_aj)}")
+            lbl_card_info.config(text=f"Método de Pago: {metodo} | Fecha Movimiento: {f_orig}")
+            var_f_ajuste.set(f_orig or datetime.now().strftime("%Y-%m-%d"))
+            on_monto_mas_change()
+
+        # Preseleccionar en combobox
+        pre_idx = 0
+        if sel_target:
+            target_match = sel_target.get("numero_recibo") or f"LP-{sel_target.get('id', 0):04d}"
+            for i_opt, opt_l in enumerate(liqs_validas):
+                cand = opt_l.get("numero_recibo") or f"LP-{opt_l.get('id', 0):04d}"
+                if cand == target_match or str(opt_l.get("id")) == str(sel_target.get("id")):
+                    pre_idx = i_opt
+                    break
+        combo_liqs.current(pre_idx)
+        combo_liqs.bind("<<ComboboxSelected>>", actualizar_datos_liq)
+        actualizar_datos_liq()
+
         # Botones
         f_actions_mas = tk.Frame(dlg_mas, bg=t["bg_surface"], padx=16, pady=12)
         f_actions_mas.pack(fill="x", side="bottom")
 
         def aplicar_dinero_de_mas():
-            txt_val = e_monto_mas.get().strip().replace("$", "").replace(",", "")
-            if not txt_val:
-                messagebox.showerror("Error", "Debe ingresar el monto de dinero de más.", parent=dlg_mas)
-                return
-
-            try:
-                monto_val = float(txt_val)
-            except ValueError:
-                messagebox.showerror("Error", "El monto ingresado debe ser un número válido.", parent=dlg_mas)
-                return
-
+            monto_val = parsear_monto_colombiano(e_monto_mas.get())
             if monto_val <= 0:
-                messagebox.showerror("Error", "El monto de dinero de más debe ser estrictamente mayor a 0.", parent=dlg_mas)
+                messagebox.showerror("Error", "Debe ingresar un monto válido de dinero de más mayor a 0.", parent=dlg_mas)
                 return
 
-            if monto_val > limite_ajustable:
+            c_info = cur_liq["val"]
+            if not c_info:
+                messagebox.showerror("Error", "No se ha seleccionado una liquidación válida.", parent=dlg_mas)
+                return
+
+            if monto_val > c_info["limite_ajustable"]:
                 messagebox.showerror(
                     "Error",
-                    f"El monto no puede superar el límite disponible ({_fmt_cop(limite_ajustable)}).",
+                    f"El monto no puede superar el límite disponible ({_fmt_cop(c_info['limite_ajustable'])}).",
                     parent=dlg_mas
                 )
                 return
@@ -2411,6 +2495,11 @@ def iniciar_nomina(parent_pid="", parent=None):
             if not f_ajuste_val:
                 messagebox.showerror("Error", "La fecha del ajuste contable no es válida.", parent=dlg_mas)
                 return
+
+            recibo_real = c_info["recibo"]
+            prov_nom_real = c_info["proveedor_nombre"]
+            prov_id_real = c_info["proveedor_id"]
+            liq_id_real = c_info["id"]
 
             msg_confirm_final = (
                 f"¿Confirmar corrección de DINERO DE MÁS por {_fmt_cop(monto_val)}?\n\n"

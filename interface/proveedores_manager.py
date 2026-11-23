@@ -1309,7 +1309,18 @@ def obtener_historial_liquidaciones_proveedor(
             conn.close()
 
 
-def _sincronizar_liquidacion_local_sqlite(cur, proveedor_id: int, monto_flt: float, metodo_pago: str, referencia: str, usuario: str, observaciones: str, numero_recibo: str):
+def _sincronizar_liquidacion_local_sqlite(
+    cur,
+    proveedor_id: int,
+    monto_flt: float,
+    metodo_pago: str,
+    referencia: str,
+    usuario: str,
+    observaciones: str,
+    numero_recibo: str,
+    fecha: Optional[str] = None,
+    hora: Optional[str] = None
+):
     """Aplica el impacto de una liquidación procesada en servidor dentro de la base de datos local SQLite."""
     try:
         cur.execute("SELECT id, nombre, COALESCE(saldo_acumulado, 0.0) FROM proveedores WHERE id = ?", (proveedor_id,))
@@ -1337,17 +1348,71 @@ def _sincronizar_liquidacion_local_sqlite(cur, proveedor_id: int, monto_flt: flo
             remanente = round(remanente - ab, 2)
 
         ahora = datetime.now()
-        f_s = ahora.strftime("%Y-%m-%d")
-        h_s = ahora.strftime("%H:%M:%S")
-        m_a = ahora.strftime("%m-%Y")
+        f_s = (normalizar_fecha(fecha) if fecha else None) or ahora.strftime("%Y-%m-%d")
+        h_s = (normalizar_hora(hora) if hora else None) or ahora.strftime("%H:%M:%S")
+        m_a = f"{f_s[5:7]}-{f_s[:4]}"
+        fecha_reg = ahora.strftime("%Y-%m-%d %H:%M:%S")
 
-        cur.execute("""
-            INSERT OR IGNORE INTO liquidaciones_proveedores (
-                numero_recibo, proveedor_id, proveedor_nombre, monto_liquidado,
-                saldo_anterior, saldo_restante, tipo_pago, metodo_pago, referencia,
-                fecha, hora, mes_anio, usuario, observaciones, estado
-            ) VALUES (?, ?, ?, ?, 0.0, 0.0, 'Total', ?, ?, ?, ?, ?, ?, ?, 'Aplicada')
-        """, (numero_recibo, proveedor_id, prov_nom, monto_flt, metodo_pago, referencia, f_s, h_s, m_a, usuario, observaciones))
+        cur.execute("PRAGMA table_info(liquidaciones_proveedores)")
+        cols_lp = {r[1] for r in cur.fetchall()}
+
+        cols_ins = [
+            "numero_recibo", "proveedor_id", "proveedor_nombre", "monto_liquidado",
+            "saldo_anterior", "saldo_restante", "tipo_pago", "metodo_pago", "referencia",
+            "fecha", "hora", "mes_anio", "usuario", "observaciones", "estado"
+        ]
+        vals_ins = [
+            numero_recibo, proveedor_id, prov_nom, monto_flt,
+            0.0, 0.0, "Total", metodo_pago, referencia,
+            f_s, h_s, m_a, usuario, observaciones, "Aplicada"
+        ]
+        if "fecha_registro" in cols_lp:
+            cols_ins.append("fecha_registro")
+            vals_ins.append(fecha_reg)
+        if "dinero_de_mas" in cols_lp:
+            cols_ins.append("dinero_de_mas")
+            vals_ins.append(0.0)
+        if "monto_ajustado" in cols_lp:
+            cols_ins.append("monto_ajustado")
+            vals_ins.append(monto_flt)
+
+        placeholders = ", ".join(["?"] * len(cols_ins))
+        cur.execute(f"INSERT OR IGNORE INTO liquidaciones_proveedores ({', '.join(cols_ins)}) VALUES ({placeholders})", vals_ins)
+
+        # Sincronizar gasto local con la fecha del movimiento
+        try:
+            cur.execute("""
+                INSERT OR IGNORE INTO gastos (
+                    concepto, valor, fecha, hora, metodo_pago, categoria, clasificacion,
+                    descripcion, estado, usuario, proveedor, comprobante, observaciones,
+                    fecha_pago, fecha_registro
+                ) VALUES (?, ?, ?, ?, ?, 'Proveedores', 'Cuentas por Pagar', ?, 'Pagado', ?, ?, ?, ?, ?, ?)
+            """, (
+                f"Pago a Proveedor - {prov_nom}",
+                monto_flt, f_s, h_s, metodo_pago,
+                f"Liquidación de servicios/comisiones",
+                usuario, prov_nom, numero_recibo,
+                observaciones or referencia,
+                f"{f_s} {h_s}", fecha_reg
+            ))
+        except Exception as e_g:
+            pass
+
+        # Sincronizar movimientos financieros con la fecha del movimiento
+        try:
+            cuenta_af = "CAJA_FISICA" if metodo_pago == "Efectivo" else "BANCO_TRANSFERENCIA"
+            cur.execute("""
+                INSERT OR IGNORE INTO movimientos_financieros (
+                    fecha, hora, tipo, concepto, monto, metodo_pago,
+                    cuenta_afectada, usuario, referencia_origen, estado, observaciones
+                ) VALUES (?, ?, 'PAGO_PROVEEDOR', ?, ?, ?, ?, ?, ?, 'Activo', ?)
+            """, (
+                f_s, h_s, f"Pago a Proveedor {prov_nom} ({numero_recibo})",
+                monto_flt, metodo_pago, cuenta_af, usuario,
+                numero_recibo, f"Liquidación: {numero_recibo}. {observaciones}"
+            ))
+        except Exception as e_mf:
+            pass
 
         # Actualizar inmediatamente acumulados en la tabla proveedores de SQLite
         cur.execute("SELECT COALESCE(saldo_acumulado, 0.0), COALESCE(total_pagado, 0.0) FROM proveedores WHERE id = ?", (proveedor_id,))
@@ -1418,6 +1483,11 @@ def liquidar_proveedor_db(
     except Exception:
         saldo_esperado_arg = 0.0
 
+    f_mov_raw = kwargs.get("fecha_movimiento") or kwargs.get("fecha") or kwargs.get("fecha_operativa") or kwargs.get("fecha_real")
+    h_mov_raw = kwargs.get("hora_movimiento") or kwargs.get("hora") or kwargs.get("hora_operativa") or kwargs.get("hora_real")
+    f_mov_norm = normalizar_fecha(f_mov_raw) if f_mov_raw else None
+    h_mov_norm = normalizar_hora(h_mov_raw) if h_mov_raw else None
+
     if conn is None and api is not None:
         import uuid
         idem_prov = kwargs.get("idempotency_key") or f"LIQ-PROV-{proveedor_id}-{uuid.uuid4()}"
@@ -1439,6 +1509,10 @@ def liquidar_proveedor_db(
                         "proveedor_nombre": prov_nom_arg,
                         "documento_nit": doc_nit_arg,
                         "idempotency_key": idem_prov,
+                        "fecha": f_mov_norm,
+                        "hora": h_mov_norm,
+                        "fecha_movimiento": f_mov_norm,
+                        "hora_movimiento": h_mov_norm,
                     },
                     timeout=7.0,
                 )
@@ -1454,11 +1528,14 @@ def liquidar_proveedor_db(
                     try:
                         conn_loc = conectar_db()
                         cur_loc = conn_loc.cursor()
-                        _sincronizar_liquidacion_local_sqlite(cur_loc, proveedor_id, monto_real_api, metodo_pago, referencia, usuario, observaciones, recibo_sv)
+                        _sincronizar_liquidacion_local_sqlite(
+                            cur_loc, proveedor_id, monto_real_api, metodo_pago, referencia, usuario, observaciones, recibo_sv,
+                            fecha=f_mov_norm, hora=h_mov_norm
+                        )
                         conn_loc.commit()
                         conn_loc.close()
-                    except Exception:
-                        pass
+                    except Exception as e_sync_loc:
+                        print(f"Aviso replicando liquidación en SQLite local: {e_sync_loc}")
                     return res_api
                 else:
                     try:
@@ -1862,13 +1939,28 @@ def buscar_liquidacion_proveedor_flexible(
     conn: Optional[sqlite3.Connection] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    Busca una liquidación de proveedor de forma robusta y flexible en SQLite:
-    1. Por ID entero directo (si el identificador es entero o cadena numérica).
-    2. Por coincidencia exacta de número de recibo (LP-XXXX, LQ-XXXXX, LIQ-PROV-XXXX, etc.).
-    3. Normalizando prefijos y extrayendo dígitos (ej: 'LP-0007' busca también 'LQ-00007', id=7, '%0007').
-    4. Por contexto operacional (proveedor + monto aproximado + fecha).
-    5. Fallback a historial_liquidaciones para registros históricos previos.
+    Busca una liquidación de proveedor de forma robusta y flexible:
+    1. Si api está en línea y no se pasa conn, intenta consultar al servidor.
+    2. Por ID entero directo en SQLite.
+    3. Por coincidencia exacta de número de recibo (LP-XXXX, LQ-XXXXX, LIQ-PROV-XXXX, etc.).
+    4. Normalizando prefijos y extrayendo dígitos (ej: 'LP-0007' busca también 'LQ-00007', id=7, '%0007').
+    5. Por contexto operacional (proveedor + monto aproximado + fecha).
+    6. Fallback a historial_liquidaciones para registros históricos previos.
     """
+    id_str = str(identificador or "").strip()
+
+    # 1. Intento por API si está disponible
+    if conn is None and api is not None:
+        try:
+            if api.esta_disponible() and id_str:
+                resp = api.get(f"/proveedores/liquidaciones/{id_str}", timeout=4.0)
+                if resp.status_code == 200:
+                    d_api = resp.json()
+                    if d_api and isinstance(d_api, dict):
+                        return d_api
+        except Exception:
+            pass
+
     cerrar_conn = False
     if conn is None:
         conn = conectar_db()
@@ -1879,15 +1971,22 @@ def buscar_liquidacion_proveedor_flexible(
 
     try:
         cur = conn.cursor()
-        cols_sql = """
-            SELECT id, numero_recibo, proveedor_id, proveedor_nombre, monto_liquidado,
+        cur.execute("PRAGMA table_info(liquidaciones_proveedores)")
+        cols_lp = {c[1] for c in cur.fetchall()}
+        col_recibo = "numero_recibo" if "numero_recibo" in cols_lp else "numero_liquidacion"
+        col_monto = "monto_liquidado" if "monto_liquidado" in cols_lp else "monto_pagado"
+        col_dinero = "COALESCE(dinero_de_mas, 0.0)" if "dinero_de_mas" in cols_lp else "0.0"
+        col_ajustado = f"COALESCE(monto_ajustado, {col_monto})" if "monto_ajustado" in cols_lp else col_monto
+        col_fecha_reg = "COALESCE(fecha_registro, created_at, fecha)" if "fecha_registro" in cols_lp else ("created_at" if "created_at" in cols_lp else "fecha")
+
+        cols_sql = f"""
+            SELECT id, {col_recibo} as numero_recibo, proveedor_id, proveedor_nombre, {col_monto} as monto_liquidado,
                    fecha, hora, metodo_pago, estado,
-                   COALESCE(dinero_de_mas, 0.0) as dinero_de_mas,
-                   COALESCE(monto_ajustado, monto_liquidado) as monto_ajustado,
-                   COALESCE(fecha_registro, created_at, fecha) as fecha_registro
+                   {col_dinero} as dinero_de_mas,
+                   {col_ajustado} as monto_ajustado,
+                   {col_fecha_reg} as fecha_registro
             FROM liquidaciones_proveedores
         """
-        id_str = str(identificador or "").strip()
 
         # 1. Búsqueda directa por ID numérico si es dígito
         if id_str.isdigit():
@@ -1896,9 +1995,9 @@ def buscar_liquidacion_proveedor_flexible(
             if row:
                 return _row_a_dict_liq(row)
 
-        # 2. Coincidencia exacta por número de recibo
+        # 2. Coincidencia exacta por número de recibo / liquidación
         if id_str:
-            cur.execute(f"{cols_sql} WHERE numero_recibo = ?", (id_str,))
+            cur.execute(f"{cols_sql} WHERE {col_recibo} = ?", (id_str,))
             row = cur.fetchone()
             if row:
                 return _row_a_dict_liq(row)
@@ -1917,10 +2016,10 @@ def buscar_liquidacion_proveedor_flexible(
             cur.execute(f"""
                 {cols_sql}
                 WHERE id = ? 
-                   OR numero_recibo = ? 
-                   OR numero_recibo = ? 
-                   OR numero_recibo LIKE ?
-                   OR numero_recibo LIKE ?
+                   OR {col_recibo} = ? 
+                   OR {col_recibo} = ? 
+                   OR {col_recibo} LIKE ?
+                   OR {col_recibo} LIKE ?
                 ORDER BY id DESC LIMIT 1
             """, (n_val, v_lp, v_lq, f"%{d_val}", f"%-{n_val}"))
             row = cur.fetchone()
@@ -1930,7 +2029,7 @@ def buscar_liquidacion_proveedor_flexible(
         # 4. Búsqueda contextual por proveedor y monto
         if (proveedor_id or proveedor_nombre) and monto is not None:
             m_flt = float(monto)
-            filtros = ["ABS(monto_liquidado - ?) < 0.05"]
+            filtros = [f"ABS({col_monto} - ?) < 0.05"]
             p_args = [m_flt]
             if proveedor_id:
                 filtros.append("(proveedor_id = ? OR CAST(proveedor_id AS TEXT) = ?)")
@@ -1941,6 +2040,13 @@ def buscar_liquidacion_proveedor_flexible(
             if fecha:
                 f_c = fecha.strip()[:10]
                 filtros.append("(fecha = ? OR fecha LIKE ?)")
+                p_args.extend([f_c, f"{f_c}%"])
+
+            w_clause = " AND ".join(filtros)
+            cur.execute(f"{cols_sql} WHERE {w_clause} ORDER BY id DESC LIMIT 1", p_args)
+            row = cur.fetchone()
+            if row:
+                return _row_a_dict_liq(row)
                 p_args.extend([f_c, f"{f_c}%"])
 
             w_clause = " AND ".join(filtros)
@@ -2196,16 +2302,23 @@ def _aplicar_cambio_fecha_sqlite(
     cur = conn.cursor()
 
     # 1. Actualizar liquidaciones_proveedores
-    cur.execute("""
-        UPDATE liquidaciones_proveedores
-        SET fecha = ?, hora = ?, mes_anio = ?,
-            observaciones = COALESCE(observaciones, '') || ' | ' || ?
-        WHERE id = ?
-    """, (
-        f_normalizada, h_normalizada, nuevo_mes_anio,
-        f"[Fecha contable cambiada de {fecha_ant} a {f_normalizada} por {usuario}: {motivo}]",
-        id_real
-    ))
+    cur.execute("PRAGMA table_info(liquidaciones_proveedores)")
+    cols_lp = {c[1] for c in cur.fetchall()}
+    obs_txt = f"[Fecha contable cambiada de {fecha_ant} a {f_normalizada} por {usuario}: {motivo}]"
+    if "mes_anio" in cols_lp:
+        cur.execute("""
+            UPDATE liquidaciones_proveedores
+            SET fecha = ?, hora = ?, mes_anio = ?,
+                observaciones = COALESCE(observaciones, '') || ' | ' || ?
+            WHERE id = ?
+        """, (f_normalizada, h_normalizada, nuevo_mes_anio, obs_txt, id_real))
+    else:
+        cur.execute("""
+            UPDATE liquidaciones_proveedores
+            SET fecha = ?, hora = ?,
+                observaciones = COALESCE(observaciones, '') || ' | ' || ?
+            WHERE id = ?
+        """, (f_normalizada, h_normalizada, obs_txt, id_real))
 
     # 2. Actualizar gastos contables (trasladar afectación al nuevo día)
     try:
@@ -2213,12 +2326,13 @@ def _aplicar_cambio_fecha_sqlite(
             UPDATE gastos
             SET fecha = ?, hora = ?, fecha_pago = ?,
                 observaciones = COALESCE(observaciones, '') || ' | ' || ?
-            WHERE (comprobante = ? OR comprobante = ? OR comprobante LIKE ? OR comprobante LIKE ?)
-              AND (proveedor = ? OR proveedor IS NULL OR proveedor = '')
+            WHERE (comprobante = ? OR comprobante = ? OR comprobante = ? OR comprobante LIKE ? OR comprobante LIKE ?)
+               OR (proveedor = ? AND fecha = ? AND ABS(valor - ?) < 0.05)
         """, (
             f_normalizada, h_normalizada, f"{f_normalizada} {h_normalizada}",
             f"[Fecha contable cambiada de {fecha_ant} a {f_normalizada} por {usuario}: {motivo}]",
-            recibo, f"LQ-{id_real:05d}", f"%{recibo}%", f"%{id_real}%", prov_nom
+            recibo, f"LQ-{id_real:05d}", f"LP-{id_real:04d}", f"%{recibo}%", f"%{id_real}%",
+            prov_nom, fecha_ant, monto_flt
         ))
     except Exception as e_g:
         print(f"Aviso actualizando gastos: {e_g}")
@@ -2240,15 +2354,25 @@ def _aplicar_cambio_fecha_sqlite(
             UPDATE movimientos_financieros
             SET fecha = ?, hora = ?,
                 observaciones = COALESCE(observaciones, '') || ' | ' || ?
-            WHERE referencia_origen = ? OR referencia_origen = ?
-        """, (f_normalizada, h_normalizada, f"[Trasladado de {fecha_ant} a {f_normalizada}: {motivo}]", recibo, f"LQ-{id_real:05d}"))
+            WHERE referencia_origen = ? OR referencia_origen = ? OR referencia_origen = ?
+               OR (tipo = 'PAGO_PROVEEDOR' AND fecha = ? AND ABS(monto - ?) < 0.05)
+        """, (
+            f_normalizada, h_normalizada, f"[Trasladado de {fecha_ant} a {f_normalizada}: {motivo}]",
+            recibo, f"LQ-{id_real:05d}", f"LP-{id_real:04d}",
+            fecha_ant, monto_flt
+        ))
 
         cur.execute("""
             UPDATE movimientos_caja
             SET fecha = ?, hora = ?,
                 descripcion = COALESCE(descripcion, '') || ' | ' || ?
-            WHERE referencia_id = ? OR referencia_id = ?
-        """, (f_normalizada, h_normalizada, f"[Trasladado de {fecha_ant} a {f_normalizada}]", recibo, f"LQ-{id_real:05d}"))
+            WHERE referencia_id = ? OR referencia_id = ? OR referencia_id = ?
+               OR (tipo = 'EGRESO' AND fecha = ? AND ABS(monto - ?) < 0.05)
+        """, (
+            f_normalizada, h_normalizada, f"[Trasladado de {fecha_ant} a {f_normalizada}]",
+            recibo, f"LQ-{id_real:05d}", f"LP-{id_real:04d}",
+            fecha_ant, monto_flt
+        ))
     except Exception as e_mov:
         pass
 
@@ -2308,6 +2432,19 @@ def _aplicar_cambio_fecha_sqlite(
             conn=conn
         )
     except Exception as e_sync:
+        pass
+
+    # 8. Verificación estricta de persistencia en base de datos
+    try:
+        cur.execute("SELECT fecha FROM liquidaciones_proveedores WHERE id = ?", (id_real,))
+        row_chk = cur.fetchone()
+        if not row_chk or str(row_chk[0]) != f_normalizada:
+            cur.execute("UPDATE liquidaciones_proveedores SET fecha = ?, hora = ? WHERE id = ? OR numero_recibo = ?", (f_normalizada, h_normalizada, id_real, recibo))
+            cur.execute("SELECT fecha FROM liquidaciones_proveedores WHERE id = ?", (id_real,))
+            row_chk = cur.fetchone()
+            if not row_chk or str(row_chk[0]) != f_normalizada:
+                return {"exito": False, "ok": False, "mensaje": f"No se pudo confirmar la persistencia de la nueva fecha en la liquidación {recibo}."}
+    except Exception as e_vfy:
         pass
 
     return {
@@ -2482,7 +2619,7 @@ def _aplicar_dinero_de_mas_sqlite(
     fecha_registro_ajuste = ahora_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(id) FROM ajustes_liquidaciones_proveedores")
+    cur.execute("SELECT COALESCE(MAX(id), 0) FROM ajustes_liquidaciones_proveedores")
     conteo_aj = cur.fetchone()[0] or 0
     numero_ajuste = f"AJ-SOB-{conteo_aj + 1:05d}"
 

@@ -440,6 +440,64 @@ def _migrar_archivo_sqlite_directo(db_url: str):
                     if c_nom not in cols_vta:
                         _safe_alter_column_direct(cur, f"ALTER TABLE ventas ADD COLUMN {c_nom} {c_def};", f"ventas.{c_nom}")
 
+            # 9d. Liquidaciones proveedores, ajustes por dinero de más y auditoría
+            cur.execute("PRAGMA table_info(liquidaciones_proveedores);")
+            cols_lp = {r[1] for r in cur.fetchall()}
+            if cols_lp:
+                cols_lp_defs = [
+                    ("dinero_de_mas", "REAL DEFAULT 0.0"),
+                    ("monto_ajustado", "REAL DEFAULT 0.0"),
+                    ("fecha_registro", "TEXT"),
+                ]
+                for c_nom, c_def in cols_lp_defs:
+                    if c_nom not in cols_lp:
+                        _safe_alter_column_direct(cur, f"ALTER TABLE liquidaciones_proveedores ADD COLUMN {c_nom} {c_def};", f"liquidaciones_proveedores.{c_nom}")
+                col_m_lp = "monto_pagado" if "monto_pagado" in cols_lp else ("monto_liquidado" if "monto_liquidado" in cols_lp else None)
+                if col_m_lp:
+                    _safe_update_direct(cur, f"UPDATE liquidaciones_proveedores SET monto_ajustado = {col_m_lp} WHERE (monto_ajustado IS NULL OR monto_ajustado = 0.0) AND {col_m_lp} IS NOT NULL;", "liquidaciones_proveedores monto_ajustado")
+                _safe_update_direct(cur, "UPDATE liquidaciones_proveedores SET fecha_registro = datetime('now') WHERE fecha_registro IS NULL;", "liquidaciones_proveedores fecha_registro")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ajustes_liquidaciones_proveedores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    numero_ajuste TEXT UNIQUE NOT NULL,
+                    liquidacion_id INTEGER NOT NULL,
+                    numero_recibo TEXT NOT NULL,
+                    proveedor_id INTEGER NOT NULL,
+                    proveedor_nombre TEXT NOT NULL,
+                    monto_ajuste REAL NOT NULL,
+                    fecha_movimiento TEXT NOT NULL,
+                    hora_movimiento TEXT NOT NULL,
+                    fecha_registro TEXT NOT NULL,
+                    usuario TEXT NOT NULL,
+                    motivo TEXT NOT NULL,
+                    estado TEXT DEFAULT 'Aplicado',
+                    idempotency_key TEXT UNIQUE,
+                    created_at TIMESTAMP
+                );
+            """)
+            _safe_alter_column_direct(cur, "CREATE INDEX IF NOT EXISTS idx_aj_liq_id ON ajustes_liquidaciones_proveedores(liquidacion_id);", "idx_aj_liq_id")
+            _safe_alter_column_direct(cur, "CREATE INDEX IF NOT EXISTS idx_aj_liq_fecha ON ajustes_liquidaciones_proveedores(fecha_movimiento);", "idx_aj_liq_fecha")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS auditoria_liquidaciones (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    liquidacion_id INTEGER NOT NULL,
+                    numero_recibo TEXT NOT NULL,
+                    proveedor_id INTEGER NOT NULL,
+                    proveedor_nombre TEXT NOT NULL,
+                    accion TEXT NOT NULL,
+                    fecha_anterior TEXT,
+                    fecha_nueva TEXT,
+                    monto REAL,
+                    usuario TEXT NOT NULL,
+                    motivo TEXT NOT NULL,
+                    fecha_registro TEXT NOT NULL,
+                    created_at TIMESTAMP
+                );
+            """)
+            _safe_alter_column_direct(cur, "CREATE INDEX IF NOT EXISTS idx_aud_liq_id ON auditoria_liquidaciones(liquidacion_id);", "idx_aud_liq_id")
+
             for t_nom in idem_tablas:
                 cur.execute(f"PRAGMA table_info({t_nom});")
                 t_cols = {r[1] for r in cur.fetchall()}
