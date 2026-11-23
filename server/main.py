@@ -572,7 +572,7 @@ async def pagina_descargas():
     </head>
     <body>
         <div class="card">
-            <h1>🚀 Descargas VmPOS (v4.1.2)</h1>
+            <h1>🚀 Descargas VmPOS (v4.1.3)</h1>
             <p>Selecciona tu sistema operativo para descargar el instalador directo.</p>
             <a class="btn" href="/descargar/windows">🪟 Descargar Instalador Windows (.exe) <span class="badge">Oficial</span></a>
             <a class="btn btn-sec" href="/descargar/windows-portable">📦 Descargar Windows Portátil (.zip) <span class="badge">Portable</span></a>
@@ -587,7 +587,7 @@ async def pagina_descargas():
 @app.get("/descargar/windows")
 async def descargar_windows():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for f_nom in ("VmPOS_Setup_v4.1.2.exe", "VmPOS_Setup_v4.1.0.exe"):
+    for f_nom in ("VmPOS_Setup_v4.1.3.exe", "VmPOS_Setup_v4.1.2.exe", "VmPOS_Setup_v4.1.0.exe"):
         path = os.path.join(root, "dist", f_nom)
         if os.path.exists(path):
             return FileResponse(path, filename=f_nom, media_type="application/vnd.microsoft.portable-executable")

@@ -403,7 +403,7 @@ if os.path.exists(vmpos_dist_dir):
         print(f"[ERROR] Error crítico al comprimir ZIP portable: {e}")
         sys.exit(1)
 
-# Verificar si Inno Setup está disponible para crear el instalador VmPOS_Setup_v4.1.2.exe
+# Verificar si Inno Setup está disponible para crear el instalador VmPOS_Setup_v4.1.3.exe
 iscc_candidates = [
     r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     r"C:\Program Files\Inno Setup 6\ISCC.exe",
@@ -424,7 +424,7 @@ if iscc_bin and os.path.exists(iss_script):
     print(f"\nCompilando instalador Setup con Inno Setup ({iscc_bin})...")
     try:
         subprocess.run([iscc_bin, iss_script], check=True)
-        setup_exe = os.path.join(PROJECT_ROOT, "dist", "VmPOS_Setup_v4.1.2.exe")
+        setup_exe = os.path.join(PROJECT_ROOT, "dist", "VmPOS_Setup_v4.1.3.exe")
         if not os.path.isfile(setup_exe) or os.path.getsize(setup_exe) == 0:
             raise RuntimeError(f"Inno Setup finalizó pero no se encontró {setup_exe} válido.")
         print(f"[OK] Instalador Setup generado con exito en: {setup_exe}!")

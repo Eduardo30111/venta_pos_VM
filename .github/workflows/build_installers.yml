@@ -107,9 +107,9 @@ jobs:
       - name: Verificar artefactos generados en Windows
         shell: pwsh
         run: |
-          if (-not (Test-Path "dist/VmPOS_Setup_v4.1.2.exe")) { throw "Falta dist/VmPOS_Setup_v4.1.2.exe" }
+          if (-not (Test-Path "dist/VmPOS_Setup_v4.1.3.exe")) { throw "Falta dist/VmPOS_Setup_v4.1.3.exe" }
           if (-not (Test-Path "dist/VmPOS_Windows_Portable.zip")) { throw "Falta dist/VmPOS_Windows_Portable.zip" }
-          Get-Item dist/VmPOS_Setup_v4.1.2.exe, dist/VmPOS_Windows_Portable.zip | Select-Object Name, Length
+          Get-Item dist/VmPOS_Setup_v4.1.3.exe, dist/VmPOS_Windows_Portable.zip | Select-Object Name, Length
 
       - name: Subir artefactos de Windows a GitHub Actions
         uses: actions/upload-artifact@v4
@@ -117,7 +117,7 @@ jobs:
           name: VmPOS-Windows-Instalador
           if-no-files-found: error
           path: |
-            dist/VmPOS_Setup_v4.1.2.exe
+            dist/VmPOS_Setup_v4.1.3.exe
             dist/VmPOS_Windows_Portable.zip
 
   publish-release:

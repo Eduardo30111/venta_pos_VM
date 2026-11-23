@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.environ.get("VMPOS_TOKEN_EXPIRE_MINUTES", "43200"))
     APP_NAME: str = "VmPOS"
-    APP_VERSION: str = "4.1.2"
+    APP_VERSION: str = "4.1.3"
     SERVER_PORT: int = OFFICIAL_SERVER_PORT
 
     class Config:
