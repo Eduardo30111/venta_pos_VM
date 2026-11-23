@@ -1,4 +1,5 @@
 import asyncio
+import re
 from datetime import datetime
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -678,16 +679,93 @@ async def liquidar_proveedor(
             raise HTTPException(status_code=409, detail="Conflicto de concurrencia al liquidar proveedor.")
 
 
+async def _buscar_liquidacion_servidor_flexible(db: AsyncSession, id_str: Any) -> Optional[LiquidacionProveedor]:
+    """Busca liquidación en el servidor por ID numérico, número de liquidación o variantes de prefijo."""
+    clean_id = str(id_str or "").strip()
+    if not clean_id:
+        return None
+    # 1. Búsqueda directa por ID entero si es numérico
+    if clean_id.isdigit():
+        res = await db.execute(select(LiquidacionProveedor).where(LiquidacionProveedor.id == int(clean_id)))
+        liq = res.scalars().first()
+        if liq:
+            return liq
+    # 2. Coincidencia exacta por número de liquidación
+    res = await db.execute(select(LiquidacionProveedor).where(LiquidacionProveedor.numero_liquidacion == clean_id))
+    liq = res.scalars().first()
+    if liq:
+        return liq
+    # 3. Normalización de dígitos y variantes LP- / LQ- / LIQ-PROV-
+    digitos = re.findall(r'\d+', clean_id)
+    if digitos:
+        d_val = digitos[-1]
+        try:
+            num_val = int(d_val)
+        except Exception:
+            num_val = 0
+        v_lp = f"LP-{num_val:04d}"
+        v_lq = f"LQ-{num_val:05d}"
+        res = await db.execute(
+            select(LiquidacionProveedor).where(
+                or_(
+                    LiquidacionProveedor.id == num_val,
+                    LiquidacionProveedor.numero_liquidacion == v_lp,
+                    LiquidacionProveedor.numero_liquidacion == v_lq,
+                    LiquidacionProveedor.numero_liquidacion.like(f"%{d_val}%"),
+                    LiquidacionProveedor.numero_liquidacion.like(f"%-{num_val}")
+                )
+            ).order_by(LiquidacionProveedor.id.desc())
+        )
+        liq = res.scalars().first()
+        if liq:
+            return liq
+    return None
+
+
+@router.get("/liquidaciones/{id}")
+async def get_liquidacion_detalle(
+    id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+) -> Dict[str, Any]:
+    liq = await _buscar_liquidacion_servidor_flexible(db, id)
+    if not liq:
+        raise HTTPException(status_code=404, detail="Liquidación no encontrada.")
+    rec_num = f"LP-{liq.id:04d}" if not (liq.numero_liquidacion or "").startswith("LP-") else liq.numero_liquidacion
+    m_val = float(liq.monto_pagado or 0.0)
+    d_mas = float(liq.dinero_de_mas or 0.0)
+    m_aj = float(liq.monto_ajustado or m_val)
+    return {
+        "id": liq.id,
+        "numero_recibo": rec_num,
+        "proveedor_id": liq.proveedor_id,
+        "proveedor_nombre": liq.proveedor_nombre or "",
+        "monto_liquidado": m_val,
+        "monto_pagado": m_val,
+        "dinero_de_mas": d_mas,
+        "monto_ajustado": m_aj,
+        "limite_ajustable": max(0.0, round(m_val - d_mas, 2)),
+        "saldo_anterior": float(liq.saldo_anterior or 0.0),
+        "saldo_restante": float(liq.saldo_restante or 0.0),
+        "metodo_pago": liq.metodo_pago or "Efectivo",
+        "referencia": liq.referencia or "",
+        "fecha": liq.fecha,
+        "hora": liq.hora or "",
+        "usuario": liq.usuario or "",
+        "observaciones": liq.observaciones or "",
+        "estado": liq.estado or "Aplicado"
+    }
+
+
 @router.post("/liquidaciones/{id}/editar-fecha")
 async def editar_fecha_liquidacion(
-    id: int,
+    id: str,
     req: EditarFechaLiquidacionRequest = Body(...),
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(require_admin),
 ) -> Dict[str, Any]:
     async with _LIQUIDACION_PROV_LOCK:
-        res = await db.execute(select(LiquidacionProveedor).where(LiquidacionProveedor.id == id))
-        liq = res.scalars().first()
+        liq = await _buscar_liquidacion_servidor_flexible(db, id)
         if not liq:
             raise HTTPException(status_code=404, detail="Liquidación no encontrada.")
 
@@ -767,14 +845,13 @@ async def editar_fecha_liquidacion(
 
 @router.post("/liquidaciones/{id}/dinero-de-mas")
 async def registrar_dinero_de_mas(
-    id: int,
+    id: str,
     req: DineroDeMasRequest = Body(...),
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(require_admin),
 ) -> Dict[str, Any]:
     async with _LIQUIDACION_PROV_LOCK:
-        res = await db.execute(select(LiquidacionProveedor).where(LiquidacionProveedor.id == id))
-        liq = res.scalars().first()
+        liq = await _buscar_liquidacion_servidor_flexible(db, id)
         if not liq:
             raise HTTPException(status_code=404, detail="Liquidación no encontrada.")
 
@@ -918,13 +995,21 @@ async def registrar_dinero_de_mas(
 
 @router.get("/liquidaciones/{id}/ajustes")
 async def get_ajustes_liquidacion(
-    id: int,
+    id: str,
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ) -> List[Dict[str, Any]]:
+    liq = await _buscar_liquidacion_servidor_flexible(db, id)
+    target_id = liq.id if liq else (int(id) if str(id).isdigit() else 0)
     res = await db.execute(
         select(AjusteLiquidacionProveedor)
-        .where(AjusteLiquidacionProveedor.liquidacion_id == id)
+        .where(
+            or_(
+                AjusteLiquidacionProveedor.liquidacion_id == target_id,
+                AjusteLiquidacionProveedor.numero_recibo == str(id),
+                AjusteLiquidacionProveedor.numero_recibo == (f"LQ-{target_id:05d}" if target_id else "")
+            )
+        )
         .order_by(AjusteLiquidacionProveedor.id.desc())
     )
     return [

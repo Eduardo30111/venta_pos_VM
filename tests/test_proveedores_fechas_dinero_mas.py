@@ -20,6 +20,7 @@ from interface.proveedores_manager import (
     registrar_dinero_de_mas_proveedor_db,
     obtener_historial_liquidaciones_proveedor,
     obtener_historial_ajustes_proveedor,
+    buscar_liquidacion_proveedor_flexible,
     normalizar_fecha,
     normalizar_hora
 )
@@ -411,6 +412,188 @@ class TestProveedoresFechasDineroMas(unittest.TestCase):
         """, (liq_id,))
         self.assertIsNotNone(aud)
         self.assertEqual(aud[1], "AuditorPOS")
+
+    def test_buscar_liquidacion_flexible_variantes_prefijo(self):
+        """Verifica que buscar_liquidacion_proveedor_flexible resuelva por ID numérico, prefijos LP/LQ y contexto."""
+        res_liq = liquidar_proveedor_db(
+            proveedor_id=self.prov_id,
+            proveedor_nombre=self.prov_nombre,
+            saldo_pendiente=150000.0,
+            saldo_actual=150000.0,
+            monto_abono=25000.0,
+            metodo_pago="Efectivo",
+            usuario_nombre="AdminTest",
+            fecha_movimiento="2026-11-23"
+        )
+        self.assertTrue(res_liq.get("exito"))
+        liq_id = res_liq["id"]
+        recibo = res_liq["numero_recibo"]  # ej: LQ-0000X o LP-000X
+
+        # 1. Búsqueda por ID entero
+        f1 = buscar_liquidacion_proveedor_flexible(liq_id)
+        self.assertIsNotNone(f1)
+        self.assertEqual(f1["id"], liq_id)
+
+        # 2. Búsqueda por string de ID
+        f2 = buscar_liquidacion_proveedor_flexible(str(liq_id))
+        self.assertIsNotNone(f2)
+        self.assertEqual(f2["id"], liq_id)
+
+        # 3. Búsqueda por recibo exacto
+        f3 = buscar_liquidacion_proveedor_flexible(recibo)
+        self.assertIsNotNone(f3)
+        self.assertEqual(f3["id"], liq_id)
+
+        # 4. Búsqueda por variante LP / LQ con ceros a la izquierda
+        variante_lp = f"LP-{liq_id:04d}"
+        f4 = buscar_liquidacion_proveedor_flexible(variante_lp)
+        self.assertIsNotNone(f4, f"Debe resolver la liquidación usando el formato {variante_lp}")
+        self.assertEqual(f4["id"], liq_id)
+
+        variante_lq = f"LQ-{liq_id:05d}"
+        f5 = buscar_liquidacion_proveedor_flexible(variante_lq)
+        self.assertIsNotNone(f5, f"Debe resolver la liquidación usando el formato {variante_lq}")
+        self.assertEqual(f5["id"], liq_id)
+
+        # 5. Búsqueda contextual (proveedor + monto)
+        f6 = buscar_liquidacion_proveedor_flexible(
+            identificador=None,
+            proveedor_id=self.prov_id,
+            proveedor_nombre=self.prov_nombre,
+            monto=25000.0,
+            fecha="2026-11-23"
+        )
+        self.assertIsNotNone(f6)
+        self.assertEqual(f6["id"], liq_id)
+
+    def test_actualizar_fecha_usando_prefijo_lp(self):
+        """Verifica que actualizar_fecha_liquidacion_proveedor_db funcione al recibir identificador 'LP-XXXX'."""
+        res_liq = liquidar_proveedor_db(
+            proveedor_id=self.prov_id,
+            proveedor_nombre=self.prov_nombre,
+            saldo_pendiente=125000.0,
+            saldo_actual=125000.0,
+            monto_abono=20000.0,
+            metodo_pago="Efectivo",
+            usuario_nombre="AdminTest",
+            fecha_movimiento="2026-11-23"
+        )
+        self.assertTrue(res_liq.get("exito"))
+        liq_id = res_liq["id"]
+        formato_lp = f"LP-{liq_id:04d}"
+
+        # Actualizar fecha pasando el formato 'LP-000X' tal como viene del frontend
+        res_edit = actualizar_fecha_liquidacion_proveedor_db(
+            liquidacion_id=formato_lp,
+            nueva_fecha="2026-11-21",
+            nueva_hora="15:30:00",
+            motivo="Prueba de compatibilidad LP-XXXX",
+            usuario="AdminPrueba",
+            numero_recibo=formato_lp,
+            proveedor_id=self.prov_id,
+            proveedor_nombre=self.prov_nombre,
+            monto=20000.0
+        )
+        self.assertTrue(res_edit.get("exito"), f"Fallo al actualizar fecha con identificador {formato_lp}: {res_edit.get('mensaje')}")
+
+        # Comprobar en base de datos que la fecha cambió a 2026-11-21
+        row = self._query_one("SELECT fecha, hora FROM liquidaciones_proveedores WHERE id = ?", (liq_id,))
+        self.assertEqual(row[0], "2026-11-21")
+        self.assertEqual(row[1], "15:30:00")
+
+    def test_dinero_de_mas_usando_prefijo_lp(self):
+        """Verifica que registrar_dinero_de_mas_proveedor_db funcione al recibir identificador 'LP-XXXX'."""
+        res_liq = liquidar_proveedor_db(
+            proveedor_id=self.prov_id,
+            proveedor_nombre=self.prov_nombre,
+            saldo_pendiente=105000.0,
+            saldo_actual=105000.0,
+            monto_abono=30000.0,
+            metodo_pago="Efectivo",
+            usuario_nombre="AdminTest",
+            fecha_movimiento="2026-11-23"
+        )
+        self.assertTrue(res_liq.get("exito"))
+        liq_id = res_liq["id"]
+        formato_lp = f"LP-{liq_id:04d}"
+
+        # Registrar dinero de más pasando formato 'LP-000X'
+        res_mas = registrar_dinero_de_mas_proveedor_db(
+            liquidacion_id=formato_lp,
+            monto_sobrante=5000.0,
+            motivo="Corrección de excedente con formato LP-XXXX",
+            usuario="AuditorLP",
+            fecha_movimiento="2026-11-23",
+            numero_recibo=formato_lp,
+            proveedor_id=self.prov_id,
+            proveedor_nombre=self.prov_nombre
+        )
+        self.assertTrue(res_mas.get("exito"), f"Fallo al registrar dinero de más con identificador {formato_lp}: {res_mas.get('mensaje')}")
+        self.assertEqual(float(res_mas.get("monto_ajuste")), 5000.0)
+
+        # Verificar que la liquidación en DB tiene dinero_de_mas = 5000.0
+        row = self._query_one("SELECT dinero_de_mas, monto_ajustado FROM liquidaciones_proveedores WHERE id = ?", (liq_id,))
+        self.assertEqual(float(row[0]), 5000.0)
+        self.assertEqual(float(row[1]), 25000.0)
+
+
+    def test_caso_real_usuario_lp0007_contra_lq00007_id114(self):
+        """
+        Reproduce exactamente el caso del usuario:
+        Fila en SQLite con id=114 y numero_recibo='LQ-00007', pero la UI presenta 'LP-0007'.
+        Ambas acciones ('Editar Fecha' y 'DINERO DE MÁS') deben resolver la fila y completarse con éxito.
+        """
+        conn = conectar_db()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT OR REPLACE INTO liquidaciones_proveedores (
+                id, numero_recibo, proveedor_id, proveedor_nombre, monto_liquidado,
+                saldo_anterior, saldo_restante, tipo_pago, metodo_pago, referencia,
+                fecha, hora, mes_anio, usuario, observaciones, estado
+            ) VALUES (114, 'LQ-00007', ?, 'Omara Sierra', 7400.0, 7400.0, 0.0, 'Total', 'Efectivo', '', '2026-11-23', '12:34:33', '11-2026', 'Administrador', '', 'Aplicada')
+        """, (self.prov_id,))
+        conn.commit()
+        conn.close()
+
+        # 1. Editar Fecha pasando 'LP-0007'
+        res_edit = actualizar_fecha_liquidacion_proveedor_db(
+            liquidacion_id="LP-0007",
+            nueva_fecha="2026-11-22",
+            nueva_hora="12:35:37",
+            motivo="Ajuste de fecha operativa real",
+            usuario="Administrador",
+            numero_recibo="LP-0007",
+            proveedor_id=self.prov_id,
+            proveedor_nombre="Omara Sierra",
+            monto=7400.0
+        )
+        self.assertTrue(res_edit.get("exito"), f"Fallo al editar fecha para LP-0007 (id=114, LQ-00007): {res_edit.get('mensaje')}")
+        self.assertEqual(res_edit.get("liquidacion_id"), 114)
+
+        # Verificar en base de datos que la fila 114 tiene nueva fecha 2026-11-22
+        row_114 = self._query_one("SELECT fecha, hora FROM liquidaciones_proveedores WHERE id = 114")
+        self.assertEqual(row_114[0], "2026-11-22")
+        self.assertEqual(row_114[1], "12:35:37")
+
+        # 2. DINERO DE MÁS pasando 'LP-0007'
+        res_mas = registrar_dinero_de_mas_proveedor_db(
+            liquidacion_id="LP-0007",
+            monto_sobrante=2400.0,
+            motivo="Excedente detectado",
+            usuario="Administrador",
+            fecha_movimiento="2026-11-22",
+            numero_recibo="LP-0007",
+            proveedor_id=self.prov_id,
+            proveedor_nombre="Omara Sierra"
+        )
+        self.assertTrue(res_mas.get("exito"), f"Fallo al registrar dinero de más para LP-0007: {res_mas.get('mensaje')}")
+        self.assertEqual(res_mas.get("liquidacion_id"), 114)
+        self.assertEqual(float(res_mas.get("monto_ajuste")), 2400.0)
+
+        # Verificar que la fila 114 tiene dinero_de_mas = 2400.0 y monto_ajustado = 5000.0
+        row_aj = self._query_one("SELECT dinero_de_mas, monto_ajustado FROM liquidaciones_proveedores WHERE id = 114")
+        self.assertEqual(float(row_aj[0]), 2400.0)
+        self.assertEqual(float(row_aj[1]), 5000.0)
 
 
 if __name__ == "__main__":

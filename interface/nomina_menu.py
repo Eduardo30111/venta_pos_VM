@@ -61,6 +61,7 @@ try:
         actualizar_fecha_liquidacion_proveedor_db,
         registrar_dinero_de_mas_proveedor_db,
         obtener_historial_ajustes_proveedor,
+        buscar_liquidacion_proveedor_flexible,
         normalizar_fecha,
         normalizar_hora
     )
@@ -76,6 +77,7 @@ except ImportError:
         actualizar_fecha_liquidacion_proveedor_db,
         registrar_dinero_de_mas_proveedor_db,
         obtener_historial_ajustes_proveedor,
+        buscar_liquidacion_proveedor_flexible,
         normalizar_fecha,
         normalizar_hora
     )
@@ -1525,9 +1527,12 @@ def iniciar_nomina(parent_pid="", parent=None):
         else:
             on_proveedor_seleccionado()
 
+    mapa_historial_prov = {}
+
     def cargar_historial_prov(*args):
         for i in tree_hist_prov.get_children():
             tree_hist_prov.delete(i)
+        mapa_historial_prov.clear()
 
         modo = modo_filtro_prov_var.get()
         f_esp = f_esp_prov_var.get().strip() if modo == "Fecha Específica" else None
@@ -1557,8 +1562,9 @@ def iniciar_nomina(parent_pid="", parent=None):
             else:
                 monto_display = _fmt_cop(monto_val)
 
-            tree_hist_prov.insert("", "end", values=(
-                r.get("numero_recibo", f"LP-{r.get('id')}"),
+            rec_num = r.get("numero_recibo") or f"LP-{r.get('id', 0):04d}"
+            item_id = tree_hist_prov.insert("", "end", values=(
+                rec_num,
                 fecha_val,
                 r.get("proveedor_nombre", ""),
                 monto_display,
@@ -1569,6 +1575,7 @@ def iniciar_nomina(parent_pid="", parent=None):
                 ref_val,
                 estado_val
             ))
+            mapa_historial_prov[item_id] = dict(r)
 
         lbl_tot_hist_prov.config(
             text=f"Total Liquidado en Período: {_fmt_cop(tot_monto)} ({len(hist)} liquidaciones registradas)"
@@ -1985,12 +1992,25 @@ def iniciar_nomina(parent_pid="", parent=None):
             )
             return
 
-        vals = tree_hist_prov.item(sel[0], "values")
-        recibo = vals[0]
-        fecha_actual = vals[1]
-        prov_nom = vals[2]
-        monto_str = vals[3]
-        estado = vals[9]
+        item_id = sel[0]
+        liq_data = mapa_historial_prov.get(item_id, {})
+        vals = tree_hist_prov.item(item_id, "values")
+
+        recibo = liq_data.get("numero_recibo") or (vals[0] if len(vals) > 0 else "")
+        fecha_actual = liq_data.get("fecha") or (vals[1] if len(vals) > 1 else "")
+        prov_nom = liq_data.get("proveedor_nombre") or (vals[2] if len(vals) > 2 else "")
+        monto_str = vals[3] if len(vals) > 3 else _fmt_cop(liq_data.get("monto_liquidado", 0.0))
+        monto_flt = float(liq_data.get("monto_liquidado") or liq_data.get("monto_pagado") or 0.0)
+        estado = liq_data.get("estado") or (vals[9] if len(vals) > 9 else "Aplicado")
+        prov_id = liq_data.get("proveedor_id")
+        liq_id = liq_data.get("id")
+
+        if not liq_id:
+            try:
+                clean_recibo = str(recibo).replace("LQ-", "").replace("LP-", "").strip()
+                liq_id = int(clean_recibo)
+            except Exception:
+                liq_id = str(recibo)
 
         if "Revertid" in estado or "Anulad" in estado:
             messagebox.showwarning(
@@ -1999,12 +2019,6 @@ def iniciar_nomina(parent_pid="", parent=None):
                 parent=ventana
             )
             return
-
-        try:
-            clean_recibo = str(recibo).replace("LQ-", "").replace("LP-", "").strip()
-            liq_id = int(clean_recibo)
-        except Exception:
-            liq_id = str(recibo)
 
         # Modal
         dlg_edit = tk.Toplevel(ventana)
@@ -2124,7 +2138,11 @@ def iniciar_nomina(parent_pid="", parent=None):
                 nueva_fecha=nf_val,
                 nueva_hora=nh_val,
                 motivo=motivo_val,
-                usuario="Administrador"
+                usuario="Administrador",
+                numero_recibo=recibo,
+                proveedor_id=prov_id,
+                proveedor_nombre=prov_nom,
+                monto=monto_flt
             )
 
             if res.get("exito") or res.get("ok"):
@@ -2167,44 +2185,39 @@ def iniciar_nomina(parent_pid="", parent=None):
         liq_target = None
 
         if sel_hist:
-            vals = tree_hist_prov.item(sel_hist[0], "values")
-            recibo = vals[0]
-            fecha_liq = vals[1]
-            prov_nom = vals[2]
-            monto_str = vals[3]
-            estado = vals[9]
+            item_id = sel_hist[0]
+            if item_id in mapa_historial_prov:
+                liq_target = dict(mapa_historial_prov[item_id])
+            else:
+                vals = tree_hist_prov.item(item_id, "values")
+                recibo = vals[0]
+                fecha_liq = vals[1]
+                prov_nom = vals[2]
+                monto_str = vals[3]
+                estado = vals[9] if len(vals) > 9 else "Aplicado"
+                try:
+                    clean_recibo = str(recibo).replace("LQ-", "").replace("LP-", "").strip()
+                    liq_id = int(clean_recibo)
+                except Exception:
+                    liq_id = str(recibo)
 
-            if "Revertid" in estado or "Anulad" in estado:
-                messagebox.showwarning(
-                    "No ajustable",
-                    f"La liquidación {recibo} está anulada o revertida y no puede ajustarse.",
-                    parent=ventana
-                )
-                return
-
-            try:
-                clean_recibo = str(recibo).replace("LQ-", "").replace("LP-", "").strip()
-                liq_id = int(clean_recibo)
-            except Exception:
-                liq_id = str(recibo)
-
-            liq_target = {
-                "id": liq_id,
-                "recibo": recibo,
-                "fecha": fecha_liq,
-                "proveedor_nombre": prov_nom,
-                "monto_str": monto_str
-            }
+                liq_target = {
+                    "id": liq_id,
+                    "numero_recibo": recibo,
+                    "fecha": fecha_liq,
+                    "proveedor_nombre": prov_nom,
+                    "monto_str": monto_str,
+                    "estado": estado
+                }
         else:
             datos_prov = obtener_datos_proveedor_seleccionado()
             if datos_prov:
                 prov_id = datos_prov["id"]
                 prov_nom = datos_prov["nombre"]
-                hist_prov = obtener_historial_liquidaciones_proveedor()
+                hist_prov = obtener_historial_liquidaciones_proveedor(proveedor_id=prov_id)
                 liqs_validas = [
                     l for l in hist_prov
-                    if (str(l.get("proveedor_id")) == str(prov_id) or str(l.get("proveedor_nombre")) == str(prov_nom))
-                    and l.get("estado") != "Revertida"
+                    if l.get("estado") != "Revertida" and "Revertid" not in str(l.get("estado", ""))
                 ]
                 if not liqs_validas:
                     messagebox.showinfo(
@@ -2213,18 +2226,7 @@ def iniciar_nomina(parent_pid="", parent=None):
                         parent=ventana
                     )
                     return
-                l_rec = liqs_validas[0]
-                recibo = l_rec.get("numero_recibo") or f"LQ-{l_rec.get('id'):05d}"
-                monto_val = float(l_rec.get("monto_liquidado") or l_rec.get("monto_pagado") or 0.0)
-                liq_target = {
-                    "id": l_rec.get("id"),
-                    "recibo": recibo,
-                    "fecha": l_rec.get("fecha") or "",
-                    "proveedor_nombre": prov_nom,
-                    "monto_str": _fmt_cop(monto_val),
-                    "monto_liquidado": monto_val,
-                    "dinero_de_mas": float(l_rec.get("dinero_de_mas") or 0.0),
-                }
+                liq_target = dict(liqs_validas[0])
             else:
                 messagebox.showwarning(
                     "Selección requerida",
@@ -2233,31 +2235,42 @@ def iniciar_nomina(parent_pid="", parent=None):
                 )
                 return
 
-        liq_id_real = liq_target["id"]
-        recibo_real = liq_target["recibo"]
-        prov_nom_real = liq_target["proveedor_nombre"]
-
-        conn_tmp = conectar_db()
-        cur_tmp = conn_tmp.cursor()
-        cur_tmp.execute("""
-            SELECT id, numero_recibo, proveedor_id, proveedor_nombre, monto_liquidado,
-                   fecha, hora, metodo_pago, estado, COALESCE(dinero_de_mas, 0.0),
-                   COALESCE(monto_ajustado, monto_liquidado), COALESCE(fecha_registro, created_at, fecha)
-            FROM liquidaciones_proveedores
-            WHERE id = ? OR numero_recibo = ?
-        """, (liq_id_real, str(recibo_real)))
-        row_liq = cur_tmp.fetchone()
-        conn_tmp.close()
-
-        if not row_liq:
-            messagebox.showerror("Error", f"No se encontró la liquidación {recibo_real}.", parent=ventana)
+        recibo_real = liq_target.get("numero_recibo") or f"LP-{liq_target.get('id', 0):04d}"
+        estado = str(liq_target.get("estado", "Aplicado"))
+        if "Revertid" in estado or "Anulad" in estado:
+            messagebox.showwarning(
+                "No ajustable",
+                f"La liquidación {recibo_real} está anulada o revertida y no puede ajustarse.",
+                parent=ventana
+            )
             return
 
-        monto_pagado_orig = float(row_liq[4] or 0.0)
-        fecha_orig = str(row_liq[5] or "")
-        metodo_liq = str(row_liq[7] or "Efectivo")
-        dinero_previo = float(row_liq[9] or 0.0)
-        limite_ajustable = round(monto_pagado_orig - dinero_previo, 2)
+        prov_nom_real = liq_target.get("proveedor_nombre") or "Proveedor"
+        prov_id_real = liq_target.get("proveedor_id")
+        liq_id_real = liq_target.get("id")
+        monto_pagado_orig = float(liq_target.get("monto_liquidado") or liq_target.get("monto_pagado") or 0.0)
+        dinero_previo = float(liq_target.get("dinero_de_mas") or 0.0)
+        limite_ajustable = max(0.0, round(monto_pagado_orig - dinero_previo, 2))
+        fecha_orig = str(liq_target.get("fecha") or liq_target.get("fecha_pago") or "")
+        hora_orig = str(liq_target.get("hora") or "")
+        metodo_liq = str(liq_target.get("metodo_pago") or "Efectivo")
+
+        # Intentar enriquecer o verificar con búsqueda flexible local si existe
+        row_flexible = buscar_liquidacion_proveedor_flexible(
+            identificador=liq_id_real or recibo_real,
+            proveedor_id=prov_id_real,
+            proveedor_nombre=prov_nom_real,
+            monto=monto_pagado_orig,
+            fecha=fecha_orig
+        )
+        if row_flexible:
+            liq_id_real = row_flexible.get("id", liq_id_real)
+            recibo_real = row_flexible.get("numero_recibo", recibo_real)
+            monto_pagado_orig = float(row_flexible.get("monto_liquidado", monto_pagado_orig))
+            dinero_previo = float(row_flexible.get("dinero_de_mas", dinero_previo))
+            limite_ajustable = max(0.0, round(monto_pagado_orig - dinero_previo, 2))
+            fecha_orig = row_flexible.get("fecha", fecha_orig)
+            metodo_liq = row_flexible.get("metodo_pago", metodo_liq)
 
         if limite_ajustable <= 0.0:
             messagebox.showinfo(
@@ -2419,11 +2432,14 @@ def iniciar_nomina(parent_pid="", parent=None):
             dlg_mas.update_idletasks()
 
             res = registrar_dinero_de_mas_proveedor_db(
-                liquidacion_id=row_liq[0],
+                liquidacion_id=liq_id_real,
                 monto_sobrante=monto_val,
                 motivo=motivo_val,
                 usuario="Administrador",
-                fecha_movimiento=f_ajuste_val
+                fecha_movimiento=f_ajuste_val,
+                numero_recibo=recibo_real,
+                proveedor_id=prov_id_real,
+                proveedor_nombre=prov_nom_real
             )
 
             if res.get("exito") or res.get("ok"):
