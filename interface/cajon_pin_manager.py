@@ -21,8 +21,23 @@ import time
 import re
 import hashlib
 import secrets
-import tkinter as tk
-from tkinter import ttk, messagebox
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+except (ImportError, ModuleNotFoundError):
+    class _DummyWidget:
+        def __init__(self, *args, **kwargs):
+            pass
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    class _DummyModule:
+        def __getattr__(self, name):
+            return _DummyWidget
+
+    tk = _DummyModule()
+    ttk = _DummyModule()
+    messagebox = _DummyModule()
 from datetime import datetime
 from typing import Tuple, Dict, Any, Optional
 

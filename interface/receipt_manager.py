@@ -37,10 +37,20 @@ try:
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
 except (ImportError, ModuleNotFoundError):
-    tk = None
-    ttk = None
-    filedialog = None
-    messagebox = None
+    class _DummyWidget:
+        def __init__(self, *args, **kwargs):
+            pass
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    class _DummyModule:
+        def __getattr__(self, name):
+            return _DummyWidget
+
+    tk = _DummyModule()
+    ttk = _DummyModule()
+    filedialog = _DummyModule()
+    messagebox = _DummyModule()
 
 try:
     from PIL import Image, ImageTk, ImageOps
