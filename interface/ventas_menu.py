@@ -4204,16 +4204,21 @@ class App:
                         self.cliente_id_seleccionado = cid_mix
                         cli_mix_nom = cli_info.get("nombre") or doc_oficial
 
+                    rec_ef_mix = float(entry_mix_recibido.get_value()) if 'entry_mix_recibido' in locals() else m_ef
+                    if rec_ef_mix < m_ef:
+                        rec_ef_mix = m_ef
+                    cambio_ef_mix = max(0.0, rec_ef_mix - m_ef)
+
                     pagos_list = []
                     if m_ef > 0:
-                        pagos_list.append({"metodo": "Efectivo", "monto": m_ef, "recibido": m_ef, "cambio": 0.0})
+                        pagos_list.append({"metodo": "Efectivo", "monto": m_ef, "recibido": rec_ef_mix, "cambio": cambio_ef_mix})
                     if m_tr > 0:
                         pagos_list.append({"metodo": "Transferencia", "monto": m_tr, "recibido": m_tr, "cambio": 0.0})
                     if m_fi > 0:
                         pagos_list.append({"metodo": "Fiado", "monto": m_fi, "recibido": 0.0, "cambio": 0.0})
 
                     self.procesar_venta_completa(
-                        recibido=m_ef,
+                        recibido=rec_ef_mix if m_ef > 0 else total_val,
                         total=total_val,
                         metodo_pago="Mixto",
                         pagos=pagos_list,
@@ -4413,6 +4418,12 @@ class App:
         def _on_mix_change(val=None):
             try:
                 ef = float(entry_mix_efectivo.get_value())
+                if 'entry_mix_recibido' in locals():
+                    try:
+                        if float(entry_mix_recibido.get_value()) < ef:
+                            entry_mix_recibido.set_value(ef)
+                    except Exception:
+                        pass
                 tr = float(entry_mix_transf.get_value())
                 fi = float(entry_mix_fiado.get_value())
                 suma = round(ef + tr + fi, 2)
@@ -4445,10 +4456,18 @@ class App:
         tk.Label(f_mix_inputs, text="💵 Efectivo:", font=("Segoe UI", 9, "bold"), bg=t_p["bg_surface"], fg=t_p["text_main"]).grid(row=0, column=0, sticky="w", pady=3)
         entry_mix_efectivo = CurrencyEntry(
             f_mix_inputs, initial_value=0, show_symbol=True, on_change=_on_mix_change,
-            font=("Segoe UI", 10, "bold"), width=16, bg=t_p["input_bg"], fg=t_p["input_fg"],
+            font=("Segoe UI", 10, "bold"), width=14, bg=t_p["input_bg"], fg=t_p["input_fg"],
             insertbackground=t_p["input_insert"], relief="solid", bd=1
         )
         entry_mix_efectivo.grid(row=0, column=1, sticky="w", padx=(10, 0), pady=3)
+
+        tk.Label(f_mix_inputs, text="Recibido:", font=("Segoe UI", 8, "bold"), bg=t_p["bg_surface"], fg=t_p["text_secondary"]).grid(row=0, column=2, sticky="w", padx=(10, 0), pady=3)
+        entry_mix_recibido = CurrencyEntry(
+            f_mix_inputs, initial_value=0, show_symbol=True,
+            font=("Segoe UI", 10, "bold"), width=14, bg=t_p["input_bg"], fg=t_p["input_fg"],
+            insertbackground=t_p["input_insert"], relief="solid", bd=1
+        )
+        entry_mix_recibido.grid(row=0, column=3, sticky="w", padx=(6, 0), pady=3)
 
         # Fila Transferencia
         tk.Label(f_mix_inputs, text="💳 Transferencia:", font=("Segoe UI", 9, "bold"), bg=t_p["bg_surface"], fg=t_p["text_main"]).grid(row=1, column=0, sticky="w", pady=3)
@@ -4850,8 +4869,22 @@ class App:
                 )
                 return None
 
-            recibido_payload = 0.0 if str(metodo_pago) == "Fiado" else float(recibido)
-            cambio_payload = 0.0 if str(metodo_pago) == "Fiado" else max(0.0, float(recibido) - float(total))
+            if str(metodo_pago) == "Fiado":
+                recibido_payload = 0.0
+                cambio_payload = 0.0
+            elif str(metodo_pago) == "Mixto":
+                ef_pago = next((p for p in (pagos or []) if str(p.get("metodo", "")).strip().lower() in ("efectivo", "cash")), None)
+                if ef_pago:
+                    rec_ef_val = float(ef_pago.get("recibido", ef_pago.get("monto", 0.0)) or 0.0)
+                    mon_ef_val = float(ef_pago.get("monto", 0.0) or 0.0)
+                    recibido_payload = rec_ef_val
+                    cambio_payload = max(0.0, rec_ef_val - mon_ef_val)
+                else:
+                    recibido_payload = float(total)
+                    cambio_payload = 0.0
+            else:
+                recibido_payload = float(recibido)
+                cambio_payload = max(0.0, float(recibido) - float(total))
             orden_id_actual = getattr(self, "orden_id_activa", None)
             autorizado_exceso = bool(getattr(self, "_exceso_credito_autorizado", False))
             operario_nombre = getattr(self, "user_login", None) or getattr(self, "user_nombre", None) or getattr(self, "rol", None) or "Administrador"
@@ -5226,6 +5259,7 @@ class App:
         dlg.bind("<Return>", lambda e: accion_imprimir())
         dlg.bind("<KP_Enter>", lambda e: accion_imprimir())
         dlg.bind("<Escape>", lambda e: accion_no_imprimir())
+        dlg.protocol("WM_DELETE_WINDOW", accion_no_imprimir)
 
         btn_si.focus_set()
 
@@ -5235,44 +5269,70 @@ class App:
         1. Evalúa si el método de pago incluye efectivo (Efectivo o Mixto).
         2. Si incluye efectivo:
            - Envía la señal de apertura física del cajón monedero automáticamente (SIN pedir PIN).
-           - Muestra un popup modal centrado: '¡RECUERDA DAR CAMBIO!' con el valor exacto en texto grande.
-           - El foco queda en el botón 'Aceptar (Enter)' para cerrarlo con Enter o clic.
+           - Muestra un popup modal centrado: '¡RECUERDA DAR CAMBIO!' solo si hay cambio a entregar (> 0).
+           - Si el pago fue exacto o sin cambio, no muestra recordatorio incorrecto.
         3. Al cerrarse, enfoca inmediatamente la entrada del lector de código para la próxima venta.
         """
         if not datos_venta or not isinstance(datos_venta, dict):
             return
 
+        id_venta_act = datos_venta.get("id_venta") or datos_venta.get("id") or datos_venta.get("factura")
         metodo = datos_venta.get("metodo_pago", "")
         pagos = datos_venta.get("pagos")
 
-        es_efectivo = False
+        incluye_efectivo = False
         try:
             try:
-                from interface.receipt_manager import evaluar_apertura_cajon_por_venta, pulsar_apertura_cajon
+                from interface.receipt_manager import venta_incluye_efectivo, pulsar_apertura_cajon
             except ImportError:
-                from receipt_manager import evaluar_apertura_cajon_por_venta, pulsar_apertura_cajon
+                from receipt_manager import venta_incluye_efectivo, pulsar_apertura_cajon
 
-            es_efectivo = evaluar_apertura_cajon_por_venta(metodo, pagos=pagos)
+            incluye_efectivo = venta_incluye_efectivo(metodo, pagos=pagos)
         except Exception as e_ev:
             print(f"Aviso evaluando efectivo para apertura: {e_ev}")
+            incluye_efectivo = str(metodo).strip().lower() in ("efectivo", "cash")
 
-        if not es_efectivo:
+        if not incluye_efectivo:
             try:
                 self.entry_codigo.focus_set()
             except Exception:
                 pass
             return
 
-        # 1. Enviar pulso de apertura física de cajón monedero (automático, sin pedir PIN)
-        try:
-            pulsar_apertura_cajon()
-        except Exception as e_c:
-            print(f"Aviso abriendo gaveta automática post-venta: {e_c}")
+        # 1. Enviar pulso de apertura física de cajón monedero automáticamente (SIN pedir PIN)
+        # Protección idempotente contra envíos duplicados en la misma venta
+        if id_venta_act and getattr(self, "_ultimo_cajon_pulsado_id", None) != id_venta_act:
+            self._ultimo_cajon_pulsado_id = id_venta_act
+            try:
+                threading.Thread(target=pulsar_apertura_cajon, daemon=True).start()
+            except Exception as e_c:
+                print(f"Aviso abriendo gaveta automática post-venta: {e_c}")
 
-        # 2. Obtener datos de cambio y montos
+        # 2. Obtener datos reales de cambio y montos
         cambio_val = float(datos_venta.get("cambio", 0.0) or 0.0)
         recibido_val = float(datos_venta.get("recibido", 0.0) or 0.0)
         total_val = float(datos_venta.get("total", 0.0) or 0.0)
+
+        # Si es pago mixto, calcular el cambio según el efectivo recibido y la porción en efectivo
+        if str(metodo).strip().lower() in ("mixto", "combinado") and pagos:
+            for p in pagos:
+                if isinstance(p, dict):
+                    m_p = str(p.get("metodo", p.get("metodo_pago", ""))).strip().lower()
+                    if m_p in ("efectivo", "cash"):
+                        rec_ef = float(p.get("recibido", 0.0) or 0.0)
+                        mon_ef = float(p.get("monto", 0.0) or 0.0)
+                        if rec_ef > mon_ef:
+                            cambio_val = round(rec_ef - mon_ef, 2)
+                            recibido_val = rec_ef
+                            total_val = mon_ef
+
+        # Si no existe cambio a entregar (cambio <= 0), no mostrar recordatorio incorrecto
+        if cambio_val <= 0:
+            try:
+                self.entry_codigo.focus_set()
+            except Exception:
+                pass
+            return
 
         # 3. Mostrar modal centrado "¡RECUERDA DAR CAMBIO!"
         dlg_cambio = tk.Toplevel(self.ventana)
@@ -5281,6 +5341,11 @@ class App:
         calcular_geometria_segura(dlg_cambio, 480, 310, 420, 270)
         dlg_cambio.configure(bg=t_c["bg_app"])
         dlg_cambio.transient(self.ventana)
+
+        # En Windows: forzar elevación y foco visible en primer plano
+        dlg_cambio.lift()
+        dlg_cambio.attributes("-topmost", True)
+        dlg_cambio.after(120, lambda: dlg_cambio.attributes("-topmost", False) if dlg_cambio.winfo_exists() else None)
         dlg_cambio.grab_set()
 
         hdr = tk.Frame(dlg_cambio, bg="#059669", height=50)
@@ -5299,21 +5364,20 @@ class App:
 
         tk.Label(
             body,
-            text="CAMBIO A ENTREGAR AL CLIENTE:",
-            font=("Segoe UI", 10, "bold"),
+            text="CAMBIO A ENTREGAR:",
+            font=("Segoe UI", 11, "bold"),
             bg=t_c["bg_surface"],
             fg=t_c["text_secondary"]
         ).pack(pady=(4, 6))
 
         # Dígitos grandes legibles
-        txt_cambio = f"$ {cambio_val:,.0f} COP" if cambio_val > 0 else "$ 0 COP (Pago exacto)"
-        color_cambio = "#059669" if cambio_val > 0 else "#2563EB"
+        txt_cambio = f"$ {cambio_val:,.0f} COP"
         lbl_monto = tk.Label(
             body,
             text=txt_cambio,
-            font=("Segoe UI", 24, "bold"),
+            font=("Segoe UI", 26, "bold"),
             bg=t_c["bg_surface"],
-            fg=color_cambio
+            fg="#059669"
         )
         lbl_monto.pack(pady=(2, 10))
 
@@ -5353,6 +5417,7 @@ class App:
         dlg_cambio.bind("<Return>", _cerrar_cambio)
         dlg_cambio.bind("<KP_Enter>", _cerrar_cambio)
         dlg_cambio.bind("<Escape>", _cerrar_cambio)
+        dlg_cambio.protocol("WM_DELETE_WINDOW", _cerrar_cambio)
 
         btn_ok.focus_set()
 

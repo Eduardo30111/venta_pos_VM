@@ -660,6 +660,8 @@ class BusinessManager:
         except Exception:
             self._printer_config["margen_mm"] = 2
 
+        self._printer_config["abrir_cajon"] = bool(self._printer_config.get("abrir_cajon", True))
+
         return dict(self._printer_config)
 
     def guardar_config_impresora(self, nuevos_datos=None, notificar=True):

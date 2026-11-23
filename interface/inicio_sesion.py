@@ -551,7 +551,7 @@ def limpiar_campos(event=None):
 
 ventana = tk.Tk()
 business_mgr.recargar()
-titulo_login = f"{business_mgr.nombre} — {business_mgr.subtitulo} (v4.1.3)" if business_mgr.subtitulo else f"{business_mgr.nombre} — Inicio de Sesión (v4.1.3)"
+titulo_login = f"{business_mgr.nombre} — {business_mgr.subtitulo} (v4.1.4)" if business_mgr.subtitulo else f"{business_mgr.nombre} — Inicio de Sesión (v4.1.4)"
 ventana.title(titulo_login)
 
 t = aplicar_tema(ventana)
@@ -822,7 +822,7 @@ def recargar_identidad_login():
     if not ventana.winfo_exists():
         return
     try:
-        nuevo_titulo = f"{business_mgr.nombre} — {business_mgr.subtitulo} (v4.1.3)" if business_mgr.subtitulo else f"{business_mgr.nombre} — Inicio de Sesión (v4.1.3)"
+        nuevo_titulo = f"{business_mgr.nombre} — {business_mgr.subtitulo} (v4.1.4)" if business_mgr.subtitulo else f"{business_mgr.nombre} — Inicio de Sesión (v4.1.4)"
         ventana.title(nuevo_titulo)
         _renderizar_panel_institucional()
         c_login = business_mgr.color_login or t["accent"]

@@ -1523,14 +1523,11 @@ def _imprimir_por_sistema_os(norm, cfg):
         except Exception as e:
             return False, f"No se pudo enviar a la impresora del sistema: {e}"
     else:
-        # Windows: usar win32print RAW para térmicas o ShellExecute para PDF
+        # Windows: usar _enviar_raw_windows_spooler para térmicas o ShellExecute para PDF
         try:
-            import win32print
-            nombre_dest = impresora_sel
-            if not nombre_dest or nombre_dest in ("Predeterminada del sistema", "USB Térmica Directa (ESC/POS)"):
-                nombre_dest = win32print.GetDefaultPrinter()
+            nombre_dest = resolver_impresora_windows(impresora_sel)
             if not nombre_dest:
-                return False, "No hay impresora predeterminada configurada en Windows."
+                return False, "No se encontró una impresora configurada ni predeterminada en Windows."
 
             if fmt in ("58mm", "80mm"):
                 neg = norm["negocio"]
@@ -1542,22 +1539,23 @@ def _imprimir_por_sistema_os(norm, cfg):
                 cajon_b = construir_comando_cajon(cfg) if evaluar_apertura_cajon_por_venta(norm, cfg=cfg) else b""
                 raw_payload = cajon_b + b"\x1b\x40" + logo_b + txt_b + corte_b
 
-                hPrinter = win32print.OpenPrinter(nombre_dest)
-                try:
-                    for _ in range(copias):
-                        hJob = win32print.StartDocPrinter(hPrinter, 1, (f"Comprobante {norm['factura']}", None, "RAW"))
-                        win32print.StartPagePrinter(hPrinter)
-                        win32print.WritePrinter(hPrinter, raw_payload)
-                        win32print.EndPagePrinter(hPrinter)
-                        win32print.EndDocPrinter(hPrinter)
-                finally:
-                    win32print.ClosePrinter(hPrinter)
+                for _ in range(copias):
+                    ok_raw, msg_raw = _enviar_raw_windows_spooler(nombre_dest, raw_payload, titulo_doc=f"Comprobante {norm['factura']}")
+                    if not ok_raw:
+                        return False, f"Error enviando impresión a '{nombre_dest}': {msg_raw}"
                 return True, f"Impreso en '{nombre_dest}' ({fmt}, {copias} copia(s))."
             else:
-                import win32api
-                for _ in range(copias):
-                    win32api.ShellExecute(0, "print", temp_pdf, f'/d:"{nombre_dest}"', ".", 0)
-                return True, f"Enviado documento A4 a '{nombre_dest}'."
+                try:
+                    import win32api
+                    for _ in range(copias):
+                        win32api.ShellExecute(0, "print", temp_pdf, f'/d:"{nombre_dest}"', ".", 0)
+                    return True, f"Enviado documento A4 a '{nombre_dest}'."
+                except Exception:
+                    subprocess.run(
+                        ["powershell", "-NoProfile", "-Command", f'Start-Process -FilePath "{temp_pdf}" -Verb Print'],
+                        check=True, timeout=10
+                    )
+                    return True, f"Enviado documento A4 a '{nombre_dest}' (PowerShell)."
         except Exception as e:
             return False, f"No se pudo imprimir en Windows: {e}"
 
@@ -1661,6 +1659,159 @@ def construir_comando_cajon(cfg=None) -> bytes:
         )
 
 
+def _enviar_raw_windows_spooler(nombre_impresora: str, datos_bytes: bytes, titulo_doc: str = "VmPOS Trabajo") -> Tuple[bool, str]:
+    """
+    Envía bytes RAW directamente al spooler de impresión de Windows.
+    Utiliza primero win32print (si está disponible) y como respaldo nativo de máxima fiabilidad
+    utiliza ctypes.windll.winspool (disponible en todas las instalaciones de Windows sin dependencias externas).
+    """
+    if not sys.platform.startswith("win"):
+        return False, "Función exclusiva para plataforma Windows."
+
+    if not nombre_impresora:
+        return False, "Nombre de impresora no especificado."
+
+    errores_win = []
+
+    # Intento 1: win32print
+    try:
+        import win32print
+        hPrinter = win32print.OpenPrinter(nombre_impresora)
+        try:
+            hJob = win32print.StartDocPrinter(hPrinter, 1, (titulo_doc, None, "RAW"))
+            if hJob > 0:
+                try:
+                    win32print.StartPagePrinter(hPrinter)
+                    win32print.WritePrinter(hPrinter, datos_bytes)
+                finally:
+                    win32print.EndPagePrinter(hPrinter)
+            win32print.EndDocPrinter(hPrinter)
+            return True, f"Datos RAW enviados exitosamente a '{nombre_impresora}' vía win32print."
+        finally:
+            win32print.ClosePrinter(hPrinter)
+    except Exception as e_w32:
+        errores_win.append(f"win32print: {e_w32}")
+
+    # Intento 2: ctypes con winspool.drv nativo de Windows (cero dependencias externas)
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class DOC_INFO_1W(ctypes.Structure):
+            _fields_ = [
+                ("pDocName", wintypes.LPCWSTR),
+                ("pOutputFile", wintypes.LPCWSTR),
+                ("pDatatype", wintypes.LPCWSTR),
+            ]
+
+        winspool = ctypes.windll.winspool
+        hPrinter = wintypes.HANDLE()
+
+        if winspool.OpenPrinterW(nombre_impresora, ctypes.byref(hPrinter), None):
+            try:
+                doc_info = DOC_INFO_1W()
+                doc_info.pDocName = titulo_doc
+                doc_info.pOutputFile = None
+                doc_info.pDatatype = "RAW"
+
+                job_id = winspool.StartDocPrinterW(hPrinter, 1, ctypes.byref(doc_info))
+                if job_id > 0:
+                    try:
+                        winspool.StartPagePrinter(hPrinter)
+                        bytes_written = wintypes.DWORD(0)
+                        buf = (ctypes.c_char * len(datos_bytes))(*datos_bytes)
+                        winspool.WritePrinter(hPrinter, buf, len(datos_bytes), ctypes.byref(bytes_written))
+                    finally:
+                        winspool.EndPagePrinter(hPrinter)
+                    winspool.EndDocPrinter(hPrinter)
+                    return True, f"Datos RAW enviados exitosamente a '{nombre_impresora}' vía ctypes winspool.drv."
+                else:
+                    err_c = ctypes.GetLastError()
+                    errores_win.append(f"ctypes StartDocPrinterW error {err_c}")
+            finally:
+                winspool.ClosePrinter(hPrinter)
+        else:
+            err_c = ctypes.GetLastError()
+            errores_win.append(f"ctypes OpenPrinterW error {err_c}")
+    except Exception as e_ctypes:
+        errores_win.append(f"ctypes winspool: {e_ctypes}")
+
+    return False, " / ".join(errores_win)
+
+
+def resolver_impresora_windows(impresora_cfg: str = "") -> str:
+    """
+    Determina la impresora destino válida en Windows:
+    1. Si tiene una impresora explícita configurada, la retorna si existe.
+    2. Si es 'Predeterminada del sistema' o está vacía:
+       - Obtiene la predeterminada vía win32print o ctypes winspool.
+       - Si no hay predeterminada marcada, toma la primera impresora local instalada (priorizando térmicas).
+    """
+    imp = str(impresora_cfg or "").strip()
+    if imp and imp not in ("Predeterminada del sistema", "USB Térmica Directa (ESC/POS)") and not imp.startswith("USB Directa:"):
+        return imp
+
+    # Probar win32print
+    try:
+        import win32print
+        def_p = win32print.GetDefaultPrinter()
+        if def_p:
+            return def_p
+    except Exception:
+        pass
+
+    # Probar ctypes GetDefaultPrinterW
+    try:
+        import ctypes
+        from ctypes import wintypes
+        winspool = ctypes.windll.winspool
+        buf_size = wintypes.DWORD(0)
+        winspool.GetDefaultPrinterW(None, ctypes.byref(buf_size))
+        if buf_size.value > 0:
+            buf = ctypes.create_unicode_buffer(buf_size.value)
+            if winspool.GetDefaultPrinterW(buf, ctypes.byref(buf_size)):
+                if buf.value:
+                    return buf.value
+    except Exception:
+        pass
+
+    # Enumerar impresoras disponibles si no hay default
+    lista = detectar_impresoras_disponibles()
+    candidatas = [p for p in lista if p not in ("Predeterminada del sistema", "USB Térmica Directa (ESC/POS)") and not p.startswith("USB Directa:")]
+    if candidatas:
+        for c in candidatas:
+            c_low = c.lower()
+            if any(term in c_low for term in ("pos", "thermal", "ticket", "recibo", "58", "80", "epson", "star", "bixolon", "xprinter")):
+                return c
+        return candidatas[0]
+
+    return ""
+
+
+def venta_incluye_efectivo(metodo_pago, pagos=None) -> bool:
+    """
+    Determina si una venta comercial involucra recepción de dinero en efectivo:
+    - Venta Efectivo pura -> True
+    - Venta Mixto con componente en Efectivo > 0 -> True
+    - Transferencia, QR, Tarjeta, Fiado -> False
+    - Cualquier combinación sin efectivo -> False
+    """
+    m_str = str(metodo_pago or "").strip().lower()
+    if m_str in ("efectivo", "cash"):
+        return True
+    if m_str in ("mixto", "combinado"):
+        if pagos and isinstance(pagos, (list, tuple)):
+            for p in pagos:
+                if isinstance(p, dict):
+                    m = str(p.get("metodo", p.get("metodo_pago", ""))).strip().lower()
+                    monto = float(p.get("monto", 0.0) or 0.0)
+                    rec = float(p.get("recibido", 0.0) or 0.0)
+                    if m in ("efectivo", "cash") and (monto > 0 or rec > 0):
+                        return True
+        return False
+    return False
+
+
 def evaluar_apertura_cajon_por_venta(datos_o_metodo, pagos=None, cfg=None) -> bool:
     """
     Evalúa estrictamente las reglas comerciales de apertura de gaveta de dinero:
@@ -1668,13 +1819,8 @@ def evaluar_apertura_cajon_por_venta(datos_o_metodo, pagos=None, cfg=None) -> bo
     2. Venta Mixto con componente en Efectivo -> Abre gaveta.
     3. Venta Transferencia pura -> NO abre gaveta.
     4. Venta Fiado pura -> NO abre gaveta.
-    5. Solo opera si 'abrir_cajon' está habilitado en la configuración.
+    5. Combinación sin efectivo -> NO abre gaveta.
     """
-    if cfg is None:
-        cfg = business_mgr.obtener_config_impresora()
-    if not cfg.get("abrir_cajon", True):
-        return False
-
     metodo = ""
     lista_pagos = pagos
     if isinstance(datos_o_metodo, dict):
@@ -1684,29 +1830,19 @@ def evaluar_apertura_cajon_por_venta(datos_o_metodo, pagos=None, cfg=None) -> bo
     else:
         metodo = str(datos_o_metodo or "").strip()
 
-    metodo_norm = metodo.lower()
-    if metodo_norm in ("efectivo", "cash"):
-        return True
-    elif metodo_norm in ("mixto", "combinado"):
-        if lista_pagos and isinstance(lista_pagos, (list, tuple)):
-            for p in lista_pagos:
-                if isinstance(p, dict):
-                    m = str(p.get("metodo", p.get("metodo_pago", ""))).lower().strip()
-                    monto = float(p.get("monto", 0.0) or 0.0)
-                    if m in ("efectivo", "cash") and monto > 0:
-                        return True
-            return False
-        return False
-    elif metodo_norm in ("transferencia", "tarjeta", "qr", "bancolombia", "nequi", "daviplata", "fiado", "crédito", "credito"):
+    if not venta_incluye_efectivo(metodo, lista_pagos):
         return False
 
-    return False
+    if cfg is None:
+        cfg = business_mgr.obtener_config_impresora()
+
+    return bool(cfg.get("abrir_cajon", True))
 
 
 def pulsar_apertura_cajon(config_override=None) -> Tuple[bool, str]:
     """
     Envía la señal ESC/POS para abrir el cajón monedero conectado a la impresora
-    (compatible con macOS CUPS RAW, Windows win32print RAW, Red LAN/WiFi TCP 9100 y USB directo).
+    (compatible con macOS CUPS RAW, Windows win32print RAW, Windows ctypes winspool, Red LAN/WiFi TCP 9100 y USB directo).
     """
     cfg = dict(business_mgr.obtener_config_impresora())
     if isinstance(config_override, dict):
@@ -1736,7 +1872,6 @@ def pulsar_apertura_cajon(config_override=None) -> Tuple[bool, str]:
             if nombre_dest and nombre_dest not in ("Predeterminada del sistema", "USB Térmica Directa (ESC/POS)") and not nombre_dest.startswith("USB Directa:"):
                 impresora_cups = nombre_dest
             else:
-                # Buscar predeterminada con lpstat -d
                 try:
                     out_d = subprocess.check_output(["lpstat", "-d"], stderr=subprocess.DEVNULL, timeout=2, text=True)
                     for part in out_d.split(":"):
@@ -1755,7 +1890,6 @@ def pulsar_apertura_cajon(config_override=None) -> Tuple[bool, str]:
                     except Exception:
                         pass
 
-            # Crear archivo temporal con los bytes RAW
             fd, temp_bin = tempfile.mkstemp(prefix="vmpos_drawer_", suffix=".bin")
             try:
                 with os.fdopen(fd, "wb") as f_bin:
@@ -1781,26 +1915,18 @@ def pulsar_apertura_cajon(config_override=None) -> Tuple[bool, str]:
         except Exception as e_cups:
             errores.append(f"macOS/CUPS: {e_cups}")
 
-    # 3. En Windows vía win32print RAW
+    # 3. En Windows vía Spooler RAW (win32print + ctypes winspool nativo)
     if sys.platform.startswith("win"):
         try:
-            import win32print
-            nombre_dest = str(cfg.get("impresora_nombre", "")).strip()
-            if not nombre_dest or nombre_dest in ("Predeterminada del sistema", "USB Térmica Directa (ESC/POS)") or nombre_dest.startswith("USB Directa:"):
-                nombre_dest = win32print.GetDefaultPrinter()
+            nombre_dest = resolver_impresora_windows(str(cfg.get("impresora_nombre", "")).strip())
             if nombre_dest:
-                hPrinter = win32print.OpenPrinter(nombre_dest)
-                try:
-                    hJob = win32print.StartDocPrinter(hPrinter, 1, ("Abrir Cajon VmPOS", None, "RAW"))
-                    win32print.StartPagePrinter(hPrinter)
-                    win32print.WritePrinter(hPrinter, cmd_cajon)
-                    win32print.EndPagePrinter(hPrinter)
-                    win32print.EndDocPrinter(hPrinter)
-                finally:
-                    win32print.ClosePrinter(hPrinter)
-                return True, f"Cajón abierto exitosamente vía impresora '{nombre_dest}' (Windows RAW)."
+                ok_raw, msg_raw = _enviar_raw_windows_spooler(nombre_dest, cmd_cajon, titulo_doc="Abrir Cajon VmPOS")
+                if ok_raw:
+                    return True, f"Cajón abierto exitosamente vía impresora '{nombre_dest}' (Windows RAW)."
+                else:
+                    errores.append(f"Windows Spooler ({nombre_dest}): {msg_raw}")
             else:
-                errores.append("Windows: No se encontró una impresora instalada.")
+                errores.append("Windows: No se encontró una impresora instalada en el sistema.")
         except Exception as e_win:
             errores.append(f"Windows RAW: {e_win}")
 

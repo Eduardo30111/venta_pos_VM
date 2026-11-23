@@ -276,7 +276,7 @@ def buscar_actualizaciones_sistema(parent_window=None):
     info_box = tk.Frame(box, bg=t["bg_surface"])
     info_box.pack(fill="x", padx=15, pady=12)
 
-    version_actual = "v4.1.3 (Sincronización Total, Activación Oficial y Seguridad)"
+    version_actual = "v4.1.4 (Sincronización Total, Activación Oficial y Seguridad)"
     canal = "Canal Oficial Estable"
     fecha_check = datetime.now().strftime("%d/%m/%Y %H:%M")
 
@@ -1308,7 +1308,7 @@ def iniciar_configuracion(parent=None, on_save_callback=None):
     u_left = tk.Frame(u_body, bg=t["bg_surface"])
     u_left.pack(side="left", fill="both", expand=True)
 
-    tk.Label(u_left, text="Estado: ✅ Sistema en la versión oficial v4.1.3 (Actualizado)", font=("Segoe UI", 10, "bold"),
+    tk.Label(u_left, text="Estado: ✅ Sistema en la versión oficial v4.1.4 (Actualizado)", font=("Segoe UI", 10, "bold"),
              bg=t["bg_surface"], fg=t["success"]).pack(anchor="w")
     tk.Label(u_left, text="Canal de actualizaciones: Estable • Compatible con Windows 10/11 y macOS", font=("Segoe UI", 9),
              bg=t["bg_surface"], fg=t["text_muted"]).pack(anchor="w", pady=(2, 0))
