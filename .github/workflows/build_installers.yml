@@ -24,6 +24,7 @@ jobs:
 
       - name: Instalar dependencias de pruebas
         run: |
+          sudo apt-get update && sudo apt-get install -y python3-tk || true
           python -m pip install --upgrade pip
           pip install httpx pydantic pydantic_settings fastapi uvicorn "sqlalchemy[asyncio]" greenlet aiosqlite asyncpg "python-jose[cryptography]" bcrypt python-multipart reportlab pillow
 

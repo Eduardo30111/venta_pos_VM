@@ -8,8 +8,29 @@ soporte para MODO CLARO, MODO OSCURO y AUTOMÁTICO,
 resolución responsiva (1366x768 hasta 1920x1080) y contenedores scrollables seguros.
 """
 
-import tkinter as tk
-from tkinter import ttk
+try:
+    import tkinter as tk
+    from tkinter import ttk
+except (ImportError, ModuleNotFoundError):
+    class _DummyWidget:
+        def __init__(self, *args, **kwargs):
+            pass
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    class _DummyModule:
+        Frame = _DummyWidget
+        Canvas = _DummyWidget
+        Scrollbar = _DummyWidget
+        Toplevel = _DummyWidget
+        Label = _DummyWidget
+        Button = _DummyWidget
+        Entry = _DummyWidget
+        def __getattr__(self, name):
+            return _DummyWidget
+
+    tk = _DummyModule()
+    ttk = _DummyModule()
 import os
 import sys
 import json

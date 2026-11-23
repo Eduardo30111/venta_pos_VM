@@ -33,8 +33,14 @@ import textwrap
 import subprocess
 from datetime import datetime
 from typing import Tuple
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+except (ImportError, ModuleNotFoundError):
+    tk = None
+    ttk = None
+    filedialog = None
+    messagebox = None
 
 try:
     from PIL import Image, ImageTk, ImageOps
