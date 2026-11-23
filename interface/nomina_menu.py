@@ -1396,6 +1396,27 @@ def iniciar_nomina(parent_pid="", parent=None):
         bg=t["bg_app"], fg=t["text_primary"], font=("Segoe UI", 9), padx=8, pady=2
     ).pack(side="left", padx=4)
 
+    # Panel KPI de Métricas Diarias / Período de Liquidaciones a Proveedores
+    kpi_prov_frame = tk.Frame(subtab_historial, bg=t["bg_surface"], padx=8, pady=4)
+    kpi_prov_frame.pack(fill="x", padx=6, pady=(2, 4))
+
+    def _crear_kpi_prov_card(parent, titulo, color_val):
+        f = tk.Frame(parent, bg=t["bg_surface_alt"], bd=1, relief="ridge", padx=8, pady=4)
+        f.pack(side="left", fill="both", expand=True, padx=2)
+        tk.Label(f, text=titulo, font=("Segoe UI", 8, "bold"), bg=t["bg_surface_alt"], fg=t["text_secondary"]).pack(anchor="w")
+        lbl_v = tk.Label(f, text="$0 COP", font=("Segoe UI", 10, "bold"), bg=t["bg_surface_alt"], fg=color_val)
+        lbl_v.pack(anchor="w", pady=(1, 0))
+        lbl_s = tk.Label(f, text="", font=("Segoe UI", 7), bg=t["bg_surface_alt"], fg=t["text_secondary"])
+        lbl_s.pack(anchor="w")
+        return lbl_v, lbl_s
+
+    lbl_kpi_tot_v, lbl_kpi_tot_s = _crear_kpi_prov_card(kpi_prov_frame, "💸 TOTAL LIQUIDADO", t["primary"])
+    lbl_kpi_efe_v, lbl_kpi_efe_s = _crear_kpi_prov_card(kpi_prov_frame, "💵 EFECTIVO", t["success"])
+    lbl_kpi_ban_v, lbl_kpi_ban_s = _crear_kpi_prov_card(kpi_prov_frame, "🏦 TRANSFERENCIAS", "#2563EB")
+    lbl_kpi_com_v, lbl_kpi_com_s = _crear_kpi_prov_card(kpi_prov_frame, "📑 LIQ. COMPLETAS", t["text_primary"])
+    lbl_kpi_abo_v, lbl_kpi_abo_s = _crear_kpi_prov_card(kpi_prov_frame, "⏳ ABONOS PARCIALES", "#D97706")
+    lbl_kpi_pro_v, lbl_kpi_pro_s = _crear_kpi_prov_card(kpi_prov_frame, "👥 PROVEEDORES", t["text_primary"])
+
     summary_prov_frame = tk.Frame(subtab_historial, bg=t["bg_surface_alt"], padx=10, pady=5)
     summary_prov_frame.pack(fill="x", side="bottom")
     lbl_tot_hist_prov = tk.Label(
@@ -1586,6 +1607,14 @@ def iniciar_nomina(parent_pid="", parent=None):
             fecha_fin=f_fin
         )
         tot_monto = 0.0
+        tot_efectivo = 0.0
+        tot_bancos = 0.0
+        cant_completas = 0
+        monto_completas = 0.0
+        cant_abonos = 0
+        monto_abonos = 0.0
+        proveedores_set = set()
+
         for r in hist:
             monto_val = float(r.get("monto_liquidado") or r.get("monto_pagado") or 0.0)
             dinero_mas = float(r.get("dinero_de_mas") or 0.0)
@@ -1595,6 +1624,27 @@ def iniciar_nomina(parent_pid="", parent=None):
             u_nom = r.get("usuario") or r.get("usuario_nombre", "Admin")
             ref_val = r.get("referencia") or r.get("referencia_comprobante", "") or "N/A"
             estado_val = r.get("estado", "Aplicado")
+            metodo_p = str(r.get("metodo_pago") or "Efectivo")
+            tipo_p = str(r.get("tipo_pago") or "Total")
+            saldo_rest = float(r.get("saldo_restante") or 0.0)
+            prov_n = str(r.get("proveedor_nombre") or "")
+
+            if prov_n:
+                proveedores_set.add(prov_n)
+
+            if "Revertid" not in estado_val and "Anulad" not in estado_val:
+                if "efectivo" in metodo_p.lower():
+                    tot_efectivo += monto_neto
+                else:
+                    tot_bancos += monto_neto
+
+                if "abono" in tipo_p.lower() or saldo_rest > 0.01:
+                    cant_abonos += 1
+                    monto_abonos += monto_neto
+                else:
+                    cant_completas += 1
+                    monto_completas += monto_neto
+
             if dinero_mas > 0 and estado_val != "Revertida":
                 estado_val = f"Ajustado (-{_fmt_cop(dinero_mas)})"
                 monto_display = _fmt_cop(monto_neto)
@@ -1605,16 +1655,29 @@ def iniciar_nomina(parent_pid="", parent=None):
             item_id = tree_hist_prov.insert("", "end", values=(
                 rec_num,
                 fecha_val,
-                r.get("proveedor_nombre", ""),
+                prov_n,
                 monto_display,
-                r.get("metodo_pago", "Efectivo"),
+                metodo_p,
                 _fmt_cop(r.get("saldo_anterior", 0.0)),
-                _fmt_cop(r.get("saldo_restante", 0.0)),
+                _fmt_cop(saldo_rest),
                 u_nom,
                 ref_val,
                 estado_val
             ))
             mapa_historial_prov[item_id] = dict(r)
+
+        lbl_kpi_tot_v.config(text=_fmt_cop(tot_monto))
+        lbl_kpi_tot_s.config(text=f"{len(hist)} liquidaciones")
+        lbl_kpi_efe_v.config(text=_fmt_cop(tot_efectivo))
+        lbl_kpi_efe_s.config(text="Caja física")
+        lbl_kpi_ban_v.config(text=_fmt_cop(tot_bancos))
+        lbl_kpi_ban_s.config(text="Transferencias / Bancos")
+        lbl_kpi_com_v.config(text=str(cant_completas))
+        lbl_kpi_com_s.config(text=_fmt_cop(monto_completas))
+        lbl_kpi_abo_v.config(text=str(cant_abonos))
+        lbl_kpi_abo_s.config(text=_fmt_cop(monto_abonos))
+        lbl_kpi_pro_v.config(text=str(len(proveedores_set)))
+        lbl_kpi_pro_s.config(text="beneficiarios")
 
         lbl_tot_hist_prov.config(
             text=f"Total Liquidado en Período: {_fmt_cop(tot_monto)} ({len(hist)} liquidaciones registradas)"
@@ -2412,7 +2475,7 @@ def iniciar_nomina(parent_pid="", parent=None):
             metodo = str(target.get("metodo_pago") or "Efectivo")
 
             row_flex = buscar_liquidacion_proveedor_flexible(
-                identificador=l_id or rec_r,
+                identificador=rec_r or l_id,
                 proveedor_id=p_id,
                 proveedor_nombre=p_nom,
                 monto=m_orig,
@@ -2426,10 +2489,15 @@ def iniciar_nomina(parent_pid="", parent=None):
                 f_orig = str(row_flex.get("fecha", f_orig))
                 metodo = str(row_flex.get("metodo_pago", metodo))
 
+            import re
+            digs = re.findall(r'\d+', str(rec_r))
+            rec_display = f"LP-{int(digs[-1]):04d}" if digs else str(rec_r)
+
             lim_aj = max(0.0, round(m_orig - d_prev, 2))
             cur_liq["val"] = {
                 "id": l_id,
-                "recibo": rec_r,
+                "recibo": rec_display,
+                "recibo_interno": rec_r,
                 "proveedor_id": p_id,
                 "proveedor_nombre": p_nom,
                 "monto_orig": m_orig,
@@ -2439,7 +2507,7 @@ def iniciar_nomina(parent_pid="", parent=None):
                 "metodo": metodo
             }
 
-            lbl_sub_hdr.config(text=f"Recibo: {rec_r} | Proveedor: {p_nom}")
+            lbl_sub_hdr.config(text=f"Recibo: {rec_display} | Proveedor: {p_nom}")
             lbl_card_orig.config(text=f"Monto Liquidado Original: {_fmt_cop(m_orig)}")
             if d_prev > 0:
                 lbl_card_prev.config(text=f"Dinero de Más Corregido Anteriormente: {_fmt_cop(d_prev)}")

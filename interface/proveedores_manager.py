@@ -147,13 +147,20 @@ def recalcular_saldo_proveedor(proveedor_id: int, conn: Optional[sqlite3.Connect
         p_nom = str(p_row[1]).strip() if p_row and p_row[1] else ""
 
         # Sumar saldos de cuentas por pagar no anuladas con coincidencia flexible de ID y nombre
-        cur.execute("""
+        cur.execute("PRAGMA table_info(cuentas_por_pagar_proveedores)")
+        cols_cxp = {c[1] for c in cur.fetchall()}
+        col_pv = "precio_venta" if "precio_venta" in cols_cxp else "0.0"
+        col_mc = "monto_comision" if "monto_comision" in cols_cxp else "0.0"
+        col_mp = "monto_pagado" if "monto_pagado" in cols_cxp else "0.0"
+        col_sp = "saldo_pendiente" if "saldo_pendiente" in cols_cxp else "0.0"
+
+        cur.execute(f"""
             SELECT 
                 COUNT(id),
-                COALESCE(SUM(CASE WHEN estado != 'Anulada' THEN precio_venta ELSE 0.0 END), 0.0),
-                COALESCE(SUM(CASE WHEN estado != 'Anulada' THEN monto_comision ELSE 0.0 END), 0.0),
-                COALESCE(SUM(CASE WHEN estado != 'Anulada' THEN monto_pagado ELSE 0.0 END), 0.0),
-                COALESCE(SUM(CASE WHEN estado != 'Anulada' THEN saldo_pendiente ELSE 0.0 END), 0.0)
+                COALESCE(SUM(CASE WHEN estado != 'Anulada' THEN {col_pv} ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN estado != 'Anulada' THEN {col_mc} ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN estado != 'Anulada' THEN {col_mp} ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN estado != 'Anulada' THEN {col_sp} ELSE 0.0 END), 0.0)
             FROM cuentas_por_pagar_proveedores
             WHERE (proveedor_id = ? OR CAST(proveedor_id AS TEXT) = ? OR CAST(proveedor_id AS TEXT) LIKE ? OR ((proveedor_id IS NULL OR proveedor_id = 0 OR proveedor_id = '') AND LOWER(proveedor_nombre) = LOWER(?)))
         """, (proveedor_id, str(proveedor_id), f"{proveedor_id} - %", p_nom))
@@ -1238,7 +1245,13 @@ def obtener_historial_liquidaciones_proveedor(
 
         cur.execute("PRAGMA table_info(liquidaciones_proveedores)")
         cols_lp = {c[1] for c in cur.fetchall()}
-        col_fecha_reg = "COALESCE(fecha_registro, created_at, fecha) as fecha_registro" if "fecha_registro" in cols_lp else ("created_at as fecha_registro" if "created_at" in cols_lp else "fecha as fecha_registro")
+        cols_cands = [c for c in ["fecha_registro", "created_at", "fecha"] if c in cols_lp]
+        if len(cols_cands) > 1:
+            col_fecha_reg = f"COALESCE({', '.join(cols_cands)}, '') as fecha_registro"
+        elif cols_cands:
+            col_fecha_reg = f"{cols_cands[0]} as fecha_registro"
+        else:
+            col_fecha_reg = "fecha as fecha_registro"
         col_dinero_mas = "COALESCE(dinero_de_mas, 0.0) as dinero_de_mas" if "dinero_de_mas" in cols_lp else "0.0 as dinero_de_mas"
         col_monto_aj = "COALESCE(monto_ajustado, monto_liquidado) as monto_ajustado" if "monto_ajustado" in cols_lp else "monto_liquidado as monto_ajustado"
         col_created_at = "created_at" if "created_at" in cols_lp else "fecha as created_at"
@@ -1977,7 +1990,13 @@ def buscar_liquidacion_proveedor_flexible(
         col_monto = "monto_liquidado" if "monto_liquidado" in cols_lp else "monto_pagado"
         col_dinero = "COALESCE(dinero_de_mas, 0.0)" if "dinero_de_mas" in cols_lp else "0.0"
         col_ajustado = f"COALESCE(monto_ajustado, {col_monto})" if "monto_ajustado" in cols_lp else col_monto
-        col_fecha_reg = "COALESCE(fecha_registro, created_at, fecha)" if "fecha_registro" in cols_lp else ("created_at" if "created_at" in cols_lp else "fecha")
+        cols_cands = [c for c in ["fecha_registro", "created_at", "fecha"] if c in cols_lp]
+        if len(cols_cands) > 1:
+            col_fecha_reg = f"COALESCE({', '.join(cols_cands)}, '')"
+        elif cols_cands:
+            col_fecha_reg = cols_cands[0]
+        else:
+            col_fecha_reg = "fecha"
 
         cols_sql = f"""
             SELECT id, {col_recibo} as numero_recibo, proveedor_id, proveedor_nombre, {col_monto} as monto_liquidado,
@@ -1993,7 +2012,15 @@ def buscar_liquidacion_proveedor_flexible(
             cur.execute(f"{cols_sql} WHERE id = ?", (int(id_str),))
             row = cur.fetchone()
             if row:
-                return _row_a_dict_liq(row)
+                d_c = _row_a_dict_liq(row)
+                m_ok = True
+                if monto is not None and abs(float(d_c.get("monto_liquidado") or 0.0) - float(monto)) > 0.05:
+                    m_ok = False
+                p_ok = True
+                if proveedor_nombre and str(d_c.get("proveedor_nombre") or "").strip().lower() != str(proveedor_nombre).strip().lower():
+                    p_ok = False
+                if m_ok and p_ok:
+                    return d_c
 
         # 2. Coincidencia exacta por número de recibo / liquidación
         if id_str:
@@ -2047,13 +2074,6 @@ def buscar_liquidacion_proveedor_flexible(
             row = cur.fetchone()
             if row:
                 return _row_a_dict_liq(row)
-                p_args.extend([f_c, f"{f_c}%"])
-
-            w_clause = " AND ".join(filtros)
-            cur.execute(f"{cols_sql} WHERE {w_clause} ORDER BY id DESC LIMIT 1", p_args)
-            row = cur.fetchone()
-            if row:
-                return _row_a_dict_liq(row)
 
         # 5. Fallback a historial_liquidaciones si no está en liquidaciones_proveedores
         try:
@@ -2083,6 +2103,47 @@ def buscar_liquidacion_proveedor_flexible(
                         }
         except Exception:
             pass
+
+        # 6. Fallback cruzado a la otra base de datos SQLite si existe (puente ventas.db <-> vmpos_server.db)
+        if not getattr(conn, "_es_cruzado", False):
+            try:
+                from interface.config import DATABASE_DIR
+                db_act = ""
+                try:
+                    cur.execute("PRAGMA database_list")
+                    db_rows = cur.fetchall()
+                    if db_rows and len(db_rows[0]) > 2 and db_rows[0][2]:
+                        db_act = os.path.abspath(db_rows[0][2])
+                except Exception:
+                    pass
+
+                rutas_cand = [
+                    os.path.join(DATABASE_DIR, "vmpos_server.db"),
+                    os.path.join(DATABASE_DIR, "ventas.db")
+                ]
+                for r_c in rutas_cand:
+                    if os.path.exists(r_c):
+                        r_abs = os.path.abspath(r_c)
+                        if db_act and r_abs == db_act:
+                            continue
+                        try:
+                            conn_cruz = sqlite3.connect(r_c, timeout=2.0)
+                            conn_cruz._es_cruzado = True
+                            res_cruz = buscar_liquidacion_proveedor_flexible(
+                                identificador=identificador,
+                                proveedor_id=proveedor_id,
+                                proveedor_nombre=proveedor_nombre,
+                                monto=monto,
+                                fecha=fecha,
+                                conn=conn_cruz
+                            )
+                            conn_cruz.close()
+                            if res_cruz:
+                                return res_cruz
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         return None
     finally:
@@ -2250,6 +2311,251 @@ def _fmt_cop(val: float) -> str:
         return "$0 COP"
 
 
+def _sincronizar_cambio_fecha_ambas_db(
+    id_ref: Any,
+    recibo: str,
+    prov_nom: str,
+    monto_flt: float,
+    f_normalizada: str,
+    h_normalizada: str,
+    motivo: str,
+    usuario: str,
+    conn_origen: Optional[sqlite3.Connection] = None
+):
+    """Garantiza la sincronización atómica del cambio de fecha en ventas.db y vmpos_server.db."""
+    try:
+        from interface.config import DATABASE_DIR
+        rutas_db = [
+            os.path.join(DATABASE_DIR, "ventas.db"),
+            os.path.join(DATABASE_DIR, "vmpos_server.db")
+        ]
+        nuevo_mes_anio = f"{f_normalizada[5:7]}-{f_normalizada[:4]}"
+        obs_txt = f"[Fecha contable cambiada a {f_normalizada} por {usuario}: {motivo}]"
+
+        db_file_origen = ""
+        if conn_origen:
+            try:
+                cur_o = conn_origen.cursor()
+                cur_o.execute("PRAGMA database_list")
+                rows_o = cur_o.fetchall()
+                if rows_o and len(rows_o[0]) > 2 and rows_o[0][2]:
+                    db_file_origen = os.path.abspath(rows_o[0][2])
+            except Exception:
+                pass
+
+        import re
+        digs = re.findall(r'\d+', str(recibo or id_ref or ''))
+        n_val = int(digs[-1]) if digs else 0
+        v_lp = f"LP-{n_val:04d}" if n_val else ""
+        v_lq = f"LQ-{n_val:05d}" if n_val else ""
+
+        for r_db in rutas_db:
+            if not os.path.exists(r_db):
+                continue
+            if db_file_origen and os.path.abspath(r_db) == db_file_origen:
+                continue
+            try:
+                c_s = sqlite3.connect(r_db, timeout=10.0)
+                cur_s = c_s.cursor()
+                cur_s.execute("PRAGMA table_info(liquidaciones_proveedores)")
+                cols_lp = {c[1] for c in cur_s.fetchall()}
+                col_rec = "numero_recibo" if "numero_recibo" in cols_lp else "numero_liquidacion"
+                col_m = "monto_liquidado" if "monto_liquidado" in cols_lp else "monto_pagado"
+
+                where_parts = ["id = ?", "id = ?"]
+                params_up = [f_normalizada, h_normalizada, obs_txt, id_ref, n_val]
+                if recibo:
+                    where_parts.append(f"{col_rec} = ?")
+                    params_up.append(recibo)
+                if v_lp:
+                    where_parts.append(f"{col_rec} = ?")
+                    params_up.append(v_lp)
+                if v_lq:
+                    where_parts.append(f"{col_rec} = ?")
+                    params_up.append(v_lq)
+                if n_val:
+                    where_parts.append(f"({col_rec} LIKE ? AND ABS({col_m} - ?) < 0.05)")
+                    params_up.extend([f"%{n_val}", monto_flt])
+                if prov_nom:
+                    where_parts.append(f"(proveedor_nombre = ? AND ABS({col_m} - ?) < 0.05)")
+                    params_up.extend([prov_nom, monto_flt])
+
+                set_clauses = ["fecha = ?", "hora = ?", "observaciones = COALESCE(observaciones, '') || ' | ' || ?"]
+                if "mes_anio" in cols_lp:
+                    set_clauses.append("mes_anio = ?")
+                    params_up.insert(3, nuevo_mes_anio)
+
+                cur_s.execute(f"UPDATE liquidaciones_proveedores SET {', '.join(set_clauses)} WHERE {' OR '.join(where_parts)}", params_up)
+
+                # Gastos asociados
+                try:
+                    cur_s.execute("""
+                        UPDATE gastos
+                        SET fecha = ?, hora = ?, fecha_pago = ?,
+                            observaciones = COALESCE(observaciones, '') || ' | ' || ?
+                        WHERE (comprobante = ? OR comprobante = ? OR comprobante = ? OR comprobante LIKE ? OR comprobante LIKE ?)
+                           OR (proveedor = ? AND ABS(valor - ?) < 0.05)
+                    """, (
+                        f_normalizada, h_normalizada, f"{f_normalizada} {h_normalizada}",
+                        obs_txt,
+                        recibo, v_lq, v_lp, f"%{recibo}%", f"%{n_val}%",
+                        prov_nom, monto_flt
+                    ))
+                except Exception:
+                    pass
+
+                # Movimientos financieros
+                try:
+                    cur_s.execute("""
+                        UPDATE movimientos_financieros
+                        SET fecha = ?, hora = ?
+                        WHERE referencia_origen = ? OR referencia_origen = ? OR referencia_origen = ?
+                           OR (tipo = 'PAGO_PROVEEDOR' AND ABS(monto - ?) < 0.05)
+                    """, (f_normalizada, h_normalizada, recibo, v_lq, v_lp, monto_flt))
+                except Exception:
+                    pass
+
+                # Movimientos caja
+                try:
+                    cur_s.execute("""
+                        UPDATE movimientos_caja
+                        SET fecha = ?, hora = ?
+                        WHERE referencia_id = ? OR referencia_id = ? OR referencia_id = ?
+                           OR (tipo = 'EGRESO' AND ABS(monto - ?) < 0.05)
+                    """, (f_normalizada, h_normalizada, recibo, v_lq, v_lp, monto_flt))
+                except Exception:
+                    pass
+
+                c_s.commit()
+                c_s.close()
+            except Exception as e_s:
+                pass
+    except Exception:
+        pass
+
+
+def _sincronizar_dinero_de_mas_ambas_db(
+    id_ref: Any,
+    recibo: str,
+    prov_id: Any,
+    prov_nom: str,
+    monto_flt: float,
+    monto_sobrante_flt: float,
+    nuevo_dinero_mas: float,
+    nuevo_monto_ajustado: float,
+    numero_ajuste: str,
+    f_contable: str,
+    h_contable: str,
+    motivo: str,
+    usuario: str,
+    conn_origen: Optional[sqlite3.Connection] = None
+):
+    """Garantiza la sincronización de correcciones por dinero de más en la base de datos alterna."""
+    try:
+        from interface.config import DATABASE_DIR
+        rutas_db = [
+            os.path.join(DATABASE_DIR, "ventas.db"),
+            os.path.join(DATABASE_DIR, "vmpos_server.db")
+        ]
+
+        db_file_origen = ""
+        if conn_origen:
+            try:
+                cur_o = conn_origen.cursor()
+                cur_o.execute("PRAGMA database_list")
+                rows_o = cur_o.fetchall()
+                if rows_o and len(rows_o[0]) > 2 and rows_o[0][2]:
+                    db_file_origen = os.path.abspath(rows_o[0][2])
+            except Exception:
+                pass
+
+        import re
+        digs = re.findall(r'\d+', str(recibo or id_ref or ''))
+        n_val = int(digs[-1]) if digs else 0
+        v_lp = f"LP-{n_val:04d}" if n_val else ""
+        v_lq = f"LQ-{n_val:05d}" if n_val else ""
+        fecha_reg = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        for r_db in rutas_db:
+            if not os.path.exists(r_db):
+                continue
+            if db_file_origen and os.path.abspath(r_db) == db_file_origen:
+                continue
+            try:
+                c_s = sqlite3.connect(r_db, timeout=10.0)
+                cur_s = c_s.cursor()
+                cur_s.execute("PRAGMA table_info(liquidaciones_proveedores)")
+                cols_lp = {c[1] for c in cur_s.fetchall()}
+                col_rec = "numero_recibo" if "numero_recibo" in cols_lp else "numero_liquidacion"
+                col_m = "monto_liquidado" if "monto_liquidado" in cols_lp else "monto_pagado"
+
+                where_parts = ["id = ?", "id = ?"]
+                params_up = [nuevo_dinero_mas, nuevo_monto_ajustado, id_ref, n_val]
+                if recibo:
+                    where_parts.append(f"{col_rec} = ?")
+                    params_up.append(recibo)
+                if v_lp:
+                    where_parts.append(f"{col_rec} = ?")
+                    params_up.append(v_lp)
+                if v_lq:
+                    where_parts.append(f"{col_rec} = ?")
+                    params_up.append(v_lq)
+                if n_val:
+                    where_parts.append(f"({col_rec} LIKE ? AND ABS({col_m} - ?) < 0.05)")
+                    params_up.extend([f"%{n_val}", monto_flt])
+                if prov_nom:
+                    where_parts.append(f"(proveedor_nombre = ? AND ABS({col_m} - ?) < 0.05)")
+                    params_up.extend([prov_nom, monto_flt])
+
+                set_clauses = ["dinero_de_mas = ?", "monto_ajustado = ?"]
+                cur_s.execute(f"UPDATE liquidaciones_proveedores SET {', '.join(set_clauses)} WHERE {' OR '.join(where_parts)}", params_up)
+
+                # Registrar en ajustes_liquidaciones_proveedores si existe
+                try:
+                    cur_s.execute("PRAGMA table_info(ajustes_liquidaciones_proveedores)")
+                    cols_aj = {c[1] for c in cur_s.fetchall()}
+                    if cols_aj:
+                        cur_s.execute("""
+                            INSERT OR IGNORE INTO ajustes_liquidaciones_proveedores (
+                                numero_ajuste, liquidacion_id, numero_recibo, proveedor_id, proveedor_nombre,
+                                monto_ajuste, fecha_movimiento, hora_movimiento, fecha_registro,
+                                usuario, motivo, estado, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Aplicado', ?)
+                        """, (
+                            numero_ajuste, id_ref, recibo, prov_id, prov_nom,
+                            monto_sobrante_flt, f_contable, h_contable, fecha_reg,
+                            usuario, motivo, fecha_reg
+                        ))
+                except Exception:
+                    pass
+
+                # Contra-asiento en gastos
+                try:
+                    cur_s.execute("""
+                        INSERT OR IGNORE INTO gastos (
+                            concepto, valor, fecha, hora, metodo_pago, categoria, clasificacion,
+                            descripcion, estado, usuario, proveedor, comprobante, observaciones,
+                            fecha_pago, fecha_registro
+                        ) VALUES (?, ?, ?, ?, 'Efectivo', 'Proveedores', 'Ajuste Liquidación', ?, 'Pagado', ?, ?, ?, ?, ?, ?)
+                    """, (
+                        f"Ajuste Dinero de Más - {prov_nom}",
+                        -monto_sobrante_flt, f_contable, h_contable,
+                        f"Corrección contable por dinero sobrante en liquidación {recibo}",
+                        usuario, prov_nom, numero_ajuste,
+                        f"Ajuste a liquidación {recibo}: {motivo}",
+                        f"{f_contable} {h_contable}", fecha_reg
+                    ))
+                except Exception:
+                    pass
+
+                c_s.commit()
+                c_s.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _aplicar_cambio_fecha_sqlite(
     conn: sqlite3.Connection,
     liquidacion_id: Any,
@@ -2262,15 +2568,24 @@ def _aplicar_cambio_fecha_sqlite(
     proveedor_nombre: Optional[str] = None,
     monto: Optional[float] = None
 ) -> Dict[str, Any]:
+    ident_busqueda = numero_recibo or liquidacion_id
     liq = buscar_liquidacion_proveedor_flexible(
-        identificador=liquidacion_id or numero_recibo,
+        identificador=ident_busqueda,
         proveedor_id=proveedor_id,
         proveedor_nombre=proveedor_nombre,
         monto=monto,
         conn=conn
     )
+    if not liq and liquidacion_id and str(liquidacion_id) != str(ident_busqueda):
+        liq = buscar_liquidacion_proveedor_flexible(
+            identificador=liquidacion_id,
+            proveedor_id=proveedor_id,
+            proveedor_nombre=proveedor_nombre,
+            monto=monto,
+            conn=conn
+        )
     if not liq:
-        return {"exito": False, "ok": False, "mensaje": f"Liquidación #{liquidacion_id} no encontrada."}
+        return {"exito": False, "ok": False, "mensaje": f"Liquidación #{numero_recibo or liquidacion_id} no encontrada."}
 
     id_real = liq["id"]
     recibo = liq["numero_recibo"] or (f"LQ-{id_real:05d}" if isinstance(id_real, int) else str(id_real))
@@ -2447,6 +2762,22 @@ def _aplicar_cambio_fecha_sqlite(
     except Exception as e_vfy:
         pass
 
+    # 9. Sincronización cruzada automática con vmpos_server.db si existe
+    try:
+        _sincronizar_cambio_fecha_ambas_db(
+            id_ref=id_real,
+            recibo=recibo,
+            prov_nom=prov_nom,
+            monto_flt=monto_flt,
+            f_normalizada=f_normalizada,
+            h_normalizada=h_normalizada,
+            motivo=motivo,
+            usuario=usuario,
+            conn_origen=conn
+        )
+    except Exception:
+        pass
+
     return {
         "exito": True,
         "ok": True,
@@ -2526,6 +2857,8 @@ def actualizar_fecha_liquidacion_proveedor_db(
                     except Exception as e_loc_sync:
                         print(f"Aviso replicando cambio de fecha local: {e_loc_sync}")
                     return res_api
+                elif resp.status_code == 404:
+                    print(f"Aviso API retornó 404 para {target_api_id}. Recurriendo a sincronización directa en SQLite.")
                 elif 400 <= resp.status_code < 500:
                     det = resp.json().get("detail", resp.text) if hasattr(resp, "json") else resp.text
                     return {"exito": False, "ok": False, "mensaje": det}
@@ -2578,14 +2911,22 @@ def _aplicar_dinero_de_mas_sqlite(
     proveedor_id: Optional[int] = None,
     proveedor_nombre: Optional[str] = None
 ) -> Dict[str, Any]:
+    ident_busqueda = numero_recibo or liquidacion_id
     liq = buscar_liquidacion_proveedor_flexible(
-        identificador=liquidacion_id or numero_recibo,
+        identificador=ident_busqueda,
         proveedor_id=proveedor_id,
         proveedor_nombre=proveedor_nombre,
         conn=conn
     )
+    if not liq and liquidacion_id and str(liquidacion_id) != str(ident_busqueda):
+        liq = buscar_liquidacion_proveedor_flexible(
+            identificador=liquidacion_id,
+            proveedor_id=proveedor_id,
+            proveedor_nombre=proveedor_nombre,
+            conn=conn
+        )
     if not liq:
-        return {"exito": False, "ok": False, "mensaje": f"Liquidación #{liquidacion_id} no encontrada."}
+        return {"exito": False, "ok": False, "mensaje": f"Liquidación #{numero_recibo or liquidacion_id} no encontrada."}
 
     id_real = liq["id"]
     recibo = liq["numero_recibo"] or (f"LQ-{id_real:05d}" if isinstance(id_real, int) else str(id_real))
@@ -2798,6 +3139,27 @@ def _aplicar_dinero_de_mas_sqlite(
     except Exception as e_sync_aj:
         print(f"Aviso encolando sync de dinero de más: {e_sync_aj}")
 
+    # 9. Sincronización cruzada automática con vmpos_server.db si existe
+    try:
+        _sincronizar_dinero_de_mas_ambas_db(
+            id_ref=id_real,
+            recibo=recibo,
+            prov_id=prov_id,
+            prov_nom=prov_nom,
+            monto_flt=monto_liquidado,
+            monto_sobrante_flt=monto_sobrante_flt,
+            nuevo_dinero_mas=nuevo_dinero_mas,
+            nuevo_monto_ajustado=nuevo_monto_ajustado,
+            numero_ajuste=numero_ajuste,
+            f_contable=f_contable,
+            h_contable=h_contable,
+            motivo=motivo,
+            usuario=usuario,
+            conn_origen=conn
+        )
+    except Exception:
+        pass
+
     return {
         "exito": True,
         "ok": True,
@@ -2895,6 +3257,8 @@ def registrar_dinero_de_mas_proveedor_db(
                     except Exception as e_loc_sync:
                         print(f"Aviso replicando dinero de más local: {e_loc_sync}")
                     return res_api
+                elif resp.status_code == 404:
+                    print(f"Aviso API retornó 404 para {target_api_id}. Recurriendo a sincronización directa en SQLite.")
                 elif 400 <= resp.status_code < 500:
                     det = resp.json().get("detail", resp.text) if hasattr(resp, "json") else resp.text
                     return {"exito": False, "ok": False, "mensaje": det}

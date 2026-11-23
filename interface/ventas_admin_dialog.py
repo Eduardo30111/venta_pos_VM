@@ -272,6 +272,27 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
     e_busq.bind("<Return>", lambda e: cargar_ventas())
     e_fecha.bind("<Return>", lambda e: cargar_ventas())
 
+    # Panel KPI de Ventas del Período / Día
+    kpi_ventas_frame = tk.Frame(dialog, bg=t["bg_card"], relief="solid", bd=1, padx=10, pady=4)
+    kpi_ventas_frame.pack(fill="x", padx=12, pady=(0, 6))
+
+    def _crear_kpi_venta_card(parent, titulo, color_val):
+        f = tk.Frame(parent, bg=t["bg_app"], bd=1, relief="ridge", padx=8, pady=4)
+        f.pack(side="left", fill="both", expand=True, padx=2)
+        tk.Label(f, text=titulo, font=("Segoe UI", 8, "bold"), bg=t["bg_app"], fg=t["text_muted"] if "text_muted" in t else "#64748B").pack(anchor="w")
+        lbl_v = tk.Label(f, text="$0 COP", font=("Segoe UI", 10, "bold"), bg=t["bg_app"], fg=color_val)
+        lbl_v.pack(anchor="w", pady=(1, 0))
+        lbl_s = tk.Label(f, text="", font=("Segoe UI", 7), bg=t["bg_app"], fg=t["text_muted"] if "text_muted" in t else "#64748B")
+        lbl_s.pack(anchor="w")
+        return lbl_v, lbl_s
+
+    lbl_kpi_v_tot, lbl_kpi_s_tot = _crear_kpi_venta_card(kpi_ventas_frame, "💰 TOTAL VÁLIDO", t["accent"])
+    lbl_kpi_v_efe, lbl_kpi_s_efe = _crear_kpi_venta_card(kpi_ventas_frame, "💵 EFECTIVO", "#059669")
+    lbl_kpi_v_tra, lbl_kpi_s_tra = _crear_kpi_venta_card(kpi_ventas_frame, "💳 TRANSFERENCIAS", "#2563EB")
+    lbl_kpi_v_fia, lbl_kpi_s_fia = _crear_kpi_venta_card(kpi_ventas_frame, "📝 FIADOS / CRÉDITO", "#D97706")
+    lbl_kpi_v_rec, lbl_kpi_s_rec = _crear_kpi_venta_card(kpi_ventas_frame, "📥 RECAUDO REAL", "#0D9488")
+    lbl_kpi_v_anu, lbl_kpi_s_anu = _crear_kpi_venta_card(kpi_ventas_frame, "🚫 ANULADAS / CANC.", "#DC2626")
+
     # Cuerpo principal con Split
     body = tk.Frame(dialog, bg=t["bg_app"])
     body.pack(fill="both", expand=True, padx=12, pady=6)
@@ -456,8 +477,13 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
             else:
                 fecha_filtro = ""
 
-        ventas_totales_sum = 0.0
-        ventas_contador = 0
+        sum_validas = 0.0
+        sum_efectivo = 0.0
+        sum_transfer = 0.0
+        sum_fiados = 0.0
+        sum_anuladas = 0.0
+        cnt_validas = 0
+        cnt_anuladas = 0
 
         ventas_cargadas = False
         if api is not None:
@@ -487,9 +513,22 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                         tot = float(v.get("total") or 0.0)
                         est = v.get("estado") or "Completada"
 
-                        if filtro_est != "Todos" or est not in ("Anulada", "Pendiente_Caja"):
-                            ventas_totales_sum += tot
-                        ventas_contador += 1
+                        is_anulada = est in ("Anulada", "Pendiente_Caja")
+                        met_low = str(met).lower()
+                        if is_anulada:
+                            sum_anuladas += tot
+                            cnt_anuladas += 1
+                        else:
+                            sum_validas += tot
+                            cnt_validas += 1
+                            if "efectivo" in met_low:
+                                sum_efectivo += tot
+                            elif any(k in met_low for k in ("transf", "banc", "nequi", "daviplata", "tarjeta")):
+                                sum_transfer += tot
+                            elif any(k in met_low for k in ("fiad", "créd", "cred")):
+                                sum_fiados += tot
+                            else:
+                                sum_efectivo += tot
 
                         tree.insert("", "end", values=(
                             id_v, fac, f_v, h_disp,
@@ -540,20 +579,49 @@ def abrir_gestion_ventas(parent=None, usuario_actual="Administrador", parent_pid
                             continue
 
                     tot_item = float(r['total_venta'] or 0.0)
-                    if filtro_est != "Todos" or est not in ("Anulada", "Pendiente_Caja"):
-                        ventas_totales_sum += tot_item
-                    ventas_contador += 1
+                    met_item = r["metodo_pago"] or "Efectivo"
+                    met_low = str(met_item).lower()
+                    is_anulada = est in ("Anulada", "Pendiente_Caja")
+
+                    if is_anulada:
+                        sum_anuladas += tot_item
+                        cnt_anuladas += 1
+                    else:
+                        sum_validas += tot_item
+                        cnt_validas += 1
+                        if "efectivo" in met_low:
+                            sum_efectivo += tot_item
+                        elif any(k in met_low for k in ("transf", "banc", "nequi", "daviplata", "tarjeta")):
+                            sum_transfer += tot_item
+                        elif any(k in met_low for k in ("fiad", "créd", "cred")):
+                            sum_fiados += tot_item
+                        else:
+                            sum_efectivo += tot_item
 
                     h_disp = _formatear_hora_display(r["hora_venta"])
                     tree.insert("", "end", values=(
                         id_v, fac, r["fecha_venta"], h_disp,
-                        op, doc, r["metodo_pago"] or "Efectivo",
+                        op, doc, met_item,
                         f"${tot_item:,.0f}", est
                     ), tags=(est,))
             finally:
                 conn.close()
 
-        lbl_resumen_ventas.config(text=f"📊 {ventas_contador} ventas | ${ventas_totales_sum:,.0f} COP")
+        recaudo_real = sum_efectivo + sum_transfer
+        lbl_kpi_v_tot.config(text=f"${sum_validas:,.0f} COP")
+        lbl_kpi_s_tot.config(text=f"{cnt_validas} ventas válidas")
+        lbl_kpi_v_efe.config(text=f"${sum_efectivo:,.0f} COP")
+        lbl_kpi_s_efe.config(text="Caja física")
+        lbl_kpi_v_tra.config(text=f"${sum_transfer:,.0f} COP")
+        lbl_kpi_s_tra.config(text="Bancos / Electrónico")
+        lbl_kpi_v_fia.config(text=f"${sum_fiados:,.0f} COP")
+        lbl_kpi_s_fia.config(text="Por cobrar")
+        lbl_kpi_v_rec.config(text=f"${recaudo_real:,.0f} COP")
+        lbl_kpi_s_rec.config(text="Efectivo + Transf.")
+        lbl_kpi_v_anu.config(text=f"${sum_anuladas:,.0f} COP")
+        lbl_kpi_s_anu.config(text=f"{cnt_anuladas} anuladas")
+
+        lbl_resumen_ventas.config(text=f"📊 {cnt_validas} válidas ({cnt_anuladas} anuladas) | ${sum_validas:,.0f} COP")
 
     def abrir_modal_anular():
         vals = obtener_venta_seleccionada()
