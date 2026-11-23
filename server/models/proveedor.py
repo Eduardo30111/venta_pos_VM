@@ -36,4 +36,43 @@ class LiquidacionProveedor(Base):
     observaciones = Column(String, nullable=True)
     estado = Column(String, default="Completada")
     idempotency_key = Column(String, unique=True, index=True, nullable=True)
+    fecha_registro = Column(String, nullable=True)
+    dinero_de_mas = Column(Float, default=0.0)
+    monto_ajustado = Column(Float, default=0.0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AjusteLiquidacionProveedor(Base):
+    __tablename__ = "ajustes_liquidaciones_proveedores"
+    id = Column(Integer, primary_key=True, index=True)
+    numero_ajuste = Column(String, unique=True, index=True, nullable=False)
+    liquidacion_id = Column(Integer, ForeignKey("liquidaciones_proveedores.id"), nullable=False, index=True)
+    numero_recibo = Column(String, nullable=False)
+    proveedor_id = Column(Integer, ForeignKey("proveedores.id"), nullable=False, index=True)
+    proveedor_nombre = Column(String, nullable=False)
+    monto_ajuste = Column(Float, nullable=False)
+    fecha_movimiento = Column(String, nullable=False, index=True)
+    hora_movimiento = Column(String, nullable=False)
+    fecha_registro = Column(String, nullable=False)
+    usuario = Column(String, nullable=False)
+    motivo = Column(String, nullable=False)
+    estado = Column(String, default="Aplicado")
+    idempotency_key = Column(String, unique=True, index=True, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AuditoriaLiquidacion(Base):
+    __tablename__ = "auditoria_liquidaciones"
+    id = Column(Integer, primary_key=True, index=True)
+    liquidacion_id = Column(Integer, nullable=False, index=True)
+    numero_recibo = Column(String, nullable=False)
+    proveedor_id = Column(Integer, nullable=False)
+    proveedor_nombre = Column(String, nullable=False)
+    accion = Column(String, nullable=False)
+    fecha_anterior = Column(String, nullable=True)
+    fecha_nueva = Column(String, nullable=True)
+    monto = Column(Float, nullable=True)
+    usuario = Column(String, nullable=False)
+    motivo = Column(String, nullable=False)
+    fecha_registro = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

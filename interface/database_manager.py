@@ -594,6 +594,57 @@ def inicializar_base_datos(db_path=None):
                 f"uq_{tabla_idem}_idempotency_key",
             )
 
+        # 22.C Campos de trazabilidad de fechas y ajustes para liquidaciones de proveedores
+        _safe_alter_column(cursor, "ALTER TABLE liquidaciones_proveedores ADD COLUMN fecha_registro TEXT", "liquidaciones_proveedores.fecha_registro")
+        _safe_alter_column(cursor, "ALTER TABLE liquidaciones_proveedores ADD COLUMN dinero_de_mas REAL DEFAULT 0.0", "liquidaciones_proveedores.dinero_de_mas")
+        _safe_alter_column(cursor, "ALTER TABLE liquidaciones_proveedores ADD COLUMN monto_ajustado REAL DEFAULT 0.0", "liquidaciones_proveedores.monto_ajustado")
+        _safe_alter_column(cursor, "ALTER TABLE liquidaciones_proveedores ADD COLUMN created_at TEXT", "liquidaciones_proveedores.created_at")
+
+        # 22.D Tabla de Ajustes de Dinero de Más para Liquidaciones de Proveedores
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ajustes_liquidaciones_proveedores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                numero_ajuste TEXT UNIQUE NOT NULL,
+                liquidacion_id INTEGER NOT NULL,
+                numero_recibo TEXT NOT NULL,
+                proveedor_id INTEGER NOT NULL,
+                proveedor_nombre TEXT NOT NULL,
+                monto_ajuste REAL NOT NULL,
+                fecha_movimiento TEXT NOT NULL,
+                hora_movimiento TEXT NOT NULL,
+                fecha_registro TEXT NOT NULL,
+                usuario TEXT NOT NULL,
+                motivo TEXT NOT NULL,
+                estado TEXT NOT NULL DEFAULT 'Aplicado',
+                idempotency_key TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (liquidacion_id) REFERENCES liquidaciones_proveedores(id),
+                FOREIGN KEY (proveedor_id) REFERENCES proveedores(id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_aj_liq_id ON ajustes_liquidaciones_proveedores(liquidacion_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_aj_liq_fecha ON ajustes_liquidaciones_proveedores(fecha_movimiento)")
+
+        # 22.E Tabla de Auditoría de Liquidaciones (Cambios de fecha, ajustes y reversiones)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS auditoria_liquidaciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                liquidacion_id INTEGER NOT NULL,
+                numero_recibo TEXT NOT NULL,
+                proveedor_id INTEGER NOT NULL,
+                proveedor_nombre TEXT NOT NULL,
+                accion TEXT NOT NULL,
+                fecha_anterior TEXT,
+                fecha_nueva TEXT,
+                monto REAL,
+                usuario TEXT NOT NULL,
+                motivo TEXT NOT NULL,
+                fecha_registro TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_aud_liq_id ON auditoria_liquidaciones(liquidacion_id)")
+
         # 23. Tabla de Cola de Sincronización Offline Persistente
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cola_sincronizacion (

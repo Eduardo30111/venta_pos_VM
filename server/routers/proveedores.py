@@ -9,8 +9,9 @@ from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
 
 from ..database import get_db
-from ..models.proveedor import Proveedor, LiquidacionProveedor
+from ..models.proveedor import Proveedor, LiquidacionProveedor, AjusteLiquidacionProveedor, AuditoriaLiquidacion
 from ..models.finanzas import CuentaPorPagar, Gasto
+from ..models.caja import MovimientoCaja, MovimientoFinanciero
 from ..schemas.proveedor import ProveedorCreate, ProveedorUpdate, ProveedorResponse
 from ..services.caja_service import CajaService
 from ..services.venta_service import VentaService
@@ -33,6 +34,23 @@ class LiquidarProveedorRequest(BaseModel):
     proveedor_nombre: Optional[str] = None
     documento_nit: Optional[str] = None
     idempotency_key: Optional[str] = None
+    fecha: Optional[str] = None
+    hora: Optional[str] = None
+    fecha_movimiento: Optional[str] = None
+    hora_movimiento: Optional[str] = None
+
+
+class EditarFechaLiquidacionRequest(BaseModel):
+    nueva_fecha: str
+    nueva_hora: Optional[str] = None
+    motivo: str = "Corrección de fecha operativa"
+
+
+class DineroDeMasRequest(BaseModel):
+    monto_sobrante: float
+    motivo: str
+    fecha_movimiento: Optional[str] = None
+    hora_movimiento: Optional[str] = None
 
 
 @router.get("", response_model=List[ProveedorResponse])
@@ -444,6 +462,10 @@ async def get_liquidaciones_proveedor(
             "usuario": l.usuario or "",
             "observaciones": l.observaciones or "",
             "estado": l.estado,
+            "fecha_registro": l.fecha_registro or "",
+            "dinero_de_mas": float(l.dinero_de_mas or 0.0),
+            "monto_ajustado": float(l.monto_ajustado or (l.monto_pagado or 0.0)),
+            "monto_neto": max(0.0, float(l.monto_pagado or 0.0) - float(l.dinero_de_mas or 0.0)),
         }
         for l in res.scalars().all()
     ]
@@ -521,8 +543,11 @@ async def liquidar_proveedor(
 
             metodo = "Efectivo" if (req.metodo_pago or "").strip().lower() == "efectivo" else "Transferencia"
             ahora = datetime.now()
-            f_str = ahora.strftime("%Y-%m-%d")
-            h_str = ahora.strftime("%H:%M:%S")
+            f_mov = req.fecha_movimiento or req.fecha
+            h_mov = req.hora_movimiento or req.hora
+            f_str = f_mov.strip()[:10] if f_mov else ahora.strftime("%Y-%m-%d")
+            h_str = h_mov.strip()[:8] if h_mov else ahora.strftime("%H:%M:%S")
+            fecha_registro_str = ahora.strftime("%Y-%m-%d %H:%M:%S")
             u_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
 
             remanente = monto_pagar
@@ -597,6 +622,9 @@ async def liquidar_proveedor(
                 observaciones=req.observaciones or "",
                 estado="Completada",
                 idempotency_key=idem_clean,
+                fecha_registro=fecha_registro_str,
+                dinero_de_mas=0.0,
+                monto_ajustado=monto_pagar,
             )
             db.add(liq)
             await db.flush()
@@ -648,3 +676,272 @@ async def liquidar_proveedor(
                         "repetido": True,
                     }
             raise HTTPException(status_code=409, detail="Conflicto de concurrencia al liquidar proveedor.")
+
+
+@router.post("/liquidaciones/{id}/editar-fecha")
+async def editar_fecha_liquidacion(
+    id: int,
+    req: EditarFechaLiquidacionRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_admin),
+) -> Dict[str, Any]:
+    async with _LIQUIDACION_PROV_LOCK:
+        res = await db.execute(select(LiquidacionProveedor).where(LiquidacionProveedor.id == id))
+        liq = res.scalars().first()
+        if not liq:
+            raise HTTPException(status_code=404, detail="Liquidación no encontrada.")
+
+        f_ant = liq.fecha
+        h_ant = liq.hora
+        nueva_f = req.nueva_fecha.strip()[:10]
+        nueva_h = req.nueva_hora.strip()[:8] if req.nueva_hora else h_ant
+        u_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
+        recibo = f"LQ-{liq.id:05d}"
+
+        liq.fecha = nueva_f
+        liq.hora = nueva_h
+
+        # Actualizar gastos asociados
+        res_g = await db.execute(
+            select(Gasto).where(
+                Gasto.categoria == "Pago Proveedores",
+                Gasto.descripcion.like(f"%{recibo}%")
+            )
+        )
+        for g in res_g.scalars().all():
+            g.fecha = nueva_f
+
+        # Actualizar movimientos de caja asociados
+        res_mc = await db.execute(
+            select(MovimientoCaja).where(
+                or_(
+                    MovimientoCaja.referencia_id == recibo,
+                    MovimientoCaja.descripcion.like(f"%{recibo}%")
+                )
+            )
+        )
+        for mc in res_mc.scalars().all():
+            mc.fecha = nueva_f
+            mc.hora = nueva_h
+
+        # Actualizar movimientos financieros
+        res_mf = await db.execute(
+            select(MovimientoFinanciero).where(
+                or_(
+                    MovimientoFinanciero.referencia_origen == recibo,
+                    MovimientoFinanciero.concepto.like(f"%{recibo}%")
+                )
+            )
+        )
+        for mf in res_mf.scalars().all():
+            mf.fecha = nueva_f
+            mf.hora = nueva_h
+
+        # Registrar auditoria
+        aud = AuditoriaLiquidacion(
+            liquidacion_id=liq.id,
+            numero_recibo=recibo,
+            proveedor_id=liq.proveedor_id,
+            proveedor_nombre=liq.proveedor_nombre,
+            accion="EDITAR_FECHA",
+            fecha_anterior=f"{f_ant} {h_ant}".strip(),
+            fecha_nueva=f"{nueva_f} {nueva_h}".strip(),
+            monto=float(liq.monto_pagado or 0.0),
+            usuario=u_nom,
+            motivo=req.motivo or "Corrección de fecha operativa",
+            fecha_registro=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+        db.add(aud)
+        await db.commit()
+
+        return {
+            "ok": True,
+            "exito": True,
+            "liquidacion_id": liq.id,
+            "numero_recibo": recibo,
+            "fecha_anterior": f_ant,
+            "fecha_nueva": nueva_f,
+            "hora_nueva": nueva_h
+        }
+
+
+@router.post("/liquidaciones/{id}/dinero-de-mas")
+async def registrar_dinero_de_mas(
+    id: int,
+    req: DineroDeMasRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_admin),
+) -> Dict[str, Any]:
+    async with _LIQUIDACION_PROV_LOCK:
+        res = await db.execute(select(LiquidacionProveedor).where(LiquidacionProveedor.id == id))
+        liq = res.scalars().first()
+        if not liq:
+            raise HTTPException(status_code=404, detail="Liquidación no encontrada.")
+
+        monto_sobrante = float(req.monto_sobrante)
+        if monto_sobrante <= 0:
+            raise HTTPException(status_code=400, detail="El monto sobrante debe ser mayor a 0.")
+
+        dinero_de_mas_actual = float(liq.dinero_de_mas or 0.0)
+        monto_pagado_orig = float(liq.monto_pagado or 0.0)
+        limite_ajustable = round(monto_pagado_orig - dinero_de_mas_actual, 2)
+
+        if monto_sobrante > limite_ajustable:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El monto no puede superar el saldo liquidado disponible (${limite_ajustable:,.2f})."
+            )
+
+        u_nom = f"{current_user.nombre or ''} {current_user.apellidos or ''}".strip() or current_user.usuario
+        ahora = datetime.now()
+        f_reg = ahora.strftime("%Y-%m-%d %H:%M:%S")
+        f_mov = (req.fecha_movimiento or liq.fecha).strip()[:10]
+        h_mov = (req.hora_movimiento or liq.hora).strip()[:8]
+        recibo = f"LQ-{liq.id:05d}"
+        num_ajuste = f"AJ-SOB-{ahora.strftime('%Y%m%d%H%M%S')}-{liq.id}"
+
+        # 1. Actualizar liquidación
+        nuevo_dinero_de_mas = round(dinero_de_mas_actual + monto_sobrante, 2)
+        nuevo_monto_ajustado = round(monto_pagado_orig - nuevo_dinero_de_mas, 2)
+        liq.dinero_de_mas = nuevo_dinero_de_mas
+        liq.monto_ajustado = nuevo_monto_ajustado
+
+        # 2. Registrar ajuste
+        ajuste = AjusteLiquidacionProveedor(
+            numero_ajuste=num_ajuste,
+            liquidacion_id=liq.id,
+            numero_recibo=recibo,
+            proveedor_id=liq.proveedor_id,
+            proveedor_nombre=liq.proveedor_nombre,
+            monto_ajuste=monto_sobrante,
+            fecha_movimiento=f_mov,
+            hora_movimiento=h_mov,
+            fecha_registro=f_reg,
+            usuario=u_nom,
+            motivo=req.motivo or "Ajuste por dinero de más",
+            estado="Aplicado"
+        )
+        db.add(ajuste)
+
+        # 3. Registrar contra-gasto (gasto negativo para reducir egresos contables en f_mov)
+        contra_gasto = Gasto(
+            descripcion=f"Ajuste Dinero de Más {recibo} - {liq.proveedor_nombre} [{num_ajuste}]",
+            categoria="Pago Proveedores",
+            valor=-monto_sobrante,
+            fecha=f_mov,
+            hora=h_mov,
+            usuario=u_nom,
+            comprobante=num_ajuste
+        )
+        db.add(contra_gasto)
+
+        # 4. Si fue en efectivo, reingresar a caja física
+        if (liq.metodo_pago or "").lower() == "efectivo":
+            mc = MovimientoCaja(
+                fecha=f_mov,
+                hora=h_mov,
+                tipo="AJUSTE",
+                monto=monto_sobrante,
+                usuario=u_nom,
+                terminal="SERVER",
+                referencia_id=num_ajuste,
+                descripcion=f"Dinero de más recuperado de {recibo} - {liq.proveedor_nombre}"
+            )
+            db.add(mc)
+            mf = MovimientoFinanciero(
+                fecha=f_mov,
+                hora=h_mov,
+                tipo="AJUSTE_AUTORIZADO",
+                concepto=f"Dinero de más recuperado {recibo} - {liq.proveedor_nombre}",
+                monto=monto_sobrante,
+                metodo_pago="Efectivo",
+                cuenta_afectada="CAJA_FISICA",
+                usuario=u_nom,
+                referencia_origen=num_ajuste
+            )
+            db.add(mf)
+
+        # 5. Reabrir cuentas por pagar (LIFO)
+        p_str = str(liq.proveedor_id)
+        res_cxp = await db.execute(
+            select(CuentaPorPagar)
+            .where(
+                (CuentaPorPagar.proveedor_id == liq.proveedor_id) |
+                (cast(CuentaPorPagar.proveedor_id, String) == p_str) |
+                (cast(CuentaPorPagar.proveedor_id, String).like(f"{p_str} - %")),
+                CuentaPorPagar.estado.in_(["Pagada", "Parcial"])
+            )
+            .order_by(CuentaPorPagar.id.desc())
+        )
+        remanente_restaurar = monto_sobrante
+        for c in res_cxp.scalars().all():
+            if remanente_restaurar <= 0.001:
+                break
+            pagado_c = float(c.monto_pagado or 0.0)
+            if pagado_c <= 0:
+                continue
+            restaurar_c = min(pagado_c, remanente_restaurar)
+            c.monto_pagado = round(pagado_c - restaurar_c, 2)
+            c.saldo_pendiente = round(float(c.saldo_pendiente or 0.0) + restaurar_c, 2)
+            c.estado = "Parcial" if c.saldo_pendiente < float(c.monto or 0.0) else "Pendiente"
+            remanente_restaurar = round(remanente_restaurar - restaurar_c, 2)
+
+        await VentaService._recalcular_acumulados_proveedor(db, liq.proveedor_id)
+
+        # 6. Auditoria
+        aud = AuditoriaLiquidacion(
+            liquidacion_id=liq.id,
+            numero_recibo=recibo,
+            proveedor_id=liq.proveedor_id,
+            proveedor_nombre=liq.proveedor_nombre,
+            accion="DINERO_DE_MAS",
+            fecha_anterior=liq.fecha,
+            fecha_nueva=f_mov,
+            monto=monto_sobrante,
+            usuario=u_nom,
+            motivo=req.motivo,
+            fecha_registro=f_reg
+        )
+        db.add(aud)
+        await db.commit()
+
+        return {
+            "ok": True,
+            "exito": True,
+            "numero_ajuste": num_ajuste,
+            "numero_recibo": recibo,
+            "monto_ajuste": monto_sobrante,
+            "dinero_de_mas_total": nuevo_dinero_de_mas,
+            "monto_neto": nuevo_monto_ajustado
+        }
+
+
+@router.get("/liquidaciones/{id}/ajustes")
+async def get_ajustes_liquidacion(
+    id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    res = await db.execute(
+        select(AjusteLiquidacionProveedor)
+        .where(AjusteLiquidacionProveedor.liquidacion_id == id)
+        .order_by(AjusteLiquidacionProveedor.id.desc())
+    )
+    return [
+        {
+            "id": a.id,
+            "numero_ajuste": a.numero_ajuste,
+            "liquidacion_id": a.liquidacion_id,
+            "numero_recibo": a.numero_recibo,
+            "proveedor_id": a.proveedor_id,
+            "proveedor_nombre": a.proveedor_nombre,
+            "monto_ajuste": float(a.monto_ajuste or 0.0),
+            "fecha_movimiento": a.fecha_movimiento,
+            "hora_movimiento": a.hora_movimiento,
+            "fecha_registro": a.fecha_registro,
+            "usuario": a.usuario,
+            "motivo": a.motivo,
+            "estado": a.estado,
+        }
+        for a in res.scalars().all()
+    ]

@@ -53,6 +53,69 @@ _PAGOS_EN_PROCESO = set()
 _MEMORIA_PROVEEDORES_CACHE: List[Dict[str, Any]] = []
 
 
+def normalizar_fecha(txt: Optional[str]) -> Optional[str]:
+    """
+    Normaliza formatos de fecha DD/MM/YYYY, YYYY-MM-DD, DD-MM-YYYY, YYYY/MM/DD a YYYY-MM-DD.
+    Garantiza una fecha ISO válida para almacenamiento y consultas SQL.
+    Retorna None si la fecha no es válida.
+    """
+    if not txt:
+        return None
+    txt = str(txt).strip()
+    if len(txt) >= 10 and txt[10:11] in (" ", "T"):
+        txt = txt[:10].strip()
+
+    candidata = None
+    if "/" in txt:
+        partes = txt.split("/")
+        if len(partes) == 3:
+            if len(partes[2]) == 4:
+                candidata = f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
+            elif len(partes[0]) == 4:
+                candidata = f"{partes[0]}-{partes[1].zfill(2)}-{partes[2].zfill(2)}"
+    elif "-" in txt:
+        partes = txt.split("-")
+        if len(partes) == 3:
+            if len(partes[0]) == 4:
+                candidata = f"{partes[0]}-{partes[1].zfill(2)}-{partes[2].zfill(2)}"
+            elif len(partes[2]) == 4:
+                candidata = f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
+
+    if candidata:
+        try:
+            dt = datetime.strptime(candidata, "%Y-%m-%d")
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            dt = datetime.strptime(txt[:10], fmt)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return None
+
+
+def normalizar_hora(hora_str: str) -> str:
+    """Normaliza hora a formato HH:MM:SS de 24 horas."""
+    if not hora_str:
+        return datetime.now().strftime("%H:%M:%S")
+    h = str(hora_str).strip()
+    try:
+        for fmt in ("%H:%M:%S", "%H:%M", "%I:%M:%S %p", "%I:%M %p"):
+            try:
+                dt = datetime.strptime(h, fmt)
+                return dt.strftime("%H:%M:%S")
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    if len(h) == 5 and ":" in h:
+        return f"{h}:00"
+    return h[:8] if len(h) >= 8 else datetime.now().strftime("%H:%M:%S")
+
+
 def inicializar_tablas_proveedores(conn: Optional[sqlite3.Connection] = None) -> bool:
     """Asegura la creación de tablas e índices para cuentas por pagar y liquidaciones de proveedores."""
     res = inicializar_base_datos()
@@ -1172,12 +1235,24 @@ def obtener_historial_liquidaciones_proveedor(
 
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        query = """
+
+        cur.execute("PRAGMA table_info(liquidaciones_proveedores)")
+        cols_lp = {c[1] for c in cur.fetchall()}
+        col_fecha_reg = "COALESCE(fecha_registro, created_at, fecha) as fecha_registro" if "fecha_registro" in cols_lp else ("created_at as fecha_registro" if "created_at" in cols_lp else "fecha as fecha_registro")
+        col_dinero_mas = "COALESCE(dinero_de_mas, 0.0) as dinero_de_mas" if "dinero_de_mas" in cols_lp else "0.0 as dinero_de_mas"
+        col_monto_aj = "COALESCE(monto_ajustado, monto_liquidado) as monto_ajustado" if "monto_ajustado" in cols_lp else "monto_liquidado as monto_ajustado"
+        col_created_at = "created_at" if "created_at" in cols_lp else "fecha as created_at"
+
+        query = f"""
             SELECT 
                 id, numero_recibo, proveedor_id, proveedor_nombre,
                 monto_liquidado, saldo_anterior, saldo_restante,
                 tipo_pago, metodo_pago, referencia, fecha, hora,
-                mes_anio, usuario, observaciones, estado
+                mes_anio, usuario, observaciones, estado,
+                {col_fecha_reg},
+                {col_dinero_mas},
+                {col_monto_aj},
+                {col_created_at}
             FROM liquidaciones_proveedores
             WHERE 1=1
         """
@@ -1215,11 +1290,18 @@ def obtener_historial_liquidaciones_proveedor(
             u_nom = d.get("usuario") or "Administrador"
             ref_str = d.get("referencia") or ""
             m_val = float(d.get("monto_liquidado") or 0.0)
+            dinero_sobrante = float(d.get("dinero_de_mas") or 0.0)
+            m_neto = max(0.0, round(m_val - dinero_sobrante, 2))
             d["fecha_pago"] = f_val
+            d["fecha_movimiento"] = f_val
             d["usuario_nombre"] = u_nom
             d["referencia_comprobante"] = ref_str
             d["comprobante"] = ref_str
             d["monto_pagado"] = m_val
+            d["monto_neto"] = m_neto
+            d["dinero_de_mas"] = dinero_sobrante
+            d["monto_ajustado"] = float(d.get("monto_ajustado") or m_neto)
+            d["fecha_registro"] = str(d.get("fecha_registro") or d.get("created_at") or f_val)
             res_items.append(d)
         return res_items
     finally:
@@ -1520,15 +1602,19 @@ def liquidar_proveedor_db(
         saldo_restante = max(0.0, round(saldo_actual - monto_flt, 2))
         tipo_pago = "Total" if saldo_restante == 0.0 else "Abono Parcial"
 
+        f_mov = kwargs.get("fecha_movimiento") or kwargs.get("fecha") or kwargs.get("fecha_operativa") or kwargs.get("fecha_real")
+        h_mov = kwargs.get("hora_movimiento") or kwargs.get("hora") or kwargs.get("hora_operativa") or kwargs.get("hora_real")
+
         ahora = datetime.now()
-        fecha_str = ahora.strftime("%Y-%m-%d")
-        hora_str = ahora.strftime("%H:%M:%S")
-        mes_anio = ahora.strftime("%m-%Y")
+        fecha_registro = ahora.strftime("%Y-%m-%d %H:%M:%S")
+        fecha_str = (normalizar_fecha(f_mov) if f_mov else None) or ahora.strftime("%Y-%m-%d")
+        hora_str = (normalizar_hora(h_mov) if h_mov else None) or ahora.strftime("%H:%M:%S")
+        mes_anio = f"{fecha_str[5:7]}-{fecha_str[:4]}"
 
         # Generar número correlativo de recibo
-        cur.execute("SELECT COUNT(id) FROM liquidaciones_proveedores")
-        conteo = cur.fetchone()[0] or 0
-        numero_recibo = f"LIQ-PROV-{conteo + 1:05d}"
+        cur.execute("SELECT COALESCE(MAX(id), 0) FROM liquidaciones_proveedores")
+        max_id = cur.fetchone()[0] or 0
+        numero_recibo = f"LIQ-PROV-{max_id + 1:05d}"
 
         # 2. Distribuir el pago entre las cuentas por pagar pendientes (FIFO)
         cur.execute("""
@@ -1561,18 +1647,38 @@ def liquidar_proveedor_db(
 
             monto_por_distribuir = round(monto_por_distribuir - abono_cuenta, 2)
 
-        # 3. Registrar en liquidaciones_proveedores
-        cur.execute("""
-            INSERT INTO liquidaciones_proveedores (
-                numero_recibo, proveedor_id, proveedor_nombre, monto_liquidado,
-                saldo_anterior, saldo_restante, tipo_pago, metodo_pago, referencia,
-                fecha, hora, mes_anio, usuario, observaciones, estado
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Aplicada')
-        """, (
+        # 3. Registrar en liquidaciones_proveedores con fecha contable y fecha de registro
+        cur.execute("PRAGMA table_info(liquidaciones_proveedores)")
+        cols_lp_set = {c[1] for c in cur.fetchall()}
+        
+        cols_liq = [
+            "numero_recibo", "proveedor_id", "proveedor_nombre", "monto_liquidado",
+            "saldo_anterior", "saldo_restante", "tipo_pago", "metodo_pago", "referencia",
+            "fecha", "hora", "mes_anio", "usuario", "observaciones", "estado"
+        ]
+        vals_liq = [
             numero_recibo, proveedor_id, prov_nom, monto_flt,
             saldo_actual, saldo_restante, tipo_pago, metodo_pago,
-            referencia, fecha_str, hora_str, mes_anio, usuario, observaciones
-        ))
+            referencia, fecha_str, hora_str, mes_anio, usuario, observaciones, 'Aplicada'
+        ]
+        if "fecha_registro" in cols_lp_set:
+            cols_liq.append("fecha_registro")
+            vals_liq.append(fecha_registro)
+        if "dinero_de_mas" in cols_lp_set:
+            cols_liq.append("dinero_de_mas")
+            vals_liq.append(0.0)
+        if "monto_ajustado" in cols_lp_set:
+            cols_liq.append("monto_ajustado")
+            vals_liq.append(monto_flt)
+        if "created_at" in cols_lp_set:
+            cols_liq.append("created_at")
+            vals_liq.append(fecha_registro)
+
+        placeholders_liq = ", ".join(["?"] * len(cols_liq))
+        cur.execute(f"""
+            INSERT INTO liquidaciones_proveedores ({", ".join(cols_liq)})
+            VALUES ({placeholders_liq})
+        """, vals_liq)
         id_liq = cur.lastrowid
 
         # 4. Registrar en historial_liquidaciones (compatibilidad con nómina histórica)
@@ -1590,8 +1696,9 @@ def liquidar_proveedor_db(
             cur.execute("""
                 INSERT INTO gastos (
                     concepto, valor, fecha, hora, metodo_pago, categoria, clasificacion,
-                    descripcion, estado, usuario, proveedor, comprobante, observaciones
-                ) VALUES (?, ?, ?, ?, ?, 'Proveedores', 'Cuentas por Pagar', ?, 'Pagado', ?, ?, ?, ?)
+                    descripcion, estado, usuario, proveedor, comprobante, observaciones,
+                    fecha_pago, fecha_registro
+                ) VALUES (?, ?, ?, ?, ?, 'Proveedores', 'Cuentas por Pagar', ?, 'Pagado', ?, ?, ?, ?, ?, ?)
             """, (
                 f"Pago a Proveedor - {prov_nom}",
                 monto_flt,
@@ -1602,7 +1709,9 @@ def liquidar_proveedor_db(
                 usuario,
                 prov_nom,
                 numero_recibo,
-                observaciones or referencia
+                observaciones or referencia,
+                f"{fecha_str} {hora_str}",
+                fecha_registro
             ))
         except Exception as e_gasto:
             print(f"Aviso registrando gasto de proveedor: {e_gasto}")
@@ -1613,21 +1722,26 @@ def liquidar_proveedor_db(
             # Obtener sesión de caja abierta si no fue provista y el pago es en efectivo
             s_caja_id = sesion_caja_id
             if not s_caja_id and metodo_pago == "Efectivo":
-                cur.execute("SELECT id FROM sesiones_caja WHERE estado = 'Abierta' ORDER BY id DESC LIMIT 1")
+                cur.execute("SELECT id FROM sesiones_caja WHERE fecha_apertura = ? ORDER BY id DESC LIMIT 1", (fecha_str,))
                 s_row = cur.fetchone()
                 if s_row:
                     s_caja_id = s_row[0]
                 else:
-                    cur.execute("SELECT id FROM sesiones_caja ORDER BY id DESC LIMIT 1")
-                    s_last = cur.fetchone()
-                    if s_last:
-                        s_caja_id = s_last[0]
+                    cur.execute("SELECT id FROM sesiones_caja WHERE estado = 'Abierta' ORDER BY id DESC LIMIT 1")
+                    s_row = cur.fetchone()
+                    if s_row:
+                        s_caja_id = s_row[0]
                     else:
-                        cur.execute(
-                            "INSERT INTO sesiones_caja (fecha_apertura, hora_apertura, usuario_apertura, estado) VALUES (?, ?, ?, 'Abierta')",
-                            (fecha_str, hora_str, usuario)
-                        )
-                        s_caja_id = cur.lastrowid
+                        cur.execute("SELECT id FROM sesiones_caja ORDER BY id DESC LIMIT 1")
+                        s_last = cur.fetchone()
+                        if s_last:
+                            s_caja_id = s_last[0]
+                        else:
+                            cur.execute(
+                                "INSERT INTO sesiones_caja (fecha_apertura, hora_apertura, usuario_apertura, estado) VALUES (?, ?, ?, 'Abierta')",
+                                (fecha_str, hora_str, usuario)
+                            )
+                            s_caja_id = cur.lastrowid
 
             # Registrar en movimientos_financieros
             cur.execute("""
@@ -1646,11 +1760,11 @@ def liquidar_proveedor_db(
                 cur.execute("""
                     INSERT INTO movimientos_caja (
                         sesion_caja_id, fecha, hora, tipo, monto, usuario,
-                        terminal, referencia_id, descripcion
-                    ) VALUES (?, ?, ?, 'EGRESO', ?, ?, 'Terminal-1', ?, ?)
+                        terminal, referencia_id, descripcion, created_at
+                    ) VALUES (?, ?, ?, 'EGRESO', ?, ?, 'Terminal-1', ?, ?, ?)
                 """, (
                     s_caja_id, fecha_str, hora_str, monto_flt, usuario,
-                    numero_recibo, f"Pago a proveedor: {prov_nom}"
+                    numero_recibo, f"Pago a proveedor: {prov_nom}", fecha_registro
                 ))
         except Exception as e_caja:
             print(f"Aviso registrando movimiento de caja/financiero: {e_caja}")
@@ -1672,9 +1786,14 @@ def liquidar_proveedor_db(
                     "referencia": referencia,
                     "observaciones": observaciones,
                     "numero_recibo": numero_recibo,
+                    "fecha": fecha_str,
+                    "hora": hora_str,
+                    "fecha_movimiento": fecha_str,
+                    "fecha_registro": fecha_registro,
                 },
                 usuario=usuario,
                 id_local=str(id_liq),
+                conn=conn
             )
         except Exception as e_q:
             print(f"Aviso encolando liquidación de proveedor para sincronización: {e_q}")
@@ -1698,7 +1817,10 @@ def liquidar_proveedor_db(
             "tipo_pago": tipo_pago,
             "metodo_pago": metodo_pago,
             "fecha": fecha_str,
-            "hora": hora_str
+            "hora": hora_str,
+            "fecha_movimiento": fecha_str,
+            "hora_movimiento": hora_str,
+            "fecha_registro": fecha_registro
         }
     except Exception as exc:
         if conn and cerrar_conn:
@@ -1866,6 +1988,544 @@ def revertir_liquidacion_proveedor_db(
             "mensaje": str(ex),
             "error": str(ex)
         }
+    finally:
+        if cerrar_conn and conn:
+            conn.close()
+
+
+def _fmt_cop(val: float) -> str:
+    """Formatea valores monetarios a estándar COP."""
+    try:
+        return f"${float(val or 0.0):,.0f} COP"
+    except Exception:
+        return "$0 COP"
+
+
+def actualizar_fecha_liquidacion_proveedor_db(
+    liquidacion_id: int,
+    nueva_fecha: str,
+    nueva_hora: Optional[str] = None,
+    motivo: str = "Corrección de fecha operativa",
+    usuario: str = "Administrador",
+    conn: Optional[sqlite3.Connection] = None
+) -> Dict[str, Any]:
+    """
+    Modifica la fecha contable/operativa de una liquidación o abono a proveedor:
+    1. Actualiza la fecha contable en liquidaciones_proveedores sin crear duplicados ni alterar montos.
+    2. Traslada la afectación en gastos, movimientos_financieros y movimientos_caja a la nueva fecha.
+    3. Conserva intacta la fecha de registro original (fecha_registro / created_at) para auditoría.
+    4. Registra evento de auditoría detallado con fecha anterior, nueva, usuario y motivo.
+    5. Respeta y preserva la integridad de cualquier cierre de caja previo.
+    """
+    cerrar_conn = False
+    if conn is None:
+        conn = conectar_db()
+        cerrar_conn = True
+
+    if not conn:
+        return {"exito": False, "ok": False, "mensaje": "No se pudo conectar a la base de datos."}
+
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, numero_recibo, proveedor_id, proveedor_nombre, monto_liquidado,
+                   fecha, hora, metodo_pago, estado, COALESCE(fecha_registro, created_at, fecha)
+            FROM liquidaciones_proveedores
+            WHERE id = ? OR numero_recibo = ?
+        """, (liquidacion_id, str(liquidacion_id)))
+        liq = cur.fetchone()
+        if not liq:
+            return {"exito": False, "ok": False, "mensaje": f"Liquidación #{liquidacion_id} no encontrada."}
+
+        id_real = liq[0]
+        recibo = liq[1]
+        prov_id = liq[2]
+        prov_nom = liq[3]
+        monto_flt = float(liq[4])
+        fecha_ant = str(liq[5])
+        hora_ant = str(liq[6])
+        metodo = str(liq[7])
+        estado = str(liq[8])
+        fecha_reg = str(liq[9])
+
+        if estado == "Revertida":
+            return {
+                "exito": False,
+                "ok": False,
+                "mensaje": "No se puede modificar la fecha de una liquidación que ha sido revertida."
+            }
+
+        f_normalizada = normalizar_fecha(nueva_fecha)
+        h_normalizada = normalizar_hora(nueva_hora) if nueva_hora else hora_ant
+        if not f_normalizada:
+            return {"exito": False, "ok": False, "mensaje": "La nueva fecha ingresada no es válida."}
+
+        if f_normalizada == fecha_ant and h_normalizada == hora_ant:
+            return {
+                "exito": True,
+                "ok": True,
+                "mensaje": f"La liquidación {recibo} ya tenía la fecha {f_normalizada} y hora {h_normalizada}."
+            }
+
+        nuevo_mes_anio = f"{f_normalizada[5:7]}-{f_normalizada[:4]}"
+        ahora_aud = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 1. Actualizar liquidaciones_proveedores
+        cur.execute("""
+            UPDATE liquidaciones_proveedores
+            SET fecha = ?, hora = ?, mes_anio = ?,
+                observaciones = COALESCE(observaciones, '') || ' | ' || ?
+            WHERE id = ?
+        """, (
+            f_normalizada, h_normalizada, nuevo_mes_anio,
+            f"[Fecha contable cambiada de {fecha_ant} a {f_normalizada} por {usuario}: {motivo}]",
+            id_real
+        ))
+
+        # 2. Actualizar gastos contables (trasladar afectación al nuevo día)
+        cur.execute("""
+            UPDATE gastos
+            SET fecha = ?, hora = ?, fecha_pago = ?,
+                observaciones = COALESCE(observaciones, '') || ' | ' || ?
+            WHERE comprobante = ? AND (proveedor = ? OR proveedor IS NULL OR proveedor = '')
+        """, (
+            f_normalizada, h_normalizada, f"{f_normalizada} {h_normalizada}",
+            f"[Fecha contable cambiada de {fecha_ant} a {f_normalizada} por {usuario}: {motivo}]",
+            recibo, prov_nom
+        ))
+
+        # 3. Actualizar historial_liquidaciones para compatibilidad
+        try:
+            cur.execute("""
+                UPDATE historial_liquidaciones
+                SET fecha = ?, mes_anio = ?
+                WHERE persona_id = ? AND nombre_persona = ? AND (fecha LIKE ? OR fecha LIKE ?)
+            """, (f"{f_normalizada} {h_normalizada}", nuevo_mes_anio, prov_id, prov_nom, f"{fecha_ant}%", f"{recibo}%"))
+        except Exception as e_hl:
+            print(f"Aviso actualizando historial_liquidaciones: {e_hl}")
+
+        # 4. Actualizar movimientos financieros y de caja
+        try:
+            cur.execute("""
+                UPDATE movimientos_financieros
+                SET fecha = ?, hora = ?,
+                    observaciones = COALESCE(observaciones, '') || ' | ' || ?
+                WHERE referencia_origen = ?
+            """, (f_normalizada, h_normalizada, f"[Trasladado de {fecha_ant} a {f_normalizada}: {motivo}]", recibo))
+
+            cur.execute("""
+                UPDATE movimientos_caja
+                SET fecha = ?, hora = ?,
+                    descripcion = COALESCE(descripcion, '') || ' | ' || ?
+                WHERE referencia_id = ?
+            """, (f_normalizada, h_normalizada, f"[Trasladado de {fecha_ant} a {f_normalizada}]", recibo))
+        except Exception as e_mov:
+            print(f"Aviso actualizando movimientos de caja/financieros: {e_mov}")
+
+        # 5. Actualizar ajustes de dinero de más si existen vinculados a esta liquidación
+        try:
+            cur.execute("""
+                UPDATE ajustes_liquidaciones_proveedores
+                SET fecha_movimiento = ?, hora_movimiento = ?
+                WHERE liquidacion_id = ?
+            """, (f_normalizada, h_normalizada, id_real))
+        except Exception as e_aj_up:
+            print(f"Aviso actualizando fecha en ajustes_liquidaciones_proveedores: {e_aj_up}")
+
+        # 6. Auditoría explícita
+        try:
+            cur.execute("""
+                INSERT INTO auditoria_liquidaciones (
+                    liquidacion_id, numero_recibo, proveedor_id, proveedor_nombre,
+                    accion, fecha_anterior, fecha_nueva, monto, usuario, motivo, fecha_registro
+                ) VALUES (?, ?, ?, ?, 'EDITAR_FECHA', ?, ?, ?, ?, ?, ?)
+            """, (
+                id_real, recibo, prov_id, prov_nom,
+                f"{fecha_ant} {hora_ant}", f"{f_normalizada} {h_normalizada}",
+                monto_flt, usuario, motivo, ahora_aud
+            ))
+
+            cur.execute("""
+                INSERT INTO auditoria_caja (fecha, hora, usuario, accion, detalle, exito, created_at)
+                VALUES (?, ?, ?, 'MODIFICAR_FECHA_LIQUIDACION', ?, 1, ?)
+            """, (
+                datetime.now().strftime("%Y-%m-%d"),
+                datetime.now().strftime("%H:%M:%S"),
+                usuario,
+                f"Liquidación {recibo} ({prov_nom}, {_fmt_cop(monto_flt)}): Trasladada de {fecha_ant} a {f_normalizada}. Motivo: {motivo}",
+                ahora_aud
+            ))
+        except Exception as e_aud:
+            print(f"Aviso registrando auditoría de cambio de fecha: {e_aud}")
+
+        # 7. Sincronización en red
+        try:
+            from interface.sync_manager import sync_mgr
+            sync_mgr.encolar_operacion(
+                tipo_operacion="MODIFICAR_FECHA_LIQUIDACION_PROVEEDOR",
+                payload={
+                    "liquidacion_id": id_real,
+                    "numero_recibo": recibo,
+                    "proveedor_id": prov_id,
+                    "fecha_anterior": fecha_ant,
+                    "nueva_fecha": f_normalizada,
+                    "nueva_hora": h_normalizada,
+                    "motivo": motivo,
+                    "usuario": usuario,
+                },
+                usuario=usuario,
+                id_local=str(id_real),
+                conn=conn
+            )
+        except Exception as e_sync:
+            print(f"Aviso encolando sync de cambio de fecha liquidación: {e_sync}")
+
+        if cerrar_conn:
+            conn.commit()
+
+        return {
+            "exito": True,
+            "ok": True,
+            "liquidacion_id": id_real,
+            "numero_recibo": recibo,
+            "proveedor_id": prov_id,
+            "proveedor_nombre": prov_nom,
+            "monto": monto_flt,
+            "fecha_anterior": fecha_ant,
+            "nueva_fecha": f_normalizada,
+            "nueva_hora": h_normalizada,
+            "fecha_registro": fecha_reg,
+            "mensaje": f"Liquidación {recibo} actualizada exitosamente. Afectación trasladada del {fecha_ant} al {f_normalizada}."
+        }
+    except Exception as ex:
+        if conn and cerrar_conn:
+            conn.rollback()
+        return {"exito": False, "ok": False, "mensaje": f"Error modificando fecha: {ex}"}
+    finally:
+        if cerrar_conn and conn:
+            conn.close()
+
+
+def registrar_dinero_de_mas_proveedor_db(
+    liquidacion_id: int,
+    monto_sobrante: float,
+    motivo: str,
+    usuario: str = "Administrador",
+    fecha_movimiento: Optional[str] = None,
+    hora_movimiento: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None
+) -> Dict[str, Any]:
+    """
+    Registra una corrección controlada por DINERO DE MÁS (sobrante registrado erróneamente):
+    1. Valida que el monto sea positivo y no supere el valor corregible de la liquidación.
+    2. Registra el ajuste trazable en 'ajustes_liquidaciones_proveedores' sin borrar el movimiento original.
+    3. Aplica contra-asiento en 'gastos' con valor negativo (-monto_sobrante) en la fecha contable del movimiento.
+    4. Si fue pagado en Efectivo, genera el 'AJUSTE' de efectivo en caja para reponer el dinero.
+    5. Reabre las cuentas por pagar del proveedor para restituir el saldo no liquidado realmente.
+    6. Actualiza los saldos del proveedor mediante 'recalcular_saldo_proveedor'.
+    7. Guarda auditoría inmutable de la corrección.
+    """
+    cerrar_conn = False
+    if conn is None:
+        conn = conectar_db()
+        cerrar_conn = True
+
+    if not conn:
+        return {"exito": False, "ok": False, "mensaje": "No se pudo conectar a la base de datos."}
+
+    try:
+        try:
+            monto_sobrante_flt = round(float(monto_sobrante or 0.0), 2)
+        except (ValueError, TypeError):
+            monto_sobrante_flt = 0.0
+
+        if monto_sobrante_flt <= 0:
+            return {
+                "exito": False,
+                "ok": False,
+                "mensaje": "El monto de dinero de más debe ser un valor numérico estrictamente mayor a 0."
+            }
+
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, numero_recibo, proveedor_id, proveedor_nombre, monto_liquidado,
+                   fecha, hora, metodo_pago, estado, COALESCE(dinero_de_mas, 0.0),
+                   COALESCE(monto_ajustado, monto_liquidado), COALESCE(fecha_registro, created_at, fecha)
+            FROM liquidaciones_proveedores
+            WHERE id = ? OR numero_recibo = ?
+        """, (liquidacion_id, str(liquidacion_id)))
+        liq = cur.fetchone()
+        if not liq:
+            return {"exito": False, "ok": False, "mensaje": f"Liquidación #{liquidacion_id} no encontrada."}
+
+        id_real = liq[0]
+        recibo = liq[1]
+        prov_id = liq[2]
+        prov_nom = liq[3]
+        monto_liquidado = float(liq[4])
+        fecha_orig = str(liq[5])
+        hora_orig = str(liq[6])
+        metodo = str(liq[7])
+        estado = str(liq[8])
+        dinero_mas_previo = float(liq[9])
+        fecha_reg_orig = str(liq[11])
+
+        if estado == "Revertida":
+            return {
+                "exito": False,
+                "ok": False,
+                "mensaje": "No se puede corregir dinero de más sobre una liquidación que ha sido revertida."
+            }
+
+        max_corregible = round(monto_liquidado - dinero_mas_previo, 2)
+        if monto_sobrante_flt > max_corregible + 0.001:
+            return {
+                "exito": False,
+                "ok": False,
+                "mensaje": f"El monto de dinero de más (${monto_sobrante_flt:,.0f}) supera el valor corregible disponible (${max_corregible:,.0f}) de la liquidación {recibo}."
+            }
+
+        f_contable = normalizar_fecha(fecha_movimiento or fecha_orig)
+        h_contable = normalizar_hora(hora_movimiento or hora_orig)
+        ahora_dt = datetime.now()
+        fecha_registro_ajuste = ahora_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Generar código único para el ajuste
+        cur.execute("SELECT COUNT(id) FROM ajustes_liquidaciones_proveedores")
+        conteo_aj = cur.fetchone()[0] or 0
+        numero_ajuste = f"AJ-SOB-{conteo_aj + 1:05d}"
+
+        nuevo_dinero_mas = round(dinero_mas_previo + monto_sobrante_flt, 2)
+        nuevo_monto_ajustado = max(0.0, round(monto_liquidado - nuevo_dinero_mas, 2))
+
+        # 1. Registrar en tabla ajustes_liquidaciones_proveedores
+        cur.execute("""
+            INSERT INTO ajustes_liquidaciones_proveedores (
+                numero_ajuste, liquidacion_id, numero_recibo, proveedor_id, proveedor_nombre,
+                monto_ajuste, fecha_movimiento, hora_movimiento, fecha_registro,
+                usuario, motivo, estado, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Aplicado', ?)
+        """, (
+            numero_ajuste, id_real, recibo, prov_id, prov_nom,
+            monto_sobrante_flt, f_contable, h_contable, fecha_registro_ajuste,
+            usuario, motivo, fecha_registro_ajuste
+        ))
+        id_ajuste = cur.lastrowid
+
+        # 2. Actualizar registro original de liquidación (sin eliminarlo)
+        cur.execute("""
+            UPDATE liquidaciones_proveedores
+            SET dinero_de_mas = ?,
+                monto_ajustado = ?,
+                observaciones = COALESCE(observaciones, '') || ' | ' || ?
+            WHERE id = ?
+        """, (
+            nuevo_dinero_mas, nuevo_monto_ajustado,
+            f"[Dinero de Más -${monto_sobrante_flt:,.0f} ({numero_ajuste}) por {usuario}: {motivo}]",
+            id_real
+        ))
+
+        # 3. Registrar contra-asiento en gastos para reducir el gasto contable en la fecha del movimiento
+        try:
+            cur.execute("""
+                INSERT INTO gastos (
+                    concepto, valor, fecha, hora, metodo_pago, categoria, clasificacion,
+                    descripcion, estado, usuario, proveedor, comprobante, observaciones,
+                    fecha_pago, fecha_registro
+                ) VALUES (?, ?, ?, ?, ?, 'Proveedores', 'Cuentas por Pagar', ?, 'Pagado', ?, ?, ?, ?, ?, ?)
+            """, (
+                f"Ajuste Dinero de Más - {prov_nom} ({recibo})",
+                -monto_sobrante_flt,  # Valor negativo que reduce directamente los gastos en contabilidad
+                f_contable,
+                h_contable,
+                metodo,
+                f"Corrección contable dinero sobrante liquidación {recibo}. Ajuste {numero_ajuste}",
+                usuario,
+                prov_nom,
+                numero_ajuste,
+                f"Motivo: {motivo} | Liquidación Ref: {recibo}",
+                f"{f_contable} {h_contable}",
+                fecha_registro_ajuste
+            ))
+        except Exception as e_g_aj:
+            print(f"Aviso registrando contra-asiento en gastos: {e_g_aj}")
+
+        # 4. Ajustar dinero en caja física si el pago original fue en efectivo
+        cuenta_af = "CAJA_FISICA" if metodo == "Efectivo" else "BANCO_TRANSFERENCIA"
+        try:
+            if metodo == "Efectivo":
+                cur.execute("SELECT id FROM sesiones_caja WHERE fecha_apertura = ? ORDER BY id DESC LIMIT 1", (f_contable,))
+                s_r = cur.fetchone()
+                s_id = s_r[0] if s_r else None
+                if not s_id:
+                    cur.execute("SELECT id FROM sesiones_caja WHERE estado = 'Abierta' ORDER BY id DESC LIMIT 1")
+                    s_r = cur.fetchone()
+                    s_id = s_r[0] if s_r else 1
+
+                cur.execute("""
+                    INSERT INTO movimientos_caja (
+                        sesion_caja_id, fecha, hora, tipo, monto, usuario,
+                        terminal, referencia_id, descripcion, created_at
+                    ) VALUES (?, ?, ?, 'AJUSTE', ?, ?, 'Terminal-1', ?, ?, ?)
+                """, (
+                    s_id, f_contable, h_contable, monto_sobrante_flt, usuario,
+                    numero_ajuste, f"Ajuste dinero de más sobre {recibo}: {prov_nom}", fecha_registro_ajuste
+                ))
+
+            cur.execute("""
+                INSERT INTO movimientos_financieros (
+                    fecha, hora, tipo, concepto, monto, metodo_pago,
+                    cuenta_afectada, usuario, referencia_origen, estado, observaciones
+                ) VALUES (?, ?, 'AJUSTE_SOBRANTE_PROVEEDOR', ?, ?, ?, ?, ?, ?, 'Activo', ?)
+            """, (
+                f_contable, h_contable, f"Ajuste dinero de más proveedor {prov_nom} ({numero_ajuste})",
+                monto_sobrante_flt, metodo, cuenta_af, usuario,
+                numero_ajuste, f"Liquidación: {recibo}. Motivo: {motivo}"
+            ))
+        except Exception as e_fin_aj:
+            print(f"Aviso registrando ajuste en caja/financiero: {e_fin_aj}")
+
+        # 5. Reabrir cuentas por pagar asociadas en orden LIFO para restituir el saldo real
+        cur.execute("""
+            SELECT id, monto_por_pagar, monto_pagado, saldo_pendiente
+            FROM cuentas_por_pagar_proveedores
+            WHERE (proveedor_id = ? OR CAST(proveedor_id AS TEXT) = ? OR LOWER(proveedor_nombre) = LOWER(?))
+              AND monto_pagado > 0
+            ORDER BY id DESC
+        """, (prov_id, str(prov_id), prov_nom))
+        cuentas_pagadas = cur.fetchall()
+
+        remanente_restaurar = monto_sobrante_flt
+        for c_id, c_tot, c_pag, c_saldo in cuentas_pagadas:
+            if remanente_restaurar <= 0.001:
+                break
+            c_pag_flt = float(c_pag)
+            restaurar_en_cuenta = min(remanente_restaurar, c_pag_flt)
+            nuevo_pagado = round(c_pag_flt - restaurar_en_cuenta, 2)
+            nuevo_saldo = round(float(c_saldo) + restaurar_en_cuenta, 2)
+            nuevo_estado = "Pendiente" if nuevo_pagado == 0.0 else "Abonada"
+
+            cur.execute("""
+                UPDATE cuentas_por_pagar_proveedores
+                SET monto_pagado = ?, saldo_pendiente = ?, estado = ?
+                WHERE id = ?
+            """, (nuevo_pagado, nuevo_saldo, nuevo_estado, c_id))
+
+            remanente_restaurar = round(remanente_restaurar - restaurar_en_cuenta, 2)
+
+        # 6. Recalcular saldos del proveedor para consistencia integral
+        rec = recalcular_saldo_proveedor(prov_id, conn=conn)
+
+        # 7. Registrar auditoría
+        try:
+            cur.execute("""
+                INSERT INTO auditoria_liquidaciones (
+                    liquidacion_id, numero_recibo, proveedor_id, proveedor_nombre,
+                    accion, fecha_anterior, fecha_nueva, monto, usuario, motivo, fecha_registro
+                ) VALUES (?, ?, ?, ?, 'DINERO_DE_MAS', ?, ?, ?, ?, ?, ?)
+            """, (
+                id_real, recibo, prov_id, prov_nom,
+                f"Monto Original: {_fmt_cop(monto_liquidado)}",
+                f"Ajuste Sobrante: -{_fmt_cop(monto_sobrante_flt)} (Neto: {_fmt_cop(nuevo_monto_ajustado)})",
+                monto_sobrante_flt, usuario, motivo, fecha_registro_ajuste
+            ))
+
+            cur.execute("""
+                INSERT INTO auditoria_caja (fecha, hora, usuario, accion, detalle, exito, created_at)
+                VALUES (?, ?, ?, 'CORRECCION_DINERO_DE_MAS', ?, 1, ?)
+            """, (
+                ahora_dt.strftime("%Y-%m-%d"),
+                ahora_dt.strftime("%H:%M:%S"),
+                usuario,
+                f"Ajuste {numero_ajuste} sobre {recibo} ({prov_nom}): Dinero de más {_fmt_cop(monto_sobrante_flt)}. Fecha contable: {f_contable}. Motivo: {motivo}",
+                fecha_registro_ajuste
+            ))
+        except Exception as e_aud_aj:
+            print(f"Aviso registrando auditoría de dinero de más: {e_aud_aj}")
+
+        # 8. Sincronización en red
+        try:
+            from interface.sync_manager import sync_mgr
+            sync_mgr.encolar_operacion(
+                tipo_operacion="DINERO_DE_MAS_PROVEEDOR",
+                payload={
+                    "ajuste_id": id_ajuste,
+                    "numero_ajuste": numero_ajuste,
+                    "liquidacion_id": id_real,
+                    "numero_recibo": recibo,
+                    "proveedor_id": prov_id,
+                    "monto_ajuste": monto_sobrante_flt,
+                    "fecha_movimiento": f_contable,
+                    "hora_movimiento": h_contable,
+                    "motivo": motivo,
+                    "usuario": usuario,
+                },
+                usuario=usuario,
+                id_local=str(id_ajuste),
+                conn=conn
+            )
+        except Exception as e_sync_aj:
+            print(f"Aviso encolando sync de dinero de más: {e_sync_aj}")
+
+        if cerrar_conn:
+            conn.commit()
+
+        return {
+            "exito": True,
+            "ok": True,
+            "numero_ajuste": numero_ajuste,
+            "liquidacion_id": id_real,
+            "numero_recibo": recibo,
+            "proveedor_id": prov_id,
+            "proveedor_nombre": prov_nom,
+            "monto_ajuste": monto_sobrante_flt,
+            "monto_ajustado_restante": nuevo_monto_ajustado,
+            "dinero_de_mas_total": nuevo_dinero_mas,
+            "fecha_contable": f_contable,
+            "saldo_proveedor_restante": rec.get("saldo_pendiente", 0.0),
+            "mensaje": f"Corrección por dinero de más registrada con éxito ({numero_ajuste}). Se descontaron {_fmt_cop(monto_sobrante_flt)} del día {f_contable}."
+        }
+    except Exception as ex:
+        if conn and cerrar_conn:
+            conn.rollback()
+        return {"exito": False, "ok": False, "mensaje": f"Error registrando dinero de más: {ex}"}
+    finally:
+        if cerrar_conn and conn:
+            conn.close()
+
+
+def obtener_historial_ajustes_proveedor(
+    proveedor_id: Optional[int] = None,
+    liquidacion_id: Optional[int] = None,
+    conn: Optional[sqlite3.Connection] = None
+) -> List[Dict[str, Any]]:
+    """Consulta el historial de correcciones por dinero de más."""
+    cerrar_conn = False
+    if conn is None:
+        conn = conectar_db()
+        cerrar_conn = True
+    if not conn:
+        return []
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        query = """
+            SELECT id, numero_ajuste, liquidacion_id, numero_recibo, proveedor_id,
+                   proveedor_nombre, monto_ajuste, fecha_movimiento, hora_movimiento,
+                   fecha_registro, usuario, motivo, estado, created_at
+            FROM ajustes_liquidaciones_proveedores
+            WHERE 1=1
+        """
+        params = []
+        if liquidacion_id:
+            query += " AND liquidacion_id = ?"
+            params.append(liquidacion_id)
+        if proveedor_id:
+            query += " AND proveedor_id = ?"
+            params.append(proveedor_id)
+        query += " ORDER BY id DESC"
+        cur.execute(query, params)
+        return [dict(r) for r in cur.fetchall()]
     finally:
         if cerrar_conn and conn:
             conn.close()

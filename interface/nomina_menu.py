@@ -57,7 +57,12 @@ try:
         obtener_detalle_cuentas_proveedor,
         obtener_historial_liquidaciones_proveedor,
         liquidar_proveedor_db,
-        revertir_liquidacion_proveedor_db
+        revertir_liquidacion_proveedor_db,
+        actualizar_fecha_liquidacion_proveedor_db,
+        registrar_dinero_de_mas_proveedor_db,
+        obtener_historial_ajustes_proveedor,
+        normalizar_fecha,
+        normalizar_hora
     )
 except ImportError:
     from proveedores_manager import (
@@ -67,7 +72,12 @@ except ImportError:
         obtener_detalle_cuentas_proveedor,
         obtener_historial_liquidaciones_proveedor,
         liquidar_proveedor_db,
-        revertir_liquidacion_proveedor_db
+        revertir_liquidacion_proveedor_db,
+        actualizar_fecha_liquidacion_proveedor_db,
+        registrar_dinero_de_mas_proveedor_db,
+        obtener_historial_ajustes_proveedor,
+        normalizar_fecha,
+        normalizar_hora
     )
 
 
@@ -1534,21 +1544,30 @@ def iniciar_nomina(parent_pid="", parent=None):
         tot_monto = 0.0
         for r in hist:
             monto_val = float(r.get("monto_liquidado") or r.get("monto_pagado") or 0.0)
-            tot_monto += monto_val
+            dinero_mas = float(r.get("dinero_de_mas") or 0.0)
+            monto_neto = max(0.0, monto_val - dinero_mas)
+            tot_monto += monto_neto
             fecha_val = r.get("fecha") or r.get("fecha_pago", "")
             u_nom = r.get("usuario") or r.get("usuario_nombre", "Admin")
             ref_val = r.get("referencia") or r.get("referencia_comprobante", "") or "N/A"
+            estado_val = r.get("estado", "Aplicado")
+            if dinero_mas > 0 and estado_val != "Revertida":
+                estado_val = f"Ajustado (-{_fmt_cop(dinero_mas)})"
+                monto_display = _fmt_cop(monto_neto)
+            else:
+                monto_display = _fmt_cop(monto_val)
+
             tree_hist_prov.insert("", "end", values=(
                 r.get("numero_recibo", f"LP-{r.get('id')}"),
                 fecha_val,
                 r.get("proveedor_nombre", ""),
-                _fmt_cop(monto_val),
+                monto_display,
                 r.get("metodo_pago", "Efectivo"),
                 _fmt_cop(r.get("saldo_anterior", 0.0)),
                 _fmt_cop(r.get("saldo_restante", 0.0)),
                 u_nom,
                 ref_val,
-                r.get("estado", "Aplicado")
+                estado_val
             ))
 
         lbl_tot_hist_prov.config(
@@ -1613,7 +1632,7 @@ def iniciar_nomina(parent_pid="", parent=None):
         modal.transient(ventana)
         modal.grab_set()
         modal.configure(bg=t["bg_app"])
-        calcular_geometria_segura(modal, 520, 560, min_w=480, min_h=500)
+        calcular_geometria_segura(modal, 540, 660, min_w=480, min_h=580)
 
         # Encabezado
         f_top = tk.Frame(modal, bg=t["primary"], padx=16, pady=12)
@@ -1734,6 +1753,59 @@ def iniciar_nomina(parent_pid="", parent=None):
 
         combo_metodo.bind("<<ComboboxSelected>>", on_metodo_change)
 
+        # Fecha y Hora Contable del Movimiento
+        f_fecha = tk.Frame(body, bg=t["bg_app"])
+        f_fecha.pack(fill="x", pady=(0, 10))
+
+        lbl_f_title = tk.Label(
+            f_fecha, text="📅 Fecha y Hora del Movimiento (Contable):",
+            font=("Segoe UI", 10, "bold"), bg=t["bg_app"], fg=t["text_primary"]
+        )
+        lbl_f_title.pack(anchor="w")
+
+        lbl_f_sub = tk.Label(
+            f_fecha,
+            text="ℹ️ Fecha real del movimiento. Afectará la contabilidad y egresos de dicho día.",
+            font=("Segoe UI", 8, "italic"), bg=t["bg_app"], fg=t["text_secondary"]
+        )
+        lbl_f_sub.pack(anchor="w", pady=(1, 4))
+
+        f_fecha_inputs = tk.Frame(f_fecha, bg=t["bg_app"])
+        f_fecha_inputs.pack(fill="x")
+
+        var_fecha_mov = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+        e_fecha_mov = ttk.Entry(f_fecha_inputs, textvariable=var_fecha_mov, font=("Segoe UI", 10), width=13)
+        e_fecha_mov.pack(side="left", padx=(0, 4))
+
+        def set_fecha_hoy():
+            var_fecha_mov.set(datetime.now().strftime("%Y-%m-%d"))
+
+        def set_fecha_ayer():
+            from datetime import timedelta
+            ayer = datetime.now() - timedelta(days=1)
+            var_fecha_mov.set(ayer.strftime("%Y-%m-%d"))
+
+        btn_hoy = tk.Button(
+            f_fecha_inputs, text="Hoy", command=set_fecha_hoy,
+            font=("Segoe UI", 8), bg=t["bg_surface"], relief="groove", padx=6, pady=1
+        )
+        btn_hoy.pack(side="left", padx=2)
+
+        btn_ayer = tk.Button(
+            f_fecha_inputs, text="Ayer", command=set_fecha_ayer,
+            font=("Segoe UI", 8), bg=t["bg_surface"], relief="groove", padx=6, pady=1
+        )
+        btn_ayer.pack(side="left", padx=2)
+
+        tk.Label(
+            f_fecha_inputs, text="Hora:", font=("Segoe UI", 9),
+            bg=t["bg_app"], fg=t["text_primary"]
+        ).pack(side="left", padx=(10, 4))
+
+        var_hora_mov = tk.StringVar(value=datetime.now().strftime("%H:%M:%S"))
+        e_hora_mov = ttk.Entry(f_fecha_inputs, textvariable=var_hora_mov, font=("Segoe UI", 10), width=10)
+        e_hora_mov.pack(side="left", padx=(0, 4))
+
         # Referencia y Notas
         f_extra = tk.Frame(body, bg=t["bg_app"])
         f_extra.pack(fill="x", pady=(0, 10))
@@ -1769,6 +1841,19 @@ def iniciar_nomina(parent_pid="", parent=None):
                 )
                 return
 
+            fecha_input = var_fecha_mov.get().strip()
+            hora_input = var_hora_mov.get().strip()
+            f_norm = normalizar_fecha(fecha_input)
+            h_norm = normalizar_hora(hora_input) if hora_input else datetime.now().strftime("%H:%M:%S")
+
+            if not f_norm:
+                messagebox.showerror(
+                    "Fecha Inválida",
+                    "Por favor ingrese una fecha válida en formato AAAA-MM-DD (ejemplo: 2026-11-20).",
+                    parent=modal
+                )
+                return
+
             metodo = var_metodo.get()
             ref = e_ref.get().strip()
             notas = e_notas.get().strip()
@@ -1776,9 +1861,10 @@ def iniciar_nomina(parent_pid="", parent=None):
             msg_confirm = (
                 f"¿Confirmar pago a '{nombre}'?\n\n"
                 f"• Monto a pagar: {_fmt_cop(monto_val)}\n"
+                f"• Fecha real del movimiento: {f_norm} {h_norm}\n"
                 f"• Método: {metodo}\n"
                 f"• Saldo que quedará pendiente: {_fmt_cop(max(0.0, saldo_actual - monto_val))}\n\n"
-                f"Esta operación es irreversible y afectará la contabilidad operativa."
+                f"Esta operación afectará la contabilidad operativa del día {f_norm}."
             )
 
             if not messagebox.askyesno("Confirmar Pago", msg_confirm, parent=modal):
@@ -1799,7 +1885,11 @@ def iniciar_nomina(parent_pid="", parent=None):
                     metodo_pago=metodo,
                     referencia_comprobante=ref,
                     usuario_nombre="Administrador",
-                    notas=notas
+                    notas=notas,
+                    fecha_movimiento=f_norm,
+                    hora_movimiento=h_norm,
+                    fecha=f_norm,
+                    hora=h_norm
                 )
 
                 if res.get("exito") or res.get("ok"):
@@ -1809,6 +1899,7 @@ def iniciar_nomina(parent_pid="", parent=None):
                         f"Se registró correctamente el pago a '{nombre}'.\n\n"
                         f"• Recibo: {recibo}\n"
                         f"• Monto Pagado: {_fmt_cop(res.get('monto_pagado', monto_val))}\n"
+                        f"• Fecha Contable: {f_norm} {h_norm}\n"
                         f"• Saldo Restante: {_fmt_cop(res.get('saldo_restante', 0.0))}\n"
                         f"• Medio: {metodo}\n"
                         f"• Facturas liquidadas: {res.get('cuentas_afectadas', 0)}",
@@ -1854,13 +1945,14 @@ def iniciar_nomina(parent_pid="", parent=None):
         monto_str = vals[3]
         estado = vals[9]
 
-        if estado == "Anulado":
-            messagebox.showwarning("Operación no válida", f"El recibo {recibo} ya se encuentra anulado.")
+        if "Anulado" in estado or "Revertida" in estado:
+            messagebox.showwarning("Operación no válida", f"El recibo {recibo} ya se encuentra anulado o revertido.")
             return
 
         # Extraer ID de liquidación
         try:
-            liq_id = int(recibo.replace("LP-", "").strip())
+            clean_recibo = str(recibo).replace("LQ-", "").replace("LP-", "").strip()
+            liq_id = int(clean_recibo)
         except Exception:
             liq_id = None
 
@@ -1883,10 +1975,497 @@ def iniciar_nomina(parent_pid="", parent=None):
         else:
             messagebox.showerror("Error", f"No se pudo revertir la liquidación: {res.get('mensaje')}")
 
+    def abrir_dialogo_editar_fecha_liquidacion():
+        sel = tree_hist_prov.selection()
+        if not sel:
+            messagebox.showwarning(
+                "Seleccionar liquidación",
+                "Por favor seleccione una liquidación de la tabla de Historial para editar su fecha.",
+                parent=ventana
+            )
+            return
+
+        vals = tree_hist_prov.item(sel[0], "values")
+        recibo = vals[0]
+        fecha_actual = vals[1]
+        prov_nom = vals[2]
+        monto_str = vals[3]
+        estado = vals[9]
+
+        if "Revertid" in estado or "Anulad" in estado:
+            messagebox.showwarning(
+                "No editable",
+                f"La liquidación {recibo} se encuentra anulada o revertida y no puede ser modificada.",
+                parent=ventana
+            )
+            return
+
+        try:
+            clean_recibo = str(recibo).replace("LQ-", "").replace("LP-", "").strip()
+            liq_id = int(clean_recibo)
+        except Exception:
+            liq_id = str(recibo)
+
+        # Modal
+        dlg_edit = tk.Toplevel(ventana)
+        dlg_edit.title(f"📅 Editar Fecha de Liquidación - {recibo}")
+        dlg_edit.transient(ventana)
+        dlg_edit.grab_set()
+        dlg_edit.configure(bg=t["bg_app"])
+        calcular_geometria_segura(dlg_edit, 500, 480, min_w=460, min_h=440)
+
+        f_hdr = tk.Frame(dlg_edit, bg=t["primary"], padx=16, pady=12)
+        f_hdr.pack(fill="x")
+        tk.Label(
+            f_hdr, text=f"📅 Modificar Fecha Contable — {recibo}",
+            font=("Segoe UI", 12, "bold"), fg="white", bg=t["primary"]
+        ).pack(anchor="w")
+        tk.Label(
+            f_hdr, text=f"Proveedor: {prov_nom} | Monto: {monto_str}",
+            font=("Segoe UI", 10), fg="#E0E7FF", bg=t["primary"]
+        ).pack(anchor="w", pady=(2, 0))
+
+        b_edit = tk.Frame(dlg_edit, bg=t["bg_app"], padx=20, pady=14)
+        b_edit.pack(fill="both", expand=True)
+
+        # Ficha Informativa
+        f_info = tk.Frame(b_edit, bg=t["bg_surface"], bd=1, relief="ridge", padx=12, pady=10)
+        f_info.pack(fill="x", pady=(0, 14))
+
+        tk.Label(
+            f_info, text=f"Fecha Contable Actual:  {fecha_actual}",
+            font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["primary"]
+        ).pack(anchor="w")
+        tk.Label(
+            f_info,
+            text="ℹ️ Trasladará el gasto y los movimientos contables a la nueva fecha indicada.\n"
+                 "La fecha de registro original se conservará inalterable para auditoría.",
+            font=("Segoe UI", 8, "italic"), bg=t["bg_surface"], fg=t["text_secondary"], justify="left"
+        ).pack(anchor="w", pady=(4, 0))
+
+        # Inputs de Nueva Fecha
+        tk.Label(
+            b_edit, text="Nueva Fecha Contable (AAAA-MM-DD):",
+            font=("Segoe UI", 10, "bold"), bg=t["bg_app"], fg=t["text_primary"]
+        ).pack(anchor="w", pady=(0, 2))
+
+        f_row_nf = tk.Frame(b_edit, bg=t["bg_app"])
+        f_row_nf.pack(fill="x", pady=(0, 10))
+
+        f_act_only = fecha_actual.strip()[:10] if fecha_actual else datetime.now().strftime("%Y-%m-%d")
+        var_n_fecha = tk.StringVar(value=f_act_only)
+        e_n_fecha = ttk.Entry(f_row_nf, textvariable=var_n_fecha, font=("Segoe UI", 10), width=14)
+        e_n_fecha.pack(side="left", padx=(0, 6))
+
+        def set_nf_hoy():
+            var_n_fecha.set(datetime.now().strftime("%Y-%m-%d"))
+
+        def set_nf_ayer():
+            from datetime import timedelta
+            ayer = datetime.now() - timedelta(days=1)
+            var_n_fecha.set(ayer.strftime("%Y-%m-%d"))
+
+        tk.Button(f_row_nf, text="Hoy", command=set_nf_hoy, font=("Segoe UI", 8), bg=t["bg_surface"], relief="groove", padx=6, pady=1).pack(side="left", padx=2)
+        tk.Button(f_row_nf, text="Ayer", command=set_nf_ayer, font=("Segoe UI", 8), bg=t["bg_surface"], relief="groove", padx=6, pady=1).pack(side="left", padx=2)
+
+        # Input de Nueva Hora
+        h_act_only = fecha_actual.strip()[11:19] if len(fecha_actual.strip()) > 10 else datetime.now().strftime("%H:%M:%S")
+        tk.Label(
+            b_edit, text="Nueva Hora (HH:MM:SS):",
+            font=("Segoe UI", 10, "bold"), bg=t["bg_app"], fg=t["text_primary"]
+        ).pack(anchor="w", pady=(0, 2))
+        var_n_hora = tk.StringVar(value=h_act_only or datetime.now().strftime("%H:%M:%S"))
+        e_n_hora = ttk.Entry(b_edit, textvariable=var_n_hora, font=("Segoe UI", 10))
+        e_n_hora.pack(fill="x", pady=(0, 10))
+
+        # Motivo obligatorio
+        tk.Label(
+            b_edit, text="Motivo de la Modificación (Requerido):",
+            font=("Segoe UI", 10, "bold"), bg=t["bg_app"], fg=t["text_primary"]
+        ).pack(anchor="w", pady=(0, 2))
+        e_motivo_f = ttk.Entry(b_edit, font=("Segoe UI", 10))
+        e_motivo_f.insert(0, "Ajuste de fecha operativa real")
+        e_motivo_f.pack(fill="x", pady=(0, 12))
+
+        # Botones
+        f_b_actions = tk.Frame(dlg_edit, bg=t["bg_surface"], padx=16, pady=12)
+        f_b_actions.pack(fill="x", side="bottom")
+
+        def guardar_cambio_fecha():
+            nf_val = normalizar_fecha(var_n_fecha.get().strip())
+            nh_val = normalizar_hora(var_n_hora.get().strip())
+            motivo_val = e_motivo_f.get().strip()
+
+            if not nf_val:
+                messagebox.showerror("Error", "Ingrese una fecha válida en formato AAAA-MM-DD.", parent=dlg_edit)
+                return
+
+            if not motivo_val:
+                messagebox.showerror("Error", "Debe ingresar el motivo de la modificación.", parent=dlg_edit)
+                return
+
+            msg = (
+                f"¿Confirmar el cambio de fecha para la liquidación {recibo}?\n\n"
+                f"• Proveedor: {prov_nom}\n"
+                f"• Monto: {monto_str}\n"
+                f"• Fecha Actual: {fecha_actual}\n"
+                f"• Nueva Fecha Contable: {nf_val} {nh_val}\n"
+                f"• Motivo: {motivo_val}\n\n"
+                f"El gasto se restará del día anterior y se registrará en el nuevo día."
+            )
+            if not messagebox.askyesno("Confirmar Traslado de Fecha", msg, parent=dlg_edit):
+                return
+
+            btn_save.config(state="disabled", text="⏳ Guardando...")
+            dlg_edit.update_idletasks()
+
+            res = actualizar_fecha_liquidacion_proveedor_db(
+                liquidacion_id=liq_id,
+                nueva_fecha=nf_val,
+                nueva_hora=nh_val,
+                motivo=motivo_val,
+                usuario="Administrador"
+            )
+
+            if res.get("exito") or res.get("ok"):
+                messagebox.showinfo(
+                    "✅ Fecha Actualizada",
+                    f"La liquidación {recibo} fue trasladada exitosamente al {nf_val}.\n\n"
+                    f"Afectación contable actualizada en gastos y movimientos de caja.",
+                    parent=ventana
+                )
+                dlg_edit.destroy()
+                cargar_proveedores()
+                cargar_historial_prov()
+                actualizar_combo_meses_prov()
+            else:
+                messagebox.showerror("Error", f"No se pudo actualizar la fecha:\n{res.get('mensaje')}", parent=dlg_edit)
+                btn_save.config(state="normal", text="💾 Guardar Nueva Fecha")
+
+        crear_boton(
+            f_b_actions, text="Cancelar", command=dlg_edit.destroy,
+            bg=t["bg_app"], fg=t["text_primary"], hover_bg="#CBD5E1",
+            font=("Segoe UI", 10), padx=14, pady=6
+        ).pack(side="right", padx=6)
+
+        btn_save = crear_boton(
+            f_b_actions, text="💾 Guardar Nueva Fecha", command=guardar_cambio_fecha,
+            bg=t["primary"], fg="white", hover_bg="#1D4ED8",
+            font=("Segoe UI", 10, "bold"), padx=16, pady=6
+        )
+        btn_save.pack(side="right", padx=6)
+
+    def abrir_dialogo_dinero_de_mas():
+        if not messagebox.askyesno(
+            "Dinero de más",
+            "¿Hay dinero de más que deba corregirse?",
+            parent=ventana
+        ):
+            return
+
+        sel_hist = tree_hist_prov.selection()
+        liq_target = None
+
+        if sel_hist:
+            vals = tree_hist_prov.item(sel_hist[0], "values")
+            recibo = vals[0]
+            fecha_liq = vals[1]
+            prov_nom = vals[2]
+            monto_str = vals[3]
+            estado = vals[9]
+
+            if "Revertid" in estado or "Anulad" in estado:
+                messagebox.showwarning(
+                    "No ajustable",
+                    f"La liquidación {recibo} está anulada o revertida y no puede ajustarse.",
+                    parent=ventana
+                )
+                return
+
+            try:
+                clean_recibo = str(recibo).replace("LQ-", "").replace("LP-", "").strip()
+                liq_id = int(clean_recibo)
+            except Exception:
+                liq_id = str(recibo)
+
+            liq_target = {
+                "id": liq_id,
+                "recibo": recibo,
+                "fecha": fecha_liq,
+                "proveedor_nombre": prov_nom,
+                "monto_str": monto_str
+            }
+        else:
+            datos_prov = obtener_datos_proveedor_seleccionado()
+            if datos_prov:
+                prov_id = datos_prov["id"]
+                prov_nom = datos_prov["nombre"]
+                hist_prov = obtener_historial_liquidaciones_proveedor()
+                liqs_validas = [
+                    l for l in hist_prov
+                    if (str(l.get("proveedor_id")) == str(prov_id) or str(l.get("proveedor_nombre")) == str(prov_nom))
+                    and l.get("estado") != "Revertida"
+                ]
+                if not liqs_validas:
+                    messagebox.showinfo(
+                        "Sin liquidaciones",
+                        f"El proveedor '{prov_nom}' no tiene liquidaciones activas registradas para corregir.",
+                        parent=ventana
+                    )
+                    return
+                l_rec = liqs_validas[0]
+                recibo = l_rec.get("numero_recibo") or f"LQ-{l_rec.get('id'):05d}"
+                monto_val = float(l_rec.get("monto_liquidado") or l_rec.get("monto_pagado") or 0.0)
+                liq_target = {
+                    "id": l_rec.get("id"),
+                    "recibo": recibo,
+                    "fecha": l_rec.get("fecha") or "",
+                    "proveedor_nombre": prov_nom,
+                    "monto_str": _fmt_cop(monto_val),
+                    "monto_liquidado": monto_val,
+                    "dinero_de_mas": float(l_rec.get("dinero_de_mas") or 0.0),
+                }
+            else:
+                messagebox.showwarning(
+                    "Selección requerida",
+                    "Por favor seleccione una liquidación en la tabla de Historial o un proveedor en la lista para registrar el dinero de más.",
+                    parent=ventana
+                )
+                return
+
+        liq_id_real = liq_target["id"]
+        recibo_real = liq_target["recibo"]
+        prov_nom_real = liq_target["proveedor_nombre"]
+
+        conn_tmp = conectar_db()
+        cur_tmp = conn_tmp.cursor()
+        cur_tmp.execute("""
+            SELECT id, numero_recibo, proveedor_id, proveedor_nombre, monto_liquidado,
+                   fecha, hora, metodo_pago, estado, COALESCE(dinero_de_mas, 0.0),
+                   COALESCE(monto_ajustado, monto_liquidado), COALESCE(fecha_registro, created_at, fecha)
+            FROM liquidaciones_proveedores
+            WHERE id = ? OR numero_recibo = ?
+        """, (liq_id_real, str(recibo_real)))
+        row_liq = cur_tmp.fetchone()
+        conn_tmp.close()
+
+        if not row_liq:
+            messagebox.showerror("Error", f"No se encontró la liquidación {recibo_real}.", parent=ventana)
+            return
+
+        monto_pagado_orig = float(row_liq[4] or 0.0)
+        fecha_orig = str(row_liq[5] or "")
+        metodo_liq = str(row_liq[7] or "Efectivo")
+        dinero_previo = float(row_liq[9] or 0.0)
+        limite_ajustable = round(monto_pagado_orig - dinero_previo, 2)
+
+        if limite_ajustable <= 0.0:
+            messagebox.showinfo(
+                "Sin saldo corregible",
+                f"La liquidación {recibo_real} ya ha sido ajustada en su totalidad por dinero de más ($0 COP restantes corregibles).",
+                parent=ventana
+            )
+            return
+
+        # Modal ¿Cuánto dinero hay de más?
+        dlg_mas = tk.Toplevel(ventana)
+        dlg_mas.title("💰 Corrección de Liquidación — DINERO DE MÁS")
+        dlg_mas.transient(ventana)
+        dlg_mas.grab_set()
+        dlg_mas.configure(bg=t["bg_app"])
+        calcular_geometria_segura(dlg_mas, 520, 520, min_w=480, min_h=460)
+
+        f_hdr = tk.Frame(dlg_mas, bg="#D97706", padx=16, pady=12)
+        f_hdr.pack(fill="x")
+        tk.Label(
+            f_hdr, text="💰 CORRECCIÓN POR DINERO DE MÁS",
+            font=("Segoe UI", 12, "bold"), fg="white", bg="#D97706"
+        ).pack(anchor="w")
+        tk.Label(
+            f_hdr, text=f"Recibo: {recibo_real} | Proveedor: {prov_nom_real}",
+            font=("Segoe UI", 10), fg="#FEF3C7", bg="#D97706"
+        ).pack(anchor="w", pady=(2, 0))
+
+        b_mas = tk.Frame(dlg_mas, bg=t["bg_app"], padx=20, pady=14)
+        b_mas.pack(fill="both", expand=True)
+
+        f_card = tk.Frame(b_mas, bg=t["bg_surface"], bd=1, relief="ridge", padx=12, pady=10)
+        f_card.pack(fill="x", pady=(0, 14))
+
+        tk.Label(f_card, text=f"Monto Liquidado Original: {_fmt_cop(monto_pagado_orig)}", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(anchor="w")
+        if dinero_previo > 0:
+            tk.Label(f_card, text=f"Dinero de Más Corregido Anteriormente: {_fmt_cop(dinero_previo)}", font=("Segoe UI", 9), bg=t["bg_surface"], fg="#D97706").pack(anchor="w")
+        tk.Label(f_card, text=f"Máximo Dinero de Más Corregible: {_fmt_cop(limite_ajustable)}", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["danger"]).pack(anchor="w", pady=(2, 0))
+        tk.Label(f_card, text=f"Método de Pago: {metodo_liq} | Fecha Movimiento: {fecha_orig}", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_secondary"]).pack(anchor="w")
+
+        # Pregunta: ¿Cuánto dinero hay de más?
+        tk.Label(
+            b_mas, text="¿Cuánto dinero hay de más?",
+            font=("Segoe UI", 12, "bold"), bg=t["bg_app"], fg="#D97706"
+        ).pack(anchor="w", pady=(0, 4))
+
+        e_monto_mas = ttk.Entry(b_mas, font=("Segoe UI", 12, "bold"))
+        e_monto_mas.pack(fill="x", pady=(0, 6))
+        e_monto_mas.focus()
+
+        lbl_mas_preview = tk.Label(
+            b_mas, text=f"Ingrese el valor exacto sobrante (máx: {_fmt_cop(limite_ajustable)})",
+            font=("Segoe UI", 9, "italic"), bg=t["bg_app"], fg=t["text_secondary"]
+        )
+        lbl_mas_preview.pack(anchor="w", pady=(0, 10))
+
+        def on_monto_mas_change(*args):
+            txt = e_monto_mas.get().strip().replace("$", "").replace(",", "")
+            try:
+                v = float(txt or 0.0)
+                if v <= 0:
+                    lbl_mas_preview.config(text="⚠️ Ingrese un valor mayor a $0", fg=t["danger"])
+                elif v > limite_ajustable:
+                    lbl_mas_preview.config(text=f"⚠️ Supera el límite corregible ({_fmt_cop(limite_ajustable)})", fg=t["danger"])
+                else:
+                    restante_neto = max(0.0, limite_ajustable - v)
+                    lbl_mas_preview.config(text=f"Monto neto final de la liquidación: {_fmt_cop(restante_neto)}", fg=t["success"])
+            except Exception:
+                lbl_mas_preview.config(text="⚠️ Monto no válido", fg=t["danger"])
+
+        e_monto_mas.bind("<KeyRelease>", on_monto_mas_change)
+
+        # Motivo obligatorio
+        tk.Label(
+            b_mas, text="Motivo de la corrección (Requerido):",
+            font=("Segoe UI", 10, "bold"), bg=t["bg_app"], fg=t["text_primary"]
+        ).pack(anchor="w", pady=(0, 2))
+        e_motivo_mas = ttk.Entry(b_mas, font=("Segoe UI", 10))
+        e_motivo_mas.insert(0, "Ajuste por dinero de más registrado erróneamente")
+        e_motivo_mas.pack(fill="x", pady=(0, 10))
+
+        # Fecha contable de afectación
+        tk.Label(
+            b_mas, text="Fecha del Ajuste Contable (AAAA-MM-DD):",
+            font=("Segoe UI", 10, "bold"), bg=t["bg_app"], fg=t["text_primary"]
+        ).pack(anchor="w", pady=(0, 2))
+
+        f_row_fmas = tk.Frame(b_mas, bg=t["bg_app"])
+        f_row_fmas.pack(fill="x", pady=(0, 10))
+
+        var_f_ajuste = tk.StringVar(value=fecha_orig or datetime.now().strftime("%Y-%m-%d"))
+        e_f_ajuste = ttk.Entry(f_row_fmas, textvariable=var_f_ajuste, font=("Segoe UI", 10), width=14)
+        e_f_ajuste.pack(side="left", padx=(0, 6))
+
+        def set_fmas_orig():
+            var_f_ajuste.set(fecha_orig)
+
+        def set_fmas_hoy():
+            var_f_ajuste.set(datetime.now().strftime("%Y-%m-%d"))
+
+        tk.Button(f_row_fmas, text="Fecha Liquidación", command=set_fmas_orig, font=("Segoe UI", 8), bg=t["bg_surface"], relief="groove", padx=6, pady=1).pack(side="left", padx=2)
+        tk.Button(f_row_fmas, text="Hoy", command=set_fmas_hoy, font=("Segoe UI", 8), bg=t["bg_surface"], relief="groove", padx=6, pady=1).pack(side="left", padx=2)
+
+        # Botones
+        f_actions_mas = tk.Frame(dlg_mas, bg=t["bg_surface"], padx=16, pady=12)
+        f_actions_mas.pack(fill="x", side="bottom")
+
+        def aplicar_dinero_de_mas():
+            txt_val = e_monto_mas.get().strip().replace("$", "").replace(",", "")
+            if not txt_val:
+                messagebox.showerror("Error", "Debe ingresar el monto de dinero de más.", parent=dlg_mas)
+                return
+
+            try:
+                monto_val = float(txt_val)
+            except ValueError:
+                messagebox.showerror("Error", "El monto ingresado debe ser un número válido.", parent=dlg_mas)
+                return
+
+            if monto_val <= 0:
+                messagebox.showerror("Error", "El monto de dinero de más debe ser estrictamente mayor a 0.", parent=dlg_mas)
+                return
+
+            if monto_val > limite_ajustable:
+                messagebox.showerror(
+                    "Error",
+                    f"El monto no puede superar el límite disponible ({_fmt_cop(limite_ajustable)}).",
+                    parent=dlg_mas
+                )
+                return
+
+            motivo_val = e_motivo_mas.get().strip()
+            if not motivo_val:
+                messagebox.showerror("Error", "Debe ingresar el motivo de la corrección.", parent=dlg_mas)
+                return
+
+            f_ajuste_val = normalizar_fecha(var_f_ajuste.get().strip())
+            if not f_ajuste_val:
+                messagebox.showerror("Error", "La fecha del ajuste contable no es válida.", parent=dlg_mas)
+                return
+
+            msg_confirm_final = (
+                f"¿Confirmar corrección de DINERO DE MÁS por {_fmt_cop(monto_val)}?\n\n"
+                f"• Recibo afectado: {recibo_real}\n"
+                f"• Beneficiario: {prov_nom_real}\n"
+                f"• Monto sobrante a corregir: {_fmt_cop(monto_val)}\n"
+                f"• Fecha contable de aplicación: {f_ajuste_val}\n"
+                f"• Motivo: {motivo_val}\n\n"
+                f"Efectos contables inmediatos:\n"
+                f"1. Se registrará un contra-asiento de gasto (-{_fmt_cop(monto_val)}) en la fecha {f_ajuste_val}.\n"
+                f"2. Se reintegrará el dinero sobrante a la caja registradora.\n"
+                f"3. Se restaurará el saldo pendiente del proveedor por {_fmt_cop(monto_val)}."
+            )
+
+            if not messagebox.askyesno("Confirmar Corrección Contable", msg_confirm_final, parent=dlg_mas):
+                return
+
+            btn_submit_mas.config(state="disabled", text="⏳ Aplicando corrección...")
+            dlg_mas.update_idletasks()
+
+            res = registrar_dinero_de_mas_proveedor_db(
+                liquidacion_id=row_liq[0],
+                monto_sobrante=monto_val,
+                motivo=motivo_val,
+                usuario="Administrador",
+                fecha_movimiento=f_ajuste_val
+            )
+
+            if res.get("exito") or res.get("ok"):
+                messagebox.showinfo(
+                    "✅ Corrección Aplicada",
+                    f"Ajuste {res.get('numero_ajuste', '')} registrado exitosamente.\n\n"
+                    f"• Recibo: {recibo_real}\n"
+                    f"• Dinero de Más Corregido: {_fmt_cop(monto_val)}\n"
+                    f"• Nuevo Saldo Pendiente del Proveedor: {_fmt_cop(res.get('nuevo_saldo_proveedor', 0.0))}\n"
+                    f"• Gastos y saldo de caja actualizados.",
+                    parent=ventana
+                )
+                dlg_mas.destroy()
+                cargar_proveedores()
+                cargar_historial_prov()
+                actualizar_combo_meses_prov()
+            else:
+                messagebox.showerror("Error", f"No se pudo registrar la corrección:\n{res.get('mensaje')}", parent=dlg_mas)
+                btn_submit_mas.config(state="normal", text="✅ Confirmar Corrección")
+
+        crear_boton(
+            f_actions_mas, text="Cancelar", command=dlg_mas.destroy,
+            bg=t["bg_app"], fg=t["text_primary"], hover_bg="#CBD5E1",
+            font=("Segoe UI", 10), padx=14, pady=6
+        ).pack(side="right", padx=6)
+
+        btn_submit_mas = crear_boton(
+            f_actions_mas, text="✅ Confirmar Corrección", command=aplicar_dinero_de_mas,
+            bg="#D97706", fg="white", hover_bg="#B45309",
+            font=("Segoe UI", 10, "bold"), padx=18, pady=6
+        )
+        btn_submit_mas.pack(side="right", padx=6)
+
     # Enlazar botones principales
     crear_boton(
         prov_actions_bar, text="💸 Liquidar / Abonar", command=abrir_dialogo_liquidacion,
         bg=t["success"], fg="white", hover_bg="#059669", font=("Segoe UI", 11, "bold"), padx=14, pady=7
+    ).pack(side="left", padx=4)
+
+    crear_boton(
+        prov_actions_bar, text="💰 DINERO DE MÁS", command=abrir_dialogo_dinero_de_mas,
+        bg="#D97706", fg="white", hover_bg="#B45309", font=("Segoe UI", 10, "bold"), padx=12, pady=7
     ).pack(side="left", padx=4)
 
     crear_boton(
@@ -1898,6 +2477,16 @@ def iniciar_nomina(parent_pid="", parent=None):
         toolbar_hist, text="🔄 Revertir Pago", command=revertir_pago_seleccionado,
         bg=t["danger"], fg="white", hover_bg="#DC2626", font=("Segoe UI", 9, "bold"), padx=10, pady=4
     ).pack(side="right")
+
+    crear_boton(
+        toolbar_hist, text="📅 Editar Fecha", command=abrir_dialogo_editar_fecha_liquidacion,
+        bg=t["primary"], fg="white", hover_bg="#1D4ED8", font=("Segoe UI", 9, "bold"), padx=10, pady=4
+    ).pack(side="right", padx=4)
+
+    crear_boton(
+        toolbar_hist, text="💰 DINERO DE MÁS", command=abrir_dialogo_dinero_de_mas,
+        bg="#D97706", fg="white", hover_bg="#B45309", font=("Segoe UI", 9, "bold"), padx=10, pady=4
+    ).pack(side="right", padx=4)
 
     def auto_refresco_nomina():
         try:
