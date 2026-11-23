@@ -101,10 +101,18 @@ class TestCajonCambioWindows(unittest.TestCase):
 
     def test_07_apertura_manual_pin_seguridad(self):
         """Apertura manual (F7 / botón): solicita PIN, bloquea intentos incorrectos y valida correctamente."""
+        # Configurar un PIN inicial de prueba para asegurar estado limpio y reproducible en cualquier entorno
+        ok_crear, msg_crear = crear_o_actualizar_pin("7482", "7482", "Admin")
+        self.assertTrue(ok_crear, msg_crear)
+
         # Verificar que el validador rechaza PIN incorrecto
         ok_bad, msg_bad = verificar_pin("999999", usuario="Test")
         self.assertFalse(ok_bad)
         self.assertIn("PIN INCORRECTO", msg_bad.upper())
+
+        # Verificar que el validador acepta el PIN correcto
+        ok_good, msg_good = verificar_pin("7482", usuario="Test")
+        self.assertTrue(ok_good, msg_good)
 
         # Estado de seguridad
         st = obtener_estado_seguridad()
