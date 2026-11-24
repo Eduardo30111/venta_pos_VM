@@ -35,3 +35,11 @@ class ProveedorResponse(ProveedorBase):
 
     class Config:
         from_attributes = True
+
+
+class AjusteSaldoRequest(BaseModel):
+    tipo_ajuste: str = "AJUSTAR_A_CERO"  # 'AJUSTAR_A_CERO' o 'VALOR_ESPECIFICO'
+    nuevo_saldo: float = 0.0
+    motivo: str
+    usuario: str = "Administrador"
+    password_admin: Optional[str] = None

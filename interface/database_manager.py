@@ -645,6 +645,30 @@ def inicializar_base_datos(db_path=None):
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_aud_liq_id ON auditoria_liquidaciones(liquidacion_id)")
 
+        # 22.F Tabla de Ajustes Administrativos de Saldos de Proveedores
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ajustes_saldos_proveedores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                numero_ajuste TEXT UNIQUE NOT NULL,
+                proveedor_id INTEGER NOT NULL,
+                proveedor_nombre TEXT NOT NULL,
+                tipo_ajuste TEXT NOT NULL,
+                saldo_anterior REAL NOT NULL,
+                monto_ajuste REAL NOT NULL,
+                saldo_final REAL NOT NULL,
+                motivo TEXT NOT NULL,
+                usuario TEXT NOT NULL,
+                fecha TEXT NOT NULL,
+                hora TEXT NOT NULL,
+                estado TEXT NOT NULL DEFAULT 'Aplicado',
+                idempotency_key TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (proveedor_id) REFERENCES proveedores (id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_aj_saldos_prov_id ON ajustes_saldos_proveedores(proveedor_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_aj_saldos_prov_fecha ON ajustes_saldos_proveedores(fecha)")
+
         # 23. Tabla de Cola de Sincronización Offline Persistente
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cola_sincronizacion (

@@ -10,10 +10,10 @@ from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
 
 from ..database import get_db
-from ..models.proveedor import Proveedor, LiquidacionProveedor, AjusteLiquidacionProveedor, AuditoriaLiquidacion
+from ..models.proveedor import Proveedor, LiquidacionProveedor, AjusteLiquidacionProveedor, AuditoriaLiquidacion, AjusteSaldoProveedor
 from ..models.finanzas import CuentaPorPagar, Gasto
 from ..models.caja import MovimientoCaja, MovimientoFinanciero
-from ..schemas.proveedor import ProveedorCreate, ProveedorUpdate, ProveedorResponse
+from ..schemas.proveedor import ProveedorCreate, ProveedorUpdate, ProveedorResponse, AjusteSaldoRequest
 from ..services.caja_service import CajaService
 from ..services.venta_service import VentaService
 from ..middleware.auth import get_current_user, require_admin
@@ -695,7 +695,7 @@ async def _buscar_liquidacion_servidor_flexible(db: AsyncSession, id_str: Any) -
     liq = res.scalars().first()
     if liq:
         return liq
-    # 3. Normalización de dígitos y variantes LP- / LQ- / LIQ-PROV-
+    # 3. Normalización de dígitos y variantes LP- / LQ- / LIQ-PROV- / LIQ-
     digitos = re.findall(r'\d+', clean_id)
     if digitos:
         d_val = digitos[-1]
@@ -703,17 +703,29 @@ async def _buscar_liquidacion_servidor_flexible(db: AsyncSession, id_str: Any) -
             num_val = int(d_val)
         except Exception:
             num_val = 0
-        v_lp = f"LP-{num_val:04d}"
-        v_lq = f"LQ-{num_val:05d}"
+        v_variantes = [
+            f"LP-{num_val:04d}",
+            f"LP-{num_val:05d}",
+            f"LQ-{num_val:05d}",
+            f"LQ-{num_val:04d}",
+            f"LIQ-PROV-{num_val:05d}",
+            f"LIQ-PROV-{num_val:04d}",
+            f"LIQ-{num_val:05d}",
+            f"LIQ-{num_val:04d}",
+            f"LP-{num_val}",
+            f"LQ-{num_val}",
+            f"LIQ-PROV-{num_val}",
+            f"LIQ-{num_val}",
+            str(num_val)
+        ]
+        condiciones = [LiquidacionProveedor.id == num_val]
+        for v in v_variantes:
+            condiciones.append(LiquidacionProveedor.numero_liquidacion == v)
+        condiciones.append(LiquidacionProveedor.numero_liquidacion.like(f"%{d_val}%"))
+        condiciones.append(LiquidacionProveedor.numero_liquidacion.like(f"%-{num_val}"))
         res = await db.execute(
             select(LiquidacionProveedor).where(
-                or_(
-                    LiquidacionProveedor.id == num_val,
-                    LiquidacionProveedor.numero_liquidacion == v_lp,
-                    LiquidacionProveedor.numero_liquidacion == v_lq,
-                    LiquidacionProveedor.numero_liquidacion.like(f"%{d_val}%"),
-                    LiquidacionProveedor.numero_liquidacion.like(f"%-{num_val}")
-                )
+                or_(*condiciones)
             ).order_by(LiquidacionProveedor.id.desc())
         )
         liq = res.scalars().first()
@@ -1075,6 +1087,154 @@ async def get_ajustes_liquidacion(
             "fecha_registro": a.fecha_registro,
             "usuario": a.usuario,
             "motivo": a.motivo,
+            "estado": a.estado,
+        }
+        for a in res.scalars().all()
+    ]
+
+
+@router.post("/{proveedor_id}/ajustar-saldo")
+async def ajustar_saldo_proveedor_endpoint(
+    proveedor_id: int,
+    req: AjusteSaldoRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+):
+    """
+    Ajusta administrativamente el saldo de un proveedor sin inventar pagos en efectivo
+    ni alterar ventas o inventario. Permite dejar el saldo en $0 o en un valor específico.
+    """
+    # 1. Seguridad: Verificar que sea rol administrador
+    rol_user = str(current_user.rol or "").lower()
+    if rol_user not in ("administrador", "admin", "gerente"):
+        raise HTTPException(status_code=403, detail="Operación restringida: Solo el Administrador puede ajustar saldos.")
+
+    motivo = str(req.motivo or "").strip()
+    if len(motivo) < 5:
+        raise HTTPException(status_code=400, detail="Debe especificar un motivo detallado para el ajuste (mínimo 5 caracteres).")
+
+    nuevo_saldo = max(0.0, round(float(req.nuevo_saldo or 0.0), 2))
+
+    res_p = await db.execute(select(Proveedor).where(Proveedor.id == proveedor_id))
+    prov = res_p.scalar_one_or_none()
+    if not prov:
+        raise HTTPException(status_code=404, detail=f"Proveedor con ID {proveedor_id} no encontrado.")
+
+    # 2. Obtener cuentas por pagar activas
+    res_cxp = await db.execute(
+        select(CuentaPorPagar)
+        .where(
+            CuentaPorPagar.proveedor_id == proveedor_id,
+            CuentaPorPagar.estado != "Anulada"
+        )
+        .order_by(CuentaPorPagar.id.desc())
+    )
+    cxps = res_cxp.scalars().all()
+
+    saldo_anterior = round(sum(float(c.saldo_pendiente or 0.0) for c in cxps), 2)
+    if not cxps and float(prov.saldo_acumulado or 0.0) > 0:
+        saldo_anterior = round(float(prov.saldo_acumulado), 2)
+
+    monto_ajuste = round(saldo_anterior - nuevo_saldo, 2)
+    if abs(monto_ajuste) < 0.01:
+        return {
+            "exito": True,
+            "ok": True,
+            "mensaje": f"El proveedor ya tiene el saldo indicado (${saldo_anterior:,.0f} COP).",
+            "saldo_anterior": saldo_anterior,
+            "monto_ajuste": 0.0,
+            "saldo_final": saldo_anterior
+        }
+
+    ahora = datetime.now()
+    f_str = ahora.strftime("%Y-%m-%d")
+    h_str = ahora.strftime("%H:%M:%S")
+    num_ajuste = f"AS-PROV-{ahora.strftime('%Y%m%d%H%M%S')}-{proveedor_id}"
+    user_nom = req.usuario or current_user.nombre or "Administrador"
+
+    # 3. Actualizar cuentas por pagar
+    if req.tipo_ajuste == "AJUSTAR_A_CERO" or nuevo_saldo == 0.0:
+        for c in cxps:
+            c.saldo_pendiente = 0.0
+            c.estado = "Pagada"
+    else:
+        # Ajustar a valor específico
+        if monto_ajuste > 0:
+            remanente = monto_ajuste
+            for c in cxps:
+                if remanente <= 0.001:
+                    break
+                s_c = float(c.saldo_pendiente or 0.0)
+                descuento = min(remanente, s_c)
+                c.saldo_pendiente = round(s_c - descuento, 2)
+                if c.saldo_pendiente <= 0.001:
+                    c.estado = "Pagada"
+                else:
+                    c.estado = "Abonada"
+                remanente = round(remanente - descuento, 2)
+
+    # 4. Actualizar saldo acumulado del proveedor
+    prov.saldo_acumulado = nuevo_saldo
+
+    # 5. Registrar en ajustes_saldos_proveedores
+    ajuste_reg = AjusteSaldoProveedor(
+        numero_ajuste=num_ajuste,
+        proveedor_id=proveedor_id,
+        proveedor_nombre=prov.nombre,
+        tipo_ajuste=req.tipo_ajuste,
+        saldo_anterior=saldo_anterior,
+        monto_ajuste=monto_ajuste,
+        saldo_final=nuevo_saldo,
+        motivo=motivo,
+        usuario=user_nom,
+        fecha=f_str,
+        hora=h_str,
+        estado="Aplicado"
+    )
+    db.add(ajuste_reg)
+
+    await db.commit()
+    await db.refresh(prov)
+
+    return {
+        "exito": True,
+        "ok": True,
+        "numero_ajuste": num_ajuste,
+        "proveedor_id": proveedor_id,
+        "proveedor_nombre": prov.nombre,
+        "tipo_ajuste": req.tipo_ajuste,
+        "saldo_anterior": saldo_anterior,
+        "monto_ajuste": monto_ajuste,
+        "saldo_final": nuevo_saldo,
+        "mensaje": f"Saldo de '{prov.nombre}' ajustado exitosamente de ${saldo_anterior:,.0f} a ${nuevo_saldo:,.0f} COP."
+    }
+
+
+@router.get("/{proveedor_id}/ajustes-saldos")
+async def get_ajustes_saldos_proveedor(
+    proveedor_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    res = await db.execute(
+        select(AjusteSaldoProveedor)
+        .where(AjusteSaldoProveedor.proveedor_id == proveedor_id)
+        .order_by(AjusteSaldoProveedor.id.desc())
+    )
+    return [
+        {
+            "id": a.id,
+            "numero_ajuste": a.numero_ajuste,
+            "proveedor_id": a.proveedor_id,
+            "proveedor_nombre": a.proveedor_nombre,
+            "tipo_ajuste": a.tipo_ajuste,
+            "saldo_anterior": float(a.saldo_anterior or 0.0),
+            "monto_ajuste": float(a.monto_ajuste or 0.0),
+            "saldo_final": float(a.saldo_final or 0.0),
+            "motivo": a.motivo,
+            "usuario": a.usuario,
+            "fecha": a.fecha,
+            "hora": a.hora,
             "estado": a.estado,
         }
         for a in res.scalars().all()

@@ -76,3 +76,22 @@ class AuditoriaLiquidacion(Base):
     motivo = Column(String, nullable=False)
     fecha_registro = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AjusteSaldoProveedor(Base):
+    __tablename__ = "ajustes_saldos_proveedores"
+    id = Column(Integer, primary_key=True, index=True)
+    numero_ajuste = Column(String, unique=True, index=True, nullable=False)
+    proveedor_id = Column(Integer, ForeignKey("proveedores.id"), nullable=False, index=True)
+    proveedor_nombre = Column(String, nullable=False)
+    tipo_ajuste = Column(String, nullable=False)  # 'AJUSTAR_A_CERO' o 'VALOR_ESPECIFICO'
+    saldo_anterior = Column(Float, nullable=False)
+    monto_ajuste = Column(Float, nullable=False)
+    saldo_final = Column(Float, nullable=False)
+    motivo = Column(String, nullable=False)
+    usuario = Column(String, nullable=False)
+    fecha = Column(String, nullable=False, index=True)
+    hora = Column(String, nullable=False)
+    estado = Column(String, default="Aplicado")
+    idempotency_key = Column(String, unique=True, index=True, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -64,7 +64,10 @@ try:
         obtener_historial_ajustes_proveedor,
         buscar_liquidacion_proveedor_flexible,
         normalizar_fecha,
-        normalizar_hora
+        normalizar_hora,
+        ajustar_saldo_deuda_proveedor_db,
+        obtener_historial_ajustes_saldos_proveedor,
+        obtener_detalle_proveedor_completo
     )
 except ImportError:
     from proveedores_manager import (
@@ -80,7 +83,10 @@ except ImportError:
         obtener_historial_ajustes_proveedor,
         buscar_liquidacion_proveedor_flexible,
         normalizar_fecha,
-        normalizar_hora
+        normalizar_hora,
+        ajustar_saldo_deuda_proveedor_db,
+        obtener_historial_ajustes_saldos_proveedor,
+        obtener_detalle_proveedor_completo
     )
 
 
@@ -1239,6 +1245,12 @@ def iniciar_nomina(parent_pid="", parent=None):
         font=("Segoe UI", 9, "italic"), bg=t["bg_app"], fg=t["text_secondary"]
     )
     lbl_prov_doc.pack(side="left", padx=10)
+
+    btn_ajuste_resumen = crear_boton(
+        card_resumen_top, text="⚖️ Corregir Saldo", command=lambda: abrir_dialogo_ajustar_saldo(),
+        bg="#4F46E5", fg="white", hover_bg="#4338CA", font=("Segoe UI", 9, "bold"), padx=8, pady=3
+    )
+    btn_ajuste_resumen.pack(side="right", padx=6)
 
     # Mini tarjetas de métricas en fila
     card_metrics_row = tk.Frame(card_resumen, bg=t["bg_app"])
@@ -2630,6 +2642,388 @@ def iniciar_nomina(parent_pid="", parent=None):
         )
         btn_submit_mas.pack(side="right", padx=6)
 
+    # -------------------------------------------------------------------------
+    # MODAL ADMINISTRATIVO: AJUSTAR DEUDA / CORREGIR SALDO
+    # -------------------------------------------------------------------------
+    def abrir_dialogo_ajustar_saldo():
+        todos_provs = obtener_resumen_proveedores()
+        if not todos_provs:
+            messagebox.showwarning("Atención", "No hay proveedores registrados en el sistema.", parent=ventana)
+            return
+
+        id_sel_inicial = obtener_id_proveedor_seleccionado()
+
+        dlg_aj = tk.Toplevel(ventana)
+        dlg_aj.title("⚖️ Ajustar Deuda / Corregir Saldo — Pagos a Proveedores")
+        dlg_aj.transient(ventana)
+        dlg_aj.grab_set()
+        dlg_aj.configure(bg=t["bg_app"])
+        calcular_geometria_segura(dlg_aj, 720, 730, min_w=640, min_h=620)
+
+        # 1. Encabezado
+        f_top_aj = tk.Frame(dlg_aj, bg="#4338CA", padx=16, pady=12)
+        f_top_aj.pack(fill="x")
+        tk.Label(
+            f_top_aj, text="⚖️ AJUSTE ADMINISTRATIVO DE SALDO — PROVEEDORES",
+            font=("Segoe UI", 12, "bold"), fg="white", bg="#4338CA"
+        ).pack(anchor="w")
+        tk.Label(
+            f_top_aj, text="Corrección autorizada de saldos y cuentas por pagar sin salida de efectivo ni modificación de ventas",
+            font=("Segoe UI", 9), fg="#E0E7FF", bg="#4338CA"
+        ).pack(anchor="w", pady=(2, 0))
+
+        body_aj = tk.Frame(dlg_aj, bg=t["bg_app"], padx=14, pady=10)
+        body_aj.pack(fill="both", expand=True)
+
+        # 2. Selector de Proveedor
+        f_sel_prov = tk.Frame(body_aj, bg=t["bg_surface"], bd=1, relief="solid", padx=10, pady=8)
+        f_sel_prov.pack(fill="x", pady=(0, 10))
+
+        tk.Label(
+            f_sel_prov, text="🏢 Proveedor a Corregir:",
+            font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["primary"]
+        ).pack(side="left", padx=(0, 8))
+
+        mapa_provs = {}
+        nombres_provs = []
+        indice_inicial = 0
+        for idx, p in enumerate(todos_provs):
+            label_p = f"{p['nombre']} (ID: {p['id']}) — Saldo: {_fmt_cop(p.get('saldo_pendiente', 0.0))}"
+            nombres_provs.append(label_p)
+            mapa_provs[idx] = p
+            if id_sel_inicial and p["id"] == id_sel_inicial:
+                indice_inicial = idx
+
+        combo_sel_p = ttk.Combobox(f_sel_prov, values=nombres_provs, state="readonly", font=("Segoe UI", 10), width=48)
+        combo_sel_p.pack(side="left", fill="x", expand=True, padx=4)
+        if nombres_provs:
+            combo_sel_p.current(indice_inicial)
+
+        # 3. Tarjetas de Métricas del Proveedor
+        f_metricas_aj = tk.Frame(body_aj, bg=t["bg_app"])
+        f_metricas_aj.pack(fill="x", pady=(0, 10))
+
+        def _crear_card_aj(parent, titulo, valor_ini, color_fg=None):
+            f = tk.Frame(parent, bg=t["bg_surface"], bd=1, relief="ridge", padx=8, pady=6)
+            f.pack(side="left", fill="both", expand=True, padx=3)
+            tk.Label(f, text=titulo, font=("Segoe UI", 8), bg=t["bg_surface"], fg=t["text_secondary"]).pack(anchor="w")
+            lbl_val = tk.Label(f, text=valor_ini, font=("Segoe UI", 11, "bold"), bg=t["bg_surface"], fg=color_fg or t["text_primary"])
+            lbl_val.pack(anchor="w", pady=(2, 0))
+            return lbl_val
+
+        lbl_card_nom = _crear_card_aj(f_metricas_aj, "Proveedor / NIT", "-", t["primary"])
+        lbl_card_ven = _crear_card_aj(f_metricas_aj, "Total Ventas Reg.", "$0 COP", t["text_primary"])
+        lbl_card_pag = _crear_card_aj(f_metricas_aj, "Total Pagado", "$0 COP", t["success"])
+        lbl_card_sal = _crear_card_aj(f_metricas_aj, "Saldo Pendiente", "$0 COP", t["danger"])
+
+        # 4. Cuaderno de Sub-Pestañas (Configuración / Historial Liquidaciones / Historial Ajustes)
+        notebook_aj = ttk.Notebook(body_aj)
+        notebook_aj.pack(fill="both", expand=True, pady=(0, 8))
+
+        sub_config = tk.Frame(notebook_aj, bg=t["bg_app"], padx=10, pady=8)
+        sub_hist_liq = tk.Frame(notebook_aj, bg=t["bg_surface"], padx=6, pady=6)
+        sub_hist_aj = tk.Frame(notebook_aj, bg=t["bg_surface"], padx=6, pady=6)
+
+        notebook_aj.add(sub_config, text=" ⚙️ Configurar Corrección ")
+        notebook_aj.add(sub_hist_liq, text=" 📜 Historial de Liquidaciones ")
+        notebook_aj.add(sub_hist_aj, text=" ⚖️ Ajustes Anteriores ")
+
+        # --- Sub-Pestaña 1: Configurar Corrección ---
+        tipo_aj_var = tk.StringVar(value="AJUSTAR_A_CERO")
+
+        f_radios_aj = tk.Frame(sub_config, bg=t["bg_surface"], bd=1, relief="ridge", padx=12, pady=10)
+        f_radios_aj.pack(fill="x", pady=(0, 8))
+
+        tk.Label(
+            f_radios_aj, text="Seleccione la Operación Administrativa:",
+            font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["text_primary"]
+        ).pack(anchor="w", pady=(0, 6))
+
+        r_cero = ttk.Radiobutton(
+            f_radios_aj, text="A. Ajustar deuda a cero ($0 COP) — Recomendado si el saldo es por errores anteriores",
+            variable=tipo_aj_var, value="AJUSTAR_A_CERO"
+        )
+        r_cero.pack(anchor="w", pady=2)
+        tk.Label(
+            f_radios_aj,
+            text="   ℹ️ Deja el saldo pendiente en $0 COP cuando se comprueba que el valor es producto de errores anteriores y no representa una deuda real. NO genera egresos en efectivo.",
+            font=("Segoe UI", 8, "italic"), bg=t["bg_surface"], fg=t["text_secondary"], wraplength=580, justify="left"
+        ).pack(anchor="w", pady=(0, 6))
+
+        r_esp = ttk.Radiobutton(
+            f_radios_aj, text="B. Ajustar saldo a un valor específico",
+            variable=tipo_aj_var, value="VALOR_ESPECIFICO"
+        )
+        r_esp.pack(anchor="w", pady=2)
+
+        f_val_esp = tk.Frame(f_radios_aj, bg=t["bg_surface"])
+        f_val_esp.pack(fill="x", padx=20, pady=(2, 4))
+        tk.Label(f_val_esp, text="Nuevo Saldo Deseado (COP):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(side="left")
+        e_nuevo_saldo = ttk.Entry(f_val_esp, font=("Segoe UI", 10, "bold"), width=16)
+        e_nuevo_saldo.pack(side="left", padx=8)
+        e_nuevo_saldo.insert(0, "0")
+        e_nuevo_saldo.config(state="disabled")
+
+        # Tarjeta de Cálculo en Vivo
+        f_calc_box = tk.Frame(sub_config, bg=t["bg_surface"], bd=1, relief="solid", padx=12, pady=8)
+        f_calc_box.pack(fill="x", pady=(0, 8))
+
+        lbl_calc_ant = tk.Label(f_calc_box, text="• Saldo Anterior: $0 COP", font=("Segoe UI", 9), bg=t["bg_surface"], fg=t["text_primary"])
+        lbl_calc_ant.pack(anchor="w")
+        lbl_calc_dif = tk.Label(f_calc_box, text="• Monto de Ajuste: $0 COP", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg="#2563EB")
+        lbl_calc_dif.pack(anchor="w")
+        lbl_calc_fin = tk.Label(f_calc_box, text="• Saldo Final Resultante: $0 COP", font=("Segoe UI", 10, "bold"), bg=t["bg_surface"], fg=t["success"])
+        lbl_calc_fin.pack(anchor="w")
+
+        # Campos Obligatorios: Motivo y Contraseña Admin
+        f_form_sec = tk.Frame(sub_config, bg=t["bg_surface"], bd=1, relief="ridge", padx=12, pady=8)
+        f_form_sec.pack(fill="x", pady=(0, 4))
+
+        tk.Label(f_form_sec, text="Motivo de la Corrección (Obligatorio, mín. 5 caracteres):", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(anchor="w")
+        e_motivo_aj = ttk.Entry(f_form_sec, font=("Segoe UI", 9), width=70)
+        e_motivo_aj.pack(fill="x", pady=(2, 6))
+        e_motivo_aj.insert(0, "Corrección administrativa de saldo por error en liquidación previa")
+
+        f_pwd_row = tk.Frame(f_form_sec, bg=t["bg_surface"])
+        f_pwd_row.pack(fill="x", pady=(2, 2))
+        tk.Label(f_pwd_row, text="🔐 Contraseña de Administrador:", font=("Segoe UI", 9, "bold"), bg=t["bg_surface"], fg=t["text_primary"]).pack(side="left")
+        e_pwd_admin = ttk.Entry(f_pwd_row, font=("Segoe UI", 10), show="*", width=22)
+        e_pwd_admin.pack(side="left", padx=8)
+        tk.Label(f_pwd_row, text="(Requerido para autorizar)", font=("Segoe UI", 8, "italic"), bg=t["bg_surface"], fg=t["text_secondary"]).pack(side="left")
+
+        # --- Sub-Pestaña 2: Historial de Liquidaciones ---
+        cols_hl = ("Recibo", "Fecha", "Monto", "Método", "Saldo Ant.", "Saldo Rest.", "Estado")
+        tree_hist_aj_liq = ttk.Treeview(sub_hist_liq, columns=cols_hl, show="headings", height=8)
+        for col_h in cols_hl:
+            tree_hist_aj_liq.heading(col_h, text=col_h)
+            tree_hist_aj_liq.column(col_h, width=80, anchor="center")
+        tree_hist_aj_liq.column("Monto", width=95, anchor="e")
+        tree_hist_aj_liq.column("Saldo Ant.", width=90, anchor="e")
+        tree_hist_aj_liq.column("Saldo Rest.", width=90, anchor="e")
+        sc_hl_y = ttk.Scrollbar(sub_hist_liq, orient="vertical", command=tree_hist_aj_liq.yview)
+        tree_hist_aj_liq.configure(yscrollcommand=sc_hl_y.set)
+        tree_hist_aj_liq.pack(side="left", fill="both", expand=True)
+        sc_hl_y.pack(side="right", fill="y")
+
+        # --- Sub-Pestaña 3: Ajustes Anteriores ---
+        cols_ha = ("Nº Ajuste", "Fecha", "Hora", "Usuario", "Tipo", "Saldo Ant.", "Ajuste", "Saldo Fin.", "Motivo")
+        tree_aj_ant = ttk.Treeview(sub_hist_aj, columns=cols_ha, show="headings", height=8)
+        for col_a in cols_ha:
+            tree_aj_ant.heading(col_a, text=col_a)
+            tree_aj_ant.column(col_a, width=80, anchor="center")
+        tree_aj_ant.column("Motivo", width=180, anchor="w")
+        tree_aj_ant.column("Saldo Ant.", width=85, anchor="e")
+        tree_aj_ant.column("Ajuste", width=85, anchor="e")
+        tree_aj_ant.column("Saldo Fin.", width=85, anchor="e")
+        sc_ha_y = ttk.Scrollbar(sub_hist_aj, orient="vertical", command=tree_aj_ant.yview)
+        tree_aj_ant.configure(yscrollcommand=sc_ha_y.set)
+        tree_aj_ant.pack(side="left", fill="both", expand=True)
+        sc_ha_y.pack(side="right", fill="y")
+
+        # Botonera Inferior
+        f_btn_box_aj = tk.Frame(dlg_aj, bg=t["bg_surface_alt"], padx=14, pady=10)
+        f_btn_box_aj.pack(fill="x", side="bottom")
+
+        datos_prov_actual = {}
+
+        def _recalcular_preview_aj(*args):
+            s_ant = float(datos_prov_actual.get("saldo_pendiente", 0.0))
+            if tipo_aj_var.get() == "AJUSTAR_A_CERO":
+                s_fin = 0.0
+            else:
+                try:
+                    raw_txt = e_nuevo_saldo.get().strip().replace("$", "").replace(",", "")
+                    s_fin = max(0.0, float(raw_txt or 0.0))
+                except Exception:
+                    s_fin = 0.0
+
+            m_dif = round(s_ant - s_fin, 2)
+            lbl_calc_ant.config(text=f"• Saldo Anterior: {_fmt_cop(s_ant)}")
+            if m_dif > 0:
+                lbl_calc_dif.config(text=f"• Valor a Deducir/Corregir: -{_fmt_cop(m_dif)} (Condonación / Corrección administrativa)", fg="#2563EB")
+            elif m_dif < 0:
+                lbl_calc_dif.config(text=f"• Valor a Incrementar: +{_fmt_cop(abs(m_dif))} (Ajuste administrativo)", fg="#D97706")
+            else:
+                lbl_calc_dif.config(text="• Valor a Ajustar: $0 COP (Sin diferencia)", fg=t["text_secondary"])
+
+            lbl_calc_fin.config(text=f"• Saldo Final Resultante: {_fmt_cop(s_fin)}", fg=t["success"] if s_fin == 0 else t["primary"])
+
+        def on_tipo_aj_change(*args):
+            if tipo_aj_var.get() == "AJUSTAR_A_CERO":
+                e_nuevo_saldo.delete(0, "end")
+                e_nuevo_saldo.insert(0, "0")
+                e_nuevo_saldo.config(state="disabled")
+            else:
+                e_nuevo_saldo.config(state="normal")
+                e_nuevo_saldo.focus()
+            _recalcular_preview_aj()
+
+        r_cero.config(command=on_tipo_aj_change)
+        r_esp.config(command=on_tipo_aj_change)
+        e_nuevo_saldo.bind("<KeyRelease>", _recalcular_preview_aj)
+
+        def cargar_datos_proveedor_seleccionado(event=None):
+            idx = combo_sel_p.current()
+            if idx < 0 or idx not in mapa_provs:
+                return
+            p_sel = mapa_provs[idx]
+            p_id = p_sel["id"]
+
+            detalle = obtener_detalle_proveedor_completo(p_id)
+            if not detalle:
+                return
+
+            datos_prov_actual.clear()
+            datos_prov_actual.update(detalle)
+
+            lbl_card_nom.config(text=f"{detalle['nombre']}\nNIT: {detalle.get('documento_nit') or 'N/A'}")
+            lbl_card_ven.config(text=_fmt_cop(detalle.get("total_ventas", 0.0)))
+            lbl_card_pag.config(text=_fmt_cop(detalle.get("total_pagado", 0.0)))
+            s_act = float(detalle.get("saldo_pendiente", 0.0))
+            lbl_card_sal.config(text=_fmt_cop(s_act), fg=t["danger"] if s_act > 0 else t["success"])
+
+            # Cargar árbol de liquidaciones
+            for item in tree_hist_aj_liq.get_children():
+                tree_hist_aj_liq.delete(item)
+            for liq in detalle.get("historial_liquidaciones", []):
+                rec = liq.get("numero_recibo") or f"LP-{liq.get('id', 0):04d}"
+                f_liq = liq.get("fecha") or liq.get("fecha_pago") or ""
+                m_liq = float(liq.get("monto_liquidado") or liq.get("monto_pagado") or 0.0)
+                tree_hist_aj_liq.insert("", "end", values=(
+                    rec,
+                    f_liq,
+                    _fmt_cop(m_liq),
+                    liq.get("metodo_pago", "Efectivo"),
+                    _fmt_cop(liq.get("saldo_anterior", 0.0)),
+                    _fmt_cop(liq.get("saldo_restante", 0.0)),
+                    liq.get("estado", "Aplicada")
+                ))
+
+            # Cargar árbol de ajustes
+            for item in tree_aj_ant.get_children():
+                tree_aj_ant.delete(item)
+            for aj in detalle.get("historial_ajustes", []):
+                tree_aj_ant.insert("", "end", values=(
+                    aj.get("numero_ajuste", ""),
+                    aj.get("fecha", ""),
+                    aj.get("hora", ""),
+                    aj.get("usuario", "Admin"),
+                    aj.get("tipo_ajuste", ""),
+                    _fmt_cop(aj.get("saldo_anterior", 0.0)),
+                    _fmt_cop(aj.get("monto_ajuste", 0.0)),
+                    _fmt_cop(aj.get("saldo_final", 0.0)),
+                    aj.get("motivo", "")
+                ))
+
+            _recalcular_preview_aj()
+
+        combo_sel_p.bind("<<ComboboxSelected>>", cargar_datos_proveedor_seleccionado)
+        cargar_datos_proveedor_seleccionado()
+
+        def _ejecutar_ajuste_administrativo():
+            p_id = datos_prov_actual.get("id")
+            p_nom = datos_prov_actual.get("nombre")
+            if not p_id:
+                messagebox.showwarning("Atención", "Debe seleccionar un proveedor válido.", parent=dlg_aj)
+                return
+
+            motivo_txt = e_motivo_aj.get().strip()
+            if len(motivo_txt) < 5:
+                messagebox.showwarning("Atención", "El motivo de la corrección es obligatorio y debe tener al menos 5 caracteres.", parent=dlg_aj)
+                e_motivo_aj.focus_set()
+                return
+
+            pwd_admin = e_pwd_admin.get()
+            if not pwd_admin:
+                messagebox.showwarning("Seguridad Requerida", "Debe ingresar su contraseña de Administrador para autorizar el ajuste.", parent=dlg_aj)
+                e_pwd_admin.focus_set()
+                return
+
+            t_aj = tipo_aj_var.get()
+            s_ant = float(datos_prov_actual.get("saldo_pendiente", 0.0))
+            if t_aj == "AJUSTAR_A_CERO":
+                s_fin = 0.0
+            else:
+                try:
+                    s_fin = max(0.0, float(e_nuevo_saldo.get().strip().replace("$", "").replace(",", "") or 0.0))
+                except Exception:
+                    messagebox.showerror("Error", "El nuevo saldo ingresado no es un número válido.", parent=dlg_aj)
+                    e_nuevo_saldo.focus_set()
+                    return
+
+            m_aj = round(s_ant - s_fin, 2)
+            if abs(m_aj) < 0.01:
+                messagebox.showinfo("Sin Cambios", f"El proveedor '{p_nom}' ya cuenta con un saldo de {_fmt_cop(s_ant)}.", parent=dlg_aj)
+                return
+
+            # Cuadro de confirmación detallado
+            confirm_msg = (
+                f"⚠️ CONFIRMACIÓN DE AJUSTE ADMINISTRATIVO DE SALDO\n\n"
+                f"• Proveedor: {p_nom} (ID: {p_id})\n"
+                f"• Operación: {'Ajustar deuda a cero ($0 COP)' if t_aj == 'AJUSTAR_A_CERO' else 'Establecer saldo específico'}\n\n"
+                f"  - Saldo Anterior: {_fmt_cop(s_ant)}\n"
+                f"  - Valor a Ajustar: {'-' if m_aj > 0 else '+'}{_fmt_cop(abs(m_aj))}\n"
+                f"  - Saldo Final Resultante: {_fmt_cop(s_fin)}\n\n"
+                f"• Motivo: {motivo_txt}\n"
+                f"• Autorizado por: Administrador\n\n"
+                f"¿Confirma que desea aplicar este ajuste en la base de datos?\n"
+                f"Esta operación NO generará salidas de efectivo en caja ni afectará el inventario."
+            )
+
+            if not messagebox.askyesno("Confirmar Corrección de Saldo", confirm_msg, parent=dlg_aj):
+                return
+
+            btn_aplicar.config(state="disabled", text="⏳ Aplicando...")
+            dlg_aj.update_idletasks()
+
+            res = ajustar_saldo_deuda_proveedor_db(
+                proveedor_id=p_id,
+                tipo_ajuste=t_aj,
+                nuevo_saldo=s_fin,
+                motivo=motivo_txt,
+                usuario_admin="Administrador",
+                password_admin=pwd_admin
+            )
+
+            if res.get("exito") or res.get("ok"):
+                messagebox.showinfo(
+                    "✅ Saldo Corregido Exitosamente",
+                    f"Ajuste {res.get('numero_ajuste', '')} aplicado con éxito.\n\n"
+                    f"• Proveedor: {p_nom}\n"
+                    f"• Saldo Anterior: {_fmt_cop(res.get('saldo_anterior', s_ant))}\n"
+                    f"• Saldo Final: {_fmt_cop(res.get('saldo_final', s_fin))}\n\n"
+                    f"La base de datos activa ha sido actualizada.",
+                    parent=ventana
+                )
+                dlg_aj.destroy()
+                cargar_proveedores()
+                id_act = obtener_id_proveedor_seleccionado()
+                if id_act:
+                    cargar_detalle_cuentas_prov(id_act)
+                    on_proveedor_seleccionado()
+            else:
+                messagebox.showerror(
+                    "No se pudo aplicar el ajuste",
+                    f"{res.get('mensaje')}",
+                    parent=dlg_aj
+                )
+                btn_aplicar.config(state="normal", text="💾 APLICAR AJUSTE DE SALDO")
+                e_pwd_admin.delete(0, "end")
+                e_pwd_admin.focus_set()
+
+        crear_boton(
+            f_btn_box_aj, text="Cancelar", command=dlg_aj.destroy,
+            bg=t["bg_app"], fg=t["text_primary"], hover_bg="#CBD5E1",
+            font=("Segoe UI", 10), padx=14, pady=6
+        ).pack(side="right", padx=6)
+
+        btn_aplicar = crear_boton(
+            f_btn_box_aj, text="💾 APLICAR AJUSTE DE SALDO", command=_ejecutar_ajuste_administrativo,
+            bg="#4F46E5", fg="white", hover_bg="#4338CA",
+            font=("Segoe UI", 10, "bold"), padx=18, pady=6
+        )
+        btn_aplicar.pack(side="right", padx=6)
+
     # Enlazar botones principales
     crear_boton(
         prov_actions_bar, text="💸 Liquidar / Abonar", command=abrir_dialogo_liquidacion,
@@ -2639,6 +3033,11 @@ def iniciar_nomina(parent_pid="", parent=None):
     crear_boton(
         prov_actions_bar, text="💰 DINERO DE MÁS", command=abrir_dialogo_dinero_de_mas,
         bg="#D97706", fg="white", hover_bg="#B45309", font=("Segoe UI", 10, "bold"), padx=12, pady=7
+    ).pack(side="left", padx=4)
+
+    crear_boton(
+        prov_actions_bar, text="⚖️ AJUSTAR DEUDA / CORREGIR SALDO", command=abrir_dialogo_ajustar_saldo,
+        bg="#4F46E5", fg="white", hover_bg="#4338CA", font=("Segoe UI", 10, "bold"), padx=12, pady=7
     ).pack(side="left", padx=4)
 
     crear_boton(

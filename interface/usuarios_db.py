@@ -506,7 +506,7 @@ def obtener_usuario_por_credenciales(usuario, password):
             f_reg = row.get("fecha_registro")
             com_pct = row.get("comision_porcentaje", 0.0)
             com_acum = row.get("comisiones_acumuladas", 0.0)
-            pass_guardada = row.get("password")
+            pass_guardada = row.get("password") or row.get("contrasena")
             nombre_u = row.get("nombre") or u_nom
             apell_u = row.get("apellidos", "")
             req_cambio = bool(row.get("requiere_cambio_password", 0))
