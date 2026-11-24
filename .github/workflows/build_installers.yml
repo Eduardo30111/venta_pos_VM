@@ -26,7 +26,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y python3-tk || true
           python -m pip install --upgrade pip
-          pip install httpx pydantic pydantic_settings fastapi uvicorn "sqlalchemy[asyncio]" greenlet aiosqlite asyncpg "python-jose[cryptography]" bcrypt python-multipart reportlab pillow
+          pip install httpx pydantic pydantic_settings fastapi uvicorn "sqlalchemy[asyncio]" greenlet aiosqlite asyncpg "python-jose[cryptography]" bcrypt passlib python-multipart reportlab pillow
 
       - name: Ejecutar suite completa de pruebas de backend, seguridad, E2E y respaldo
         run: |

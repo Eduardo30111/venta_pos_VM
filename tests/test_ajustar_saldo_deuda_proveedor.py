@@ -20,13 +20,17 @@ from interface.proveedores_manager import (
     obtener_historial_ajustes_saldos_proveedor,
     obtener_detalle_proveedor_completo
 )
-from interface.usuarios_db import conectar_usuarios_db
+from interface.usuarios_db import conectar_usuarios_db, crear_tablas_iniciales
 
 
 class TestAjustarSaldoDeudaProveedor(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         inicializar_base_datos()
+        try:
+            crear_tablas_iniciales()
+        except Exception:
+            pass
         import interface.proveedores_manager as pm
         pm.api = None
         try:

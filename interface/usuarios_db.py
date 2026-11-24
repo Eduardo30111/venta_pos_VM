@@ -148,6 +148,10 @@ def conectar_usuarios_db():
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA busy_timeout = 5000")
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='usuarios'")
+        if not cur.fetchone():
+            crear_tablas_iniciales()
     except Exception:
         pass
     return conn
